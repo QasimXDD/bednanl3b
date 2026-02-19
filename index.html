@@ -1,0 +1,141 @@
+﻿<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bedna NL3B Platform</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Changa:wght@600;700;800&family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="top-controls">
+    <label for="langSelect" id="langLabel">Language</label>
+    <select id="langSelect">
+      <option value="ar">العربية</option>
+      <option value="en">English</option>
+    </select>
+    <button id="soundToggle" class="sound-toggle" type="button">SFX: ON</button>
+  </div>
+
+  <div id="splash" class="splash">
+    <div class="orb orb-1"></div>
+    <div class="orb orb-2"></div>
+    <div class="splash-content">
+      <p class="label" id="splashLabel">WELCOME TO</p>
+      <h1>BEDNA NL3B</h1>
+      <p class="sub" id="splashSub">Game Server Portal</p>
+    </div>
+  </div>
+
+  <main id="app" class="app hidden">
+    <section id="authSection" class="panel auth-panel">
+      <h2 id="authTitle">Start Your Journey</h2>
+      <p class="muted" id="authDesc">Create a new account or sign in to your existing account</p>
+
+      <div class="tabs">
+        <button class="tab active" data-tab="register" id="tabRegister">Register</button>
+        <button class="tab" data-tab="login" id="tabLogin">Login</button>
+      </div>
+
+      <form id="authForm" class="form">
+        <label for="username" id="usernameLabel">Username</label>
+        <input id="username" name="username" type="text" minlength="3" required>
+
+        <label for="password" id="passwordLabel">Password</label>
+        <input id="password" name="password" type="password" minlength="4" required>
+
+        <button id="authBtn" class="btn" type="submit">Create Account</button>
+      </form>
+    </section>
+
+    <section id="lobbySection" class="panel hidden">
+      <div class="lobby-head">
+        <div>
+          <h2 id="lobbyTitle">Lobby</h2>
+          <p class="muted"><span id="welcomePrefix">Welcome</span> <span id="currentUser"></span></p>
+          <p class="muted" id="siteStatsText">Online: 0 | In Rooms: 0</p>
+        </div>
+        <div class="lobby-head-actions">
+          <button id="supervisorMenuToggle" class="btn btn-ghost supervisor-menu-toggle hidden" type="button" aria-controls="supervisorSidebar" aria-expanded="false" aria-label="Supervisor Menu" title="Supervisor Menu">☰</button>
+          <button id="logoutBtn" class="btn btn-ghost" type="button">Logout</button>
+        </div>
+      </div>
+
+      <div class="lobby-main">
+        <div class="lobby-grid">
+          <form id="createRoomForm" class="form box">
+            <h3 id="createRoomTitle">Create Room</h3>
+            <label for="roomName" id="roomNameLabel">Room Name</label>
+            <input id="roomName" name="roomName" type="text" maxlength="40" placeholder="Example: Tournament Room">
+            <button class="btn" type="submit" id="createRoomBtn">Create</button>
+          </form>
+
+          <form id="joinRoomForm" class="form box">
+            <h3 id="joinRoomTitle">Join by Invite Code</h3>
+            <label for="roomCode" id="roomCodeLabel">Room Code</label>
+            <input id="roomCode" name="roomCode" type="text" maxlength="6" placeholder="ABC123" required>
+            <button class="btn" type="submit" id="joinRoomBtn">Join</button>
+          </form>
+        </div>
+
+        <section class="box rooms-box">
+          <div class="rooms-box-head">
+            <h3 id="publicRoomsTitle">Available Rooms</h3>
+            <button id="refreshRoomsBtn" class="btn btn-ghost" type="button">Refresh</button>
+          </div>
+          <p class="muted" id="publicRoomsDesc">You can request to join any room, and the leader must approve.</p>
+          <div id="publicRoomsList" class="public-rooms-list"></div>
+        </section>
+      </div>
+
+      <div id="supervisorSidebarOverlay" class="supervisor-sidebar-overlay hidden" aria-hidden="true"></div>
+      <aside id="supervisorSidebar" class="supervisor-sidebar hidden" aria-hidden="true">
+        <div class="supervisor-sidebar-head">
+          <h3 id="supervisorSidebarTitle">Supervisor Panel</h3>
+          <button id="supervisorMenuCloseBtn" class="btn btn-ghost supervisor-menu-close-btn" type="button" aria-label="Close" title="Close">✕</button>
+        </div>
+        <div class="supervisor-sidebar-content">
+          <section id="supervisorUsersSection" class="box admin-users-box hidden">
+            <div class="rooms-box-head">
+              <h3 id="supervisorUsersTitle">All Accounts</h3>
+              <button id="supervisorUsersRefreshBtn" class="btn btn-ghost" type="button">Refresh</button>
+            </div>
+            <p class="muted" id="supervisorUsersDesc">Supervisor-only list of all site accounts.</p>
+            <div id="supervisorUsersList" class="public-rooms-list"></div>
+          </section>
+
+          <section id="supervisorAppealsSection" class="box rooms-box hidden">
+            <div class="rooms-box-head">
+              <h3 id="supervisorAppealsTitle">Unban Requests</h3>
+              <button id="supervisorAppealsRefreshBtn" class="btn btn-ghost" type="button">Refresh</button>
+            </div>
+            <p class="muted" id="supervisorAppealsDesc">Requests sent to the supervisor to remove bans.</p>
+            <div id="supervisorAppealsList" class="public-rooms-list"></div>
+          </section>
+        </div>
+      </aside>
+    </section>
+
+    <section id="bannedSection" class="panel banned-panel hidden">
+      <h2 id="bannedTitle">Account Suspended</h2>
+      <p class="muted" id="bannedDesc">This account is banned from the site.</p>
+      <div class="box">
+        <p class="muted" id="bannedReasonText">Reason: -</p>
+        <p class="muted" id="bannedDateText">Date: -</p>
+      </div>
+      <form id="appealForm" class="form box">
+        <label for="appealReason" id="appealReasonLabel">Reason for unban request</label>
+        <textarea id="appealReason" maxlength="500" rows="4" placeholder="Write why the ban should be removed..."></textarea>
+        <button class="btn" type="submit" id="appealSubmitBtn">Send Request</button>
+      </form>
+      <button id="bannedLogoutBtn" class="btn btn-ghost" type="button">Logout</button>
+    </section>
+  </main>
+
+  <div id="toastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
+  <script src="sound.js"></script>
+  <script src="script.js"></script>
+</body>
+</html>

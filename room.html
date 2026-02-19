@@ -1,0 +1,111 @@
+﻿<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Room</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Changa:wght@600;700;800&family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="top-controls">
+    <label for="langSelect" id="langLabel">Language</label>
+    <select id="langSelect">
+      <option value="ar">العربية</option>
+      <option value="en">English</option>
+    </select>
+    <button id="soundToggle" class="sound-toggle" type="button">SFX: ON</button>
+  </div>
+
+  <main class="app">
+    <section class="panel room-layout">
+      <header class="room-head">
+        <div>
+          <h2 id="roomName">Room</h2>
+          <p class="muted"><span id="codeLabel">Code</span>: <span id="roomCode"></span> | <span id="leaderLabel">Leader</span>: <span id="roomLeader"></span></p>
+          <p class="muted"><span id="youLabel">You</span>: <span id="meName"></span></p>
+        </div>
+        <div class="room-head-actions">
+          <button class="btn btn-ghost" type="button" id="openMyProfile">My Profile</button>
+          <a class="btn btn-ghost" href="/" id="backToLobby">Back to Lobby</a>
+        </div>
+      </header>
+
+      <div class="room-grid">
+        <section class="chat-box box">
+          <h3 id="chatTitle">Room Chat</h3>
+          <div id="chatMessages" class="chat-messages"></div>
+          <form id="chatForm" class="chat-form">
+            <input id="chatInput" type="text" maxlength="300" placeholder="Type your message..." required>
+            <button class="btn" type="submit" id="sendBtn">Send</button>
+          </form>
+        </section>
+
+        <aside class="players-box box">
+          <h3 id="playersTitle">Players</h3>
+          <p class="muted" id="roomMembersCountText">Inside room: 0</p>
+          <ul id="playersList" class="players-list"></ul>
+          <section id="pendingRequestsBox" class="pending-requests hidden">
+            <h4 id="pendingRequestsTitle">Join Requests</h4>
+            <div id="pendingRequestsList"></div>
+          </section>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <div id="joinRequestModal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <h3 id="joinModalTitle">Join Request</h3>
+      <p id="joinModalText" class="muted"></p>
+      <p id="joinModalTimer" class="muted"></p>
+      <div class="room-actions">
+        <button id="joinModalApprove" class="btn btn-approve" type="button">Approve</button>
+        <button id="joinModalReject" class="btn btn-reject" type="button">Reject</button>
+        <button id="joinModalClose" class="btn btn-ghost" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="profileModal" class="modal-overlay hidden">
+    <div class="modal-card profile-modal-card">
+      <h3 id="profileModalTitle">Profile</h3>
+      <div class="profile-top">
+        <img id="profileAvatar" class="profile-avatar" alt="avatar">
+        <div>
+          <p class="muted" id="profileUsername"></p>
+          <p class="muted" id="profileStatus"></p>
+          <p class="muted" id="profileCreatedAt"></p>
+        </div>
+      </div>
+      <div id="profileEditBox" class="profile-edit hidden">
+        <label for="profileDisplayNameInput" id="profileDisplayNameLabel">Display Name</label>
+        <input id="profileDisplayNameInput" type="text" maxlength="30">
+        <label for="profileAvatarInput" id="profileAvatarLabel">Profile Image</label>
+        <input id="profileAvatarInput" type="file" accept="image/png,image/jpeg,image/webp">
+        <div class="room-actions">
+          <button id="profileSaveBtn" class="btn" type="button">Save</button>
+          <button id="profileRemoveAvatarBtn" class="btn btn-ghost" type="button">Remove Image</button>
+        </div>
+      </div>
+      <div id="profileAdminBox" class="profile-edit hidden">
+        <label for="profileBanReasonInput" id="profileBanReasonLabel">Ban Reason</label>
+        <textarea id="profileBanReasonInput" rows="3" maxlength="300"></textarea>
+        <div class="room-actions">
+          <button id="profileBanBtn" class="btn btn-reject" type="button">Ban Account</button>
+          <button id="profileUnbanBtn" class="btn btn-approve" type="button">Unban Account</button>
+        </div>
+      </div>
+      <div class="room-actions">
+        <button id="profileCloseBtn" class="btn btn-ghost" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
+  <script src="sound.js"></script>
+  <script src="room.js"></script>
+</body>
+</html>
