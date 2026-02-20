@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" dir="ltr">
+<html lang="ar" dir="rtl">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,18 +7,18 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Changa:wght@600;700;800&family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=20260220q">
+  <link rel="stylesheet" href="styles.css?v=20260220r">
 </head>
 <body>
   <div class="top-controls">
     <label for="langSelect" id="langLabel">Language</label>
     <select id="langSelect">
-      <option value="ar">�������</option>
+      <option value="ar">العربية</option>
       <option value="en">English</option>
     </select>
     <button id="soundToggle" class="sound-toggle" type="button">SFX: ON</button>
   </div>
-  <button id="roomSupervisorToggle" class="btn btn-ghost supervisor-global-toggle hidden" type="button" aria-controls="roomSupervisorPanel" aria-expanded="false">���� ������</button>
+  <button id="roomSupervisorToggle" class="btn btn-ghost supervisor-global-toggle hidden" type="button" aria-controls="roomSupervisorPanel" aria-expanded="false">لوحة المشرف</button>
 
   <main class="app">
     <section class="panel room-layout">
@@ -68,7 +68,7 @@
                 <div id="chatReplyDraftLabel" class="chat-reply-draft-label"></div>
                 <div id="chatReplyDraftText" class="chat-reply-draft-text"></div>
               </div>
-              <button id="chatReplyCancelBtn" class="chat-reply-cancel-btn" type="button" aria-label="Cancel reply">?</button>
+              <button id="chatReplyCancelBtn" class="chat-reply-cancel-btn" type="button" aria-label="Cancel reply">×</button>
             </div>
             <input id="chatInput" type="text" maxlength="300" placeholder="Type your message...">
             <button class="btn" type="submit" id="sendBtn">Send</button>
@@ -90,7 +90,7 @@
 
   <div id="joinRequestModal" class="modal-overlay hidden">
     <div class="modal-card">
-      <button id="joinModalTopClose" class="modal-close-x" type="button" aria-label="Close">?</button>
+      <button id="joinModalTopClose" class="modal-close-x" type="button" aria-label="Close">×</button>
       <h3 id="joinModalTitle">Join Request</h3>
       <p id="joinModalText" class="muted"></p>
       <p id="joinModalTimer" class="muted"></p>
@@ -104,29 +104,29 @@
 
   <div id="selfKickJokeModal" class="modal-overlay hidden">
     <div class="modal-card">
-      <button id="selfKickJokeCloseBtn" class="modal-close-x" type="button" aria-label="Close">?</button>
-      <h3 id="selfKickJokeTitle">�����</h3>
-      <p id="selfKickJokeText" class="muted">�� ����� ��� ���� ���� ������</p>
+      <button id="selfKickJokeCloseBtn" class="modal-close-x" type="button" aria-label="Close">×</button>
+      <h3 id="selfKickJokeTitle">تنبيه</h3>
+      <p id="selfKickJokeText" class="muted">لا يمكنك طرد نفسك ايها الاحمق</p>
       <div class="room-actions">
-        <button id="selfKickJokeLobbyBtn" class="btn" type="button">������ ��� ������</button>
+        <button id="selfKickJokeLobbyBtn" class="btn" type="button">العودة إلى اللوبي</button>
       </div>
     </div>
   </div>
 
   <div id="kickSupervisorDeniedModal" class="modal-overlay hidden">
     <div class="modal-card">
-      <button id="kickSupervisorDeniedCloseBtn" class="modal-close-x" type="button" aria-label="Close">?</button>
-      <h3 id="kickSupervisorDeniedTitle">�����</h3>
-      <p id="kickSupervisorDeniedText" class="muted">�� ���� ��� ������ �� ������.</p>
+      <button id="kickSupervisorDeniedCloseBtn" class="modal-close-x" type="button" aria-label="Close">×</button>
+      <h3 id="kickSupervisorDeniedTitle">مرفوض</h3>
+      <p id="kickSupervisorDeniedText" class="muted">لا يمكن طرد المشرف من الغرفة.</p>
       <div class="room-actions">
-        <button id="kickSupervisorDeniedOkBtn" class="btn btn-ghost" type="button">�����</button>
+        <button id="kickSupervisorDeniedOkBtn" class="btn btn-ghost" type="button">إغلاق</button>
       </div>
     </div>
   </div>
 
   <div id="profileModal" class="modal-overlay hidden">
     <div class="modal-card profile-modal-card">
-      <button id="profileModalTopClose" class="modal-close-x" type="button" aria-label="Close">?</button>
+      <button id="profileModalTopClose" class="modal-close-x" type="button" aria-label="Close">×</button>
       <h3 id="profileModalTitle">Profile</h3>
       <div class="profile-top">
         <img id="profileAvatar" class="profile-avatar" alt="avatar">
@@ -165,7 +165,7 @@
     <div class="supervisor-sidebar-head">
       <h3 id="roomSupervisorTitle">Supervisor Panel</h3>
       <div class="supervisor-head-actions">
-        <button id="roomSupervisorClose" class="btn btn-ghost supervisor-menu-close-btn" type="button">?</button>
+        <button id="roomSupervisorClose" class="btn btn-ghost supervisor-menu-close-btn" type="button">×</button>
       </div>
     </div>
     <div class="supervisor-tabs-wrap">
