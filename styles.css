@@ -44,7 +44,8 @@ body {
   line-height: 1.45;
   position: relative;
   isolation: isolate;
-  overflow-x: hidden;
+  min-width: 1200px;
+  overflow-x: auto;
   background:
     radial-gradient(circle at 10% 14%, rgba(39, 95, 255, 0.2), transparent 34%),
     radial-gradient(circle at 86% 18%, rgba(0, 204, 255, 0.16), transparent 36%),
@@ -2112,7 +2113,7 @@ ul {
   }
 }
 
-@media (max-width: 860px) {
+@media (max-width: 0px) {
   .lobby-shell {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -2169,7 +2170,7 @@ ul {
 
 }
 
-@media (max-width: 640px) {
+@media (max-width: 0px) {
   .panel {
     padding: 1rem;
     border-radius: 18px;
