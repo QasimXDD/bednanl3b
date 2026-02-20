@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Owner avatar placeholder">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0e1b3a"/>
+      <stop offset="100%" stop-color="#071122"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f6f7fb"/>
+      <stop offset="100%" stop-color="#9fb3da"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="128" fill="url(#bg)"/>
+  <circle cx="128" cy="128" r="119" fill="none" stroke="url(#ring)" stroke-width="10"/>
+  <circle cx="128" cy="102" r="44" fill="#9cb0d8"/>
+  <path d="M56 208c14-34 39-52 72-52s58 18 72 52" fill="#8ea2ca"/>
+  <text x="128" y="247" text-anchor="middle" font-size="34" font-family="Tajawal, Arial, sans-serif" fill="#dfe9ff">Q.</text>
+</svg>

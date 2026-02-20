@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Changa:wght@600;700;800&family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=20260220n">
 </head>
 <body>
   <div class="top-controls">
@@ -18,6 +18,7 @@
     </select>
     <button id="soundToggle" class="sound-toggle" type="button">SFX: ON</button>
   </div>
+  <button id="roomSupervisorToggle" class="btn btn-ghost supervisor-global-toggle hidden" type="button" aria-controls="roomSupervisorPanel" aria-expanded="false">لوحة المشرف</button>
 
   <main class="app">
     <section class="panel room-layout">
@@ -34,11 +35,42 @@
       </header>
 
       <div class="room-grid">
+        <section class="video-box box">
+          <div class="video-box-head">
+            <h3 id="videoTitle">Room Video</h3>
+            <p id="videoStatusText" class="muted">No video uploaded yet.</p>
+          </div>
+          <div class="video-player-frame controls-visible" id="videoPlayerFrame">
+            <video id="roomVideoPlayer" class="room-video-player" playsinline preload="metadata" disablepictureinpicture disableremoteplayback></video>
+            <div id="videoControlsBar" class="video-controls-bar">
+              <button id="videoPlayPauseBtn" class="btn btn-ghost video-control-btn" type="button">Play</button>
+              <input id="videoSeekRange" class="video-seek-range" type="range" min="0" max="1000" step="1" value="0" aria-label="Video progress">
+              <span id="videoTimeText" class="video-time-text">00:00 / 00:00</span>
+              <button id="videoFullscreenBtn" class="btn btn-ghost video-control-btn" type="button">Fullscreen</button>
+            </div>
+          </div>
+          <p id="videoHintText" class="muted video-hint">Only the room leader can upload and sync video.</p>
+          <div id="videoLeaderTools" class="video-leader-tools hidden">
+            <label for="videoFileInput" id="videoFileLabel">Choose video from device</label>
+            <input id="videoFileInput" type="file" accept="video/mp4,video/webm,video/ogg">
+            <div class="room-actions">
+              <button id="videoUploadBtn" class="btn" type="button">Upload Video</button>
+            </div>
+          </div>
+        </section>
+
         <section class="chat-box box">
           <h3 id="chatTitle">Room Chat</h3>
           <div id="chatMessages" class="chat-messages"></div>
-          <form id="chatForm" class="chat-form">
-            <input id="chatInput" type="text" maxlength="300" placeholder="Type your message..." required>
+          <form id="chatForm" class="chat-form" novalidate>
+            <div id="chatReplyDraft" class="chat-reply-draft hidden">
+              <div class="chat-reply-draft-body">
+                <div id="chatReplyDraftLabel" class="chat-reply-draft-label"></div>
+                <div id="chatReplyDraftText" class="chat-reply-draft-text"></div>
+              </div>
+              <button id="chatReplyCancelBtn" class="chat-reply-cancel-btn" type="button" aria-label="Cancel reply">✕</button>
+            </div>
+            <input id="chatInput" type="text" maxlength="300" placeholder="Type your message...">
             <button class="btn" type="submit" id="sendBtn">Send</button>
           </form>
         </section>
@@ -58,6 +90,7 @@
 
   <div id="joinRequestModal" class="modal-overlay hidden">
     <div class="modal-card">
+      <button id="joinModalTopClose" class="modal-close-x" type="button" aria-label="Close">✕</button>
       <h3 id="joinModalTitle">Join Request</h3>
       <p id="joinModalText" class="muted"></p>
       <p id="joinModalTimer" class="muted"></p>
@@ -69,8 +102,31 @@
     </div>
   </div>
 
+  <div id="selfKickJokeModal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <button id="selfKickJokeCloseBtn" class="modal-close-x" type="button" aria-label="Close">✕</button>
+      <h3 id="selfKickJokeTitle">تنبيه</h3>
+      <p id="selfKickJokeText" class="muted">لا يمكنك طرد نفسك ايها الاحمق</p>
+      <div class="room-actions">
+        <button id="selfKickJokeLobbyBtn" class="btn" type="button">العودة إلى اللوبي</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="kickSupervisorDeniedModal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <button id="kickSupervisorDeniedCloseBtn" class="modal-close-x" type="button" aria-label="Close">✕</button>
+      <h3 id="kickSupervisorDeniedTitle">مرفوض</h3>
+      <p id="kickSupervisorDeniedText" class="muted">لا يمكن طرد المشرف من الغرفة.</p>
+      <div class="room-actions">
+        <button id="kickSupervisorDeniedOkBtn" class="btn btn-ghost" type="button">إغلاق</button>
+      </div>
+    </div>
+  </div>
+
   <div id="profileModal" class="modal-overlay hidden">
     <div class="modal-card profile-modal-card">
+      <button id="profileModalTopClose" class="modal-close-x" type="button" aria-label="Close">✕</button>
       <h3 id="profileModalTitle">Profile</h3>
       <div class="profile-top">
         <img id="profileAvatar" class="profile-avatar" alt="avatar">
@@ -104,8 +160,51 @@
     </div>
   </div>
 
+  <div id="roomSupervisorOverlay" class="supervisor-sidebar-overlay hidden" aria-hidden="true"></div>
+  <section id="roomSupervisorPanel" class="supervisor-sidebar hidden" aria-hidden="true">
+    <div class="supervisor-sidebar-head">
+      <h3 id="roomSupervisorTitle">Supervisor Panel</h3>
+      <div class="supervisor-head-actions">
+        <button id="roomSupervisorClose" class="btn btn-ghost supervisor-menu-close-btn" type="button">✕</button>
+      </div>
+    </div>
+    <div class="supervisor-tabs-wrap">
+      <button id="roomTabAnnouncement" class="supervisor-tab-btn active" type="button">Global Message</button>
+      <button id="roomTabUsers" class="supervisor-tab-btn" type="button">All Accounts</button>
+      <button id="roomTabAppeals" class="supervisor-tab-btn" type="button">Unban Requests</button>
+    </div>
+    <div class="supervisor-sidebar-content">
+      <section id="roomAnnouncementSection" class="box rooms-box">
+        <div class="rooms-box-head">
+          <h3 id="roomAnnouncementTitle">Global Message</h3>
+        </div>
+        <p class="muted" id="roomAnnouncementDesc">Show a forced message to all users for 10 seconds.</p>
+        <textarea id="roomAnnouncementInput" maxlength="500" rows="4" placeholder="Write the global message..."></textarea>
+        <button id="roomAnnouncementSend" class="btn" type="button">Send Message</button>
+      </section>
+
+      <section id="roomUsersSection" class="box admin-users-box">
+        <div class="rooms-box-head">
+          <h3 id="roomUsersTitle">All Accounts</h3>
+          <button id="roomUsersRefresh" class="btn btn-ghost" type="button">Refresh</button>
+        </div>
+        <p class="muted" id="roomUsersDesc">All registered accounts (online first).</p>
+        <div id="roomUsersList" class="public-rooms-list"></div>
+      </section>
+
+      <section id="roomAppealsSection" class="box rooms-box">
+        <div class="rooms-box-head">
+          <h3 id="roomAppealsTitle">Unban Requests</h3>
+          <button id="roomAppealsRefresh" class="btn btn-ghost" type="button">Refresh</button>
+        </div>
+        <p class="muted" id="roomAppealsDesc">Users' requests to remove site bans.</p>
+        <div id="roomAppealsList" class="public-rooms-list"></div>
+      </section>
+    </div>
+  </section>
+
   <div id="toastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
   <script src="sound.js"></script>
-  <script src="room.js"></script>
+  <script src="room.js?v=20260220n"></script>
 </body>
 </html>

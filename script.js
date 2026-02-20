@@ -22,11 +22,19 @@ const supervisorMenuCloseBtn = document.getElementById("supervisorMenuCloseBtn")
 const supervisorSidebar = document.getElementById("supervisorSidebar");
 const supervisorSidebarOverlay = document.getElementById("supervisorSidebarOverlay");
 const supervisorSidebarTitle = document.getElementById("supervisorSidebarTitle");
+const supervisorTabAnnouncement = document.getElementById("supervisorTabAnnouncement");
+const supervisorTabUsers = document.getElementById("supervisorTabUsers");
+const supervisorTabAppeals = document.getElementById("supervisorTabAppeals");
 const supervisorAppealsSection = document.getElementById("supervisorAppealsSection");
 const supervisorAppealsTitle = document.getElementById("supervisorAppealsTitle");
 const supervisorAppealsRefreshBtn = document.getElementById("supervisorAppealsRefreshBtn");
 const supervisorAppealsDesc = document.getElementById("supervisorAppealsDesc");
 const supervisorAppealsList = document.getElementById("supervisorAppealsList");
+const supervisorAnnouncementSection = document.getElementById("supervisorAnnouncementSection");
+const supervisorAnnouncementTitle = document.getElementById("supervisorAnnouncementTitle");
+const supervisorAnnouncementDesc = document.getElementById("supervisorAnnouncementDesc");
+const supervisorAnnouncementInput = document.getElementById("supervisorAnnouncementInput");
+const supervisorAnnouncementSendBtn = document.getElementById("supervisorAnnouncementSendBtn");
 const supervisorUsersSection = document.getElementById("supervisorUsersSection");
 const supervisorUsersTitle = document.getElementById("supervisorUsersTitle");
 const supervisorUsersRefreshBtn = document.getElementById("supervisorUsersRefreshBtn");
@@ -47,6 +55,7 @@ const TOKEN_KEY = "bedna_token";
 const USER_KEY = "bedna_user";
 const LANG_KEY = "bedna_lang";
 const PENDING_JOIN_KEY = "bedna_pending_join_room";
+const ANNOUNCEMENT_SEEN_KEY = "bedna_seen_announcement_id";
 let mode = "register";
 let lobbyPollTimer = null;
 let cachedRooms = [];
@@ -57,9 +66,27 @@ let bannedUsername = "";
 let currentBanInfo = null;
 let isSupervisor = false;
 let isSupervisorMenuOpen = false;
+let activeSupervisorTab = "announcement";
 let banStatusPollTimer = null;
 let accountTransitionBusy = false;
 let accountStateOverlay = null;
+let globalAnnouncementOverlay = null;
+let globalAnnouncementTitle = null;
+let globalAnnouncementText = null;
+let globalAnnouncementTimer = null;
+let globalAnnouncementCountdown = 0;
+let globalAnnouncementCountdownTimer = null;
+let activeAnnouncementId = "";
+let queuedAnnouncement = null;
+let roomActionOverlay = null;
+let roomActionTitle = null;
+let roomActionText = null;
+let roomActionTimer = null;
+let roomActionTimerInterval = null;
+let roomActionStartedAt = 0;
+let roomActionMode = "";
+let roomActionBusy = false;
+const ROOM_ACTION_MIN_MS = 2600;
 
 const I18N = {
   ar: {
@@ -88,6 +115,11 @@ const I18N = {
     joinRoomBtn: "انضمام",
     publicRoomsTitle: "الغرف المتاحة",
     publicRoomsDesc: "يمكنك طلب الانضمام لأي غرفة، ويجب أن يوافق القائد.",
+    ownerRightsTitle: "حقوق مالك السيرفر",
+    ownerRightsText: "تم إنشاء هذا الموقع بواسطة",
+    ownerRightsImageHint: "الصورة الرسمية لمالك السيرفر",
+    ownerRightsName: "Q.",
+    ownerRightsCopy: "جميع الحقوق محفوظة ©",
     refreshRoomsBtn: "تحديث",
     roomsEmpty: "لا توجد غرف متاحة الآن.",
     roomCodeText: "الرمز",
@@ -103,7 +135,11 @@ const I18N = {
     joinHostBadge: "أنت القائد",
     approvedRoomBadge: "دخول بلا دعوة",
     supervisorMenuToggle: "قائمة المشرف",
+    supervisorOpenBtn: "لوحة المشرف",
     supervisorSidebarTitle: "لوحة المشرف",
+    supervisorTabAnnouncement: "الرسالة العامة",
+    supervisorTabUsers: "كل الحسابات",
+    supervisorTabAppeals: "طلبات رفع الحظر",
     supervisorMenuClose: "إغلاق",
     supervisorAppealsTitle: "طلبات رفع الحظر",
     supervisorAppealsDesc: "طلبات المستخدمين لفك الحظر من الموقع.",
@@ -119,6 +155,12 @@ const I18N = {
     supervisorUsersTitle: "كل الحسابات",
     supervisorUsersDesc: "قائمة كل الحسابات المسجلة (المتصلون أولاً).",
     supervisorUsersRefreshBtn: "تحديث الحسابات",
+    supervisorAnnouncementTitle: "رسالة عامة",
+    supervisorAnnouncementDesc: "تظهر هذه الرسالة إجباريًا لكل المستخدمين لمدة 10 ثوانٍ.",
+    supervisorAnnouncementPlaceholder: "اكتب الرسالة العامة هنا...",
+    supervisorAnnouncementSendBtn: "إرسال الرسالة",
+    supervisorAnnouncementNeedText: "اكتب نص الرسالة العامة أولًا.",
+    supervisorAnnouncementDone: "تم إرسال الرسالة العامة.",
     supervisorUsersEmpty: "لا توجد حسابات.",
     supervisorUserOnline: "متصل الآن",
     supervisorUserOffline: "غير متصل",
@@ -162,6 +204,13 @@ const I18N = {
     unbanTransitionTitle: "تم فك الحظر",
     unbanTransitionSubLobby: "يمكنك المتابعة الآن. جارٍ إعادتك إلى اللوبي...",
     unbanTransitionSubAuth: "يمكنك المتابعة الآن. جارٍ إعادتك إلى صفحة الدخول...",
+    announcementModalTitle: "رسالة عامة من المشرف",
+    announcementModalTimer: "ستختفي خلال {seconds} ثوانٍ",
+    creatingRoomTitle: "جاري إنشاء الغرفة",
+    creatingRoomText: "يتم تجهيز الغرفة وربط الإعدادات...",
+    enteringRoomTitle: "جاري دخول الغرفة",
+    enteringRoomText: "يتم التحقق من الصلاحيات وتحميل بيانات الغرفة...",
+    actionDuration: "المدة: {seconds} ث",
     soundOn: "الصوت: تشغيل",
     soundOff: "الصوت: إيقاف"
   },
@@ -191,6 +240,11 @@ const I18N = {
     joinRoomBtn: "Join",
     publicRoomsTitle: "Available Rooms",
     publicRoomsDesc: "You can request to join any room, and the leader must approve.",
+    ownerRightsTitle: "Server Owner Rights",
+    ownerRightsText: "This website was created by",
+    ownerRightsImageHint: "Official server owner image",
+    ownerRightsName: "Q.",
+    ownerRightsCopy: "All rights reserved ©",
     refreshRoomsBtn: "Refresh",
     roomsEmpty: "No rooms created yet.",
     roomCodeText: "Code",
@@ -206,7 +260,11 @@ const I18N = {
     joinHostBadge: "You are the leader",
     approvedRoomBadge: "No invite needed",
     supervisorMenuToggle: "Supervisor Menu",
+    supervisorOpenBtn: "Supervisor Panel",
     supervisorSidebarTitle: "Supervisor Panel",
+    supervisorTabAnnouncement: "Global Message",
+    supervisorTabUsers: "All Accounts",
+    supervisorTabAppeals: "Unban Requests",
     supervisorMenuClose: "Close",
     supervisorAppealsTitle: "Unban Requests",
     supervisorAppealsDesc: "Users' requests to remove site bans.",
@@ -222,6 +280,12 @@ const I18N = {
     supervisorUsersTitle: "All Accounts",
     supervisorUsersDesc: "All registered accounts (online first).",
     supervisorUsersRefreshBtn: "Refresh Accounts",
+    supervisorAnnouncementTitle: "Global Message",
+    supervisorAnnouncementDesc: "This message is forced for all users for 10 seconds.",
+    supervisorAnnouncementPlaceholder: "Write the global message here...",
+    supervisorAnnouncementSendBtn: "Send Message",
+    supervisorAnnouncementNeedText: "Please write the announcement text first.",
+    supervisorAnnouncementDone: "Global message sent.",
     supervisorUsersEmpty: "No accounts found.",
     supervisorUserOnline: "Online now",
     supervisorUserOffline: "Offline",
@@ -265,6 +329,13 @@ const I18N = {
     unbanTransitionTitle: "Ban removed",
     unbanTransitionSubLobby: "You can continue now. Returning you to the lobby...",
     unbanTransitionSubAuth: "You can continue now. Returning you to the login page...",
+    announcementModalTitle: "Global Message From Supervisor",
+    announcementModalTimer: "Closes in {seconds}s",
+    creatingRoomTitle: "Creating Room",
+    creatingRoomText: "Preparing room settings and connection...",
+    enteringRoomTitle: "Entering Room",
+    enteringRoomText: "Checking access and loading room data...",
+    actionDuration: "Duration: {seconds}s",
     soundOn: "SFX: ON",
     soundOff: "SFX: OFF"
   }
@@ -330,12 +401,239 @@ function showToast(text, type = "error") {
   sfx(type === "success" ? "success" : "error");
   const toast = document.createElement("div");
   toast.className = `toast ${type}`;
-  toast.textContent = text;
+  const toastText = document.createElement("span");
+  toastText.className = "toast-text";
+  toastText.textContent = text;
+  const closeBtn = document.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.className = "toast-close";
+  closeBtn.textContent = "✕";
+  closeBtn.setAttribute("aria-label", t("supervisorMenuClose"));
+  closeBtn.title = t("supervisorMenuClose");
+  toast.appendChild(toastText);
+  toast.appendChild(closeBtn);
   toastContainer.appendChild(toast);
-  setTimeout(() => {
+  let dismissed = false;
+  const dismiss = () => {
+    if (dismissed) {
+      return;
+    }
+    dismissed = true;
     toast.classList.add("hide");
     setTimeout(() => toast.remove(), 300);
-  }, 2600);
+  };
+  closeBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    dismiss();
+  });
+  setTimeout(dismiss, 2600);
+}
+
+function ensureRoomActionOverlay() {
+  if (roomActionOverlay) {
+    return roomActionOverlay;
+  }
+  roomActionOverlay = document.createElement("div");
+  roomActionOverlay.className = "modal-overlay operation-modal-overlay hidden";
+  roomActionOverlay.innerHTML = `
+    <div class="modal-card operation-modal-card">
+      <div class="operation-loader" aria-hidden="true"></div>
+      <h3 id="roomActionTitle"></h3>
+      <p id="roomActionText" class="muted"></p>
+      <p id="roomActionTimer" class="muted"></p>
+    </div>
+  `;
+  document.body.appendChild(roomActionOverlay);
+  roomActionTitle = roomActionOverlay.querySelector("#roomActionTitle");
+  roomActionText = roomActionOverlay.querySelector("#roomActionText");
+  roomActionTimer = roomActionOverlay.querySelector("#roomActionTimer");
+  return roomActionOverlay;
+}
+
+function updateRoomActionOverlayText() {
+  if (!roomActionTitle || !roomActionText || !roomActionTimer || !roomActionMode) {
+    return;
+  }
+  const isCreate = roomActionMode === "create";
+  roomActionTitle.textContent = isCreate ? t("creatingRoomTitle") : t("enteringRoomTitle");
+  roomActionText.textContent = isCreate ? t("creatingRoomText") : t("enteringRoomText");
+  const seconds = Math.max(0, Math.floor((Date.now() - roomActionStartedAt) / 1000));
+  roomActionTimer.textContent = fmt(t("actionDuration"), { seconds });
+}
+
+function closeRoomActionOverlay() {
+  if (roomActionTimerInterval) {
+    clearInterval(roomActionTimerInterval);
+    roomActionTimerInterval = null;
+  }
+  if (roomActionOverlay) {
+    roomActionOverlay.classList.add("hidden");
+  }
+  roomActionMode = "";
+  roomActionStartedAt = 0;
+}
+
+function openRoomActionOverlay(mode) {
+  roomActionMode = mode;
+  roomActionStartedAt = Date.now();
+  const overlay = ensureRoomActionOverlay();
+  updateRoomActionOverlayText();
+  overlay.classList.remove("hidden");
+  if (roomActionTimerInterval) {
+    clearInterval(roomActionTimerInterval);
+  }
+  roomActionTimerInterval = setInterval(updateRoomActionOverlayText, 1000);
+}
+
+function redirectToRoom(code) {
+  if (!code) {
+    return;
+  }
+  sfx("join");
+  window.location.href = `/room.html?code=${encodeURIComponent(code)}`;
+}
+
+async function runRoomActionWithOverlay(mode, task) {
+  if (roomActionBusy) {
+    return null;
+  }
+  roomActionBusy = true;
+  const started = Date.now();
+  openRoomActionOverlay(mode);
+  try {
+    const result = await task();
+    const remaining = ROOM_ACTION_MIN_MS - (Date.now() - started);
+    if (remaining > 0) {
+      await delay(remaining);
+    }
+    return result;
+  } finally {
+    closeRoomActionOverlay();
+    roomActionBusy = false;
+  }
+}
+
+async function enterRoomWithOverlay(code) {
+  if (!code) {
+    return;
+  }
+  const done = await runRoomActionWithOverlay("enter", async () => true);
+  if (!done) {
+    return;
+  }
+  redirectToRoom(code);
+}
+
+function openActionDialog(options = {}) {
+  const {
+    title = "",
+    message = "",
+    input = false,
+    inputPlaceholder = "",
+    confirmText = "",
+    cancelText = "",
+    confirmClass = "btn"
+  } = options;
+
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay action-dialog-overlay";
+
+    const card = document.createElement("div");
+    card.className = "modal-card action-dialog-card";
+
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "modal-close-x";
+    closeBtn.textContent = "✕";
+    closeBtn.setAttribute("aria-label", cancelText || t("supervisorMenuClose"));
+    closeBtn.title = cancelText || t("supervisorMenuClose");
+
+    const titleEl = document.createElement("h3");
+    titleEl.textContent = title;
+
+    const messageEl = document.createElement("p");
+    messageEl.className = "muted action-dialog-message";
+    messageEl.textContent = message;
+    if (!message) {
+      messageEl.classList.add("hidden");
+    }
+
+    const inputEl = document.createElement("textarea");
+    inputEl.className = "action-dialog-input";
+    inputEl.rows = 4;
+    inputEl.maxLength = 500;
+    inputEl.placeholder = inputPlaceholder;
+    if (!input) {
+      inputEl.classList.add("hidden");
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "room-actions";
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.className = "btn btn-ghost";
+    cancelBtn.textContent = cancelText || t("supervisorMenuClose");
+
+    const confirmBtn = document.createElement("button");
+    confirmBtn.type = "button";
+    confirmBtn.className = confirmClass;
+    confirmBtn.textContent = confirmText || t("approveBtn");
+
+    actions.appendChild(cancelBtn);
+    actions.appendChild(confirmBtn);
+
+    card.appendChild(closeBtn);
+    card.appendChild(titleEl);
+    card.appendChild(messageEl);
+    card.appendChild(inputEl);
+    card.appendChild(actions);
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+
+    let done = false;
+    const finish = (value) => {
+      if (done) {
+        return;
+      }
+      done = true;
+      document.removeEventListener("keydown", onKeyDown);
+      overlay.remove();
+      resolve(value);
+    };
+
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        finish(null);
+      }
+    };
+
+    closeBtn.addEventListener("click", () => finish(null));
+    cancelBtn.addEventListener("click", () => finish(null));
+    confirmBtn.addEventListener("click", () => {
+      finish(input ? String(inputEl.value || "").trim() : true);
+    });
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) {
+        finish(null);
+      }
+    });
+    document.addEventListener("keydown", onKeyDown);
+
+    if (input) {
+      requestAnimationFrame(() => {
+        inputEl.focus();
+      });
+    } else {
+      requestAnimationFrame(() => {
+        confirmBtn.focus();
+      });
+    }
+    sfx("modal");
+  });
 }
 
 function getToken() {
@@ -351,6 +649,115 @@ function clearSession() {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(USER_KEY);
   localStorage.removeItem(PENDING_JOIN_KEY);
+  hideGlobalAnnouncement();
+  closeRoomActionOverlay();
+  queuedAnnouncement = null;
+}
+
+async function logoutSession() {
+  const token = getToken();
+  if (token) {
+    try {
+      await fetch("/api/logout", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Lang": getLang(),
+          Authorization: `Bearer ${token}`
+        },
+        body: "{}"
+      });
+    } catch (_) {
+      // Ignore network failures and continue local sign-out.
+    }
+  }
+  clearSession();
+}
+
+function ensureGlobalAnnouncementOverlay() {
+  if (globalAnnouncementOverlay) {
+    return globalAnnouncementOverlay;
+  }
+  globalAnnouncementOverlay = document.createElement("div");
+  globalAnnouncementOverlay.className = "modal-overlay forced-announcement-overlay hidden";
+  globalAnnouncementOverlay.innerHTML = `
+    <div class="modal-card forced-announcement-card">
+      <h3 id="globalAnnouncementTitle"></h3>
+      <p id="globalAnnouncementText" class="forced-announcement-text"></p>
+      <p id="globalAnnouncementTimer" class="muted"></p>
+    </div>
+  `;
+  document.body.appendChild(globalAnnouncementOverlay);
+  globalAnnouncementTitle = globalAnnouncementOverlay.querySelector("#globalAnnouncementTitle");
+  globalAnnouncementText = globalAnnouncementOverlay.querySelector("#globalAnnouncementText");
+  globalAnnouncementTimer = globalAnnouncementOverlay.querySelector("#globalAnnouncementTimer");
+  return globalAnnouncementOverlay;
+}
+
+function clearGlobalAnnouncementTimer() {
+  if (globalAnnouncementCountdownTimer) {
+    clearInterval(globalAnnouncementCountdownTimer);
+    globalAnnouncementCountdownTimer = null;
+  }
+}
+
+function updateGlobalAnnouncementTimerText() {
+  if (!globalAnnouncementTimer) {
+    return;
+  }
+  globalAnnouncementTimer.textContent = fmt(t("announcementModalTimer"), {
+    seconds: globalAnnouncementCountdown
+  });
+}
+
+function hideGlobalAnnouncement() {
+  clearGlobalAnnouncementTimer();
+  if (globalAnnouncementOverlay) {
+    globalAnnouncementOverlay.classList.add("hidden");
+  }
+  document.body.classList.remove("announcement-lock");
+  activeAnnouncementId = "";
+}
+
+function processGlobalAnnouncement(payload) {
+  const id = String(payload?.id || "").trim();
+  const text = String(payload?.text || "").trim();
+  if (!id || !text) {
+    return;
+  }
+  const seenId = String(localStorage.getItem(ANNOUNCEMENT_SEEN_KEY) || "");
+  if (seenId === id || activeAnnouncementId === id) {
+    return;
+  }
+  if (activeAnnouncementId && activeAnnouncementId !== id) {
+    queuedAnnouncement = { id, text };
+    return;
+  }
+
+  const overlay = ensureGlobalAnnouncementOverlay();
+  localStorage.setItem(ANNOUNCEMENT_SEEN_KEY, id);
+  activeAnnouncementId = id;
+  globalAnnouncementTitle.textContent = t("announcementModalTitle");
+  globalAnnouncementText.textContent = text;
+  globalAnnouncementCountdown = 10;
+  updateGlobalAnnouncementTimerText();
+  overlay.classList.remove("hidden");
+  document.body.classList.add("announcement-lock");
+  sfx("notify");
+  clearGlobalAnnouncementTimer();
+  globalAnnouncementCountdownTimer = setInterval(() => {
+    globalAnnouncementCountdown -= 1;
+    if (globalAnnouncementCountdown <= 0) {
+      hideGlobalAnnouncement();
+      if (queuedAnnouncement) {
+        const next = queuedAnnouncement;
+        queuedAnnouncement = null;
+        processGlobalAnnouncement(next);
+      }
+      return;
+    }
+    updateGlobalAnnouncementTimerText();
+  }, 1000);
 }
 
 async function api(pathname, options = {}) {
@@ -371,6 +778,9 @@ async function api(pathname, options = {}) {
   });
 
   const data = await response.json().catch(() => ({}));
+  if (data && data.announcement) {
+    processGlobalAnnouncement(data.announcement);
+  }
   if (!response.ok) {
     const error = new Error(data.error || t("toastRequestFailed"));
     error.status = response.status;
@@ -443,7 +853,7 @@ function setSupervisorMenuOpen(open) {
   if (!supervisorSidebar || !supervisorSidebarOverlay || !supervisorMenuToggleBtn) {
     return;
   }
-  const canOpen = isSupervisor && !lobbySection.classList.contains("hidden");
+  const canOpen = isSupervisor && Boolean(getToken());
   const nextOpen = Boolean(open && canOpen);
   isSupervisorMenuOpen = nextOpen;
   supervisorSidebar.classList.toggle("hidden", !nextOpen);
@@ -454,11 +864,47 @@ function setSupervisorMenuOpen(open) {
   supervisorSidebarOverlay.setAttribute("aria-hidden", nextOpen ? "false" : "true");
   supervisorMenuToggleBtn.setAttribute("aria-expanded", nextOpen ? "true" : "false");
   document.body.classList.toggle("supervisor-menu-open", nextOpen);
+  if (nextOpen) {
+    setActiveSupervisorTab(activeSupervisorTab, false);
+  }
+}
+
+function setActiveSupervisorTab(tabName, scrollIntoView = true) {
+  const allowed = ["announcement", "users", "appeals"];
+  const nextTab = allowed.includes(tabName) ? tabName : "announcement";
+  activeSupervisorTab = nextTab;
+  if (!supervisorTabAnnouncement || !supervisorTabUsers || !supervisorTabAppeals) {
+    return;
+  }
+  supervisorTabAnnouncement.classList.toggle("active", nextTab === "announcement");
+  supervisorTabUsers.classList.toggle("active", nextTab === "users");
+  supervisorTabAppeals.classList.toggle("active", nextTab === "appeals");
+  if (!scrollIntoView) {
+    return;
+  }
+  const targetSection = nextTab === "announcement"
+    ? supervisorAnnouncementSection
+    : nextTab === "users"
+      ? supervisorUsersSection
+      : supervisorAppealsSection;
+  focusSupervisorSection(targetSection);
+}
+
+function focusSupervisorSection(sectionEl) {
+  if (!sectionEl) {
+    return;
+  }
+  sectionEl.scrollIntoView({ behavior: "smooth", block: "start" });
+  sectionEl.classList.add("section-focus-flash");
+  setTimeout(() => {
+    sectionEl.classList.remove("section-focus-flash");
+  }, 900);
 }
 
 function syncSupervisorControls() {
-  const showSupervisorControls = isSupervisor && !lobbySection.classList.contains("hidden");
+  const showSupervisorControls = isSupervisor && Boolean(getToken());
   supervisorMenuToggleBtn.classList.toggle("hidden", !showSupervisorControls);
+  supervisorAnnouncementSection.classList.toggle("hidden", !showSupervisorControls);
   supervisorAppealsSection.classList.toggle("hidden", !showSupervisorControls);
   supervisorUsersSection.classList.toggle("hidden", !showSupervisorControls);
   setSupervisorMenuOpen(false);
@@ -467,6 +913,8 @@ function syncSupervisorControls() {
 function showAuth() {
   stopLobbyPolling();
   stopBanStatusPolling();
+  hideGlobalAnnouncement();
+  queuedAnnouncement = null;
   currentBanInfo = null;
   bannedUsername = "";
   isSupervisor = false;
@@ -643,7 +1091,18 @@ async function refreshSupervisorAppeals() {
 }
 
 async function handleSupervisorBanUser(username) {
-  const reason = String(window.prompt(t("supervisorBanReasonPrompt")) || "").trim();
+  const reason = await openActionDialog({
+    title: t("supervisorBanBtn"),
+    message: t("supervisorBanReasonPrompt"),
+    input: true,
+    inputPlaceholder: t("supervisorBanReasonPrompt"),
+    confirmText: t("supervisorBanBtn"),
+    cancelText: t("supervisorMenuClose"),
+    confirmClass: "btn btn-reject"
+  });
+  if (reason === null) {
+    return false;
+  }
   if (reason.length < 3) {
     if (reason.length > 0) {
       showToast(t("supervisorBanReasonTooShort"));
@@ -672,7 +1131,13 @@ async function handleSupervisorUnbanUser(username) {
 }
 
 async function handleSupervisorDeleteUser(username) {
-  const confirmDelete = window.confirm(fmt(t("supervisorDeleteConfirm"), { user: username }));
+  const confirmDelete = await openActionDialog({
+    title: t("supervisorDeleteBtn"),
+    message: fmt(t("supervisorDeleteConfirm"), { user: username }),
+    confirmText: t("supervisorDeleteBtn"),
+    cancelText: t("supervisorMenuClose"),
+    confirmClass: "btn btn-danger"
+  });
   if (!confirmDelete) {
     return false;
   }
@@ -797,6 +1262,24 @@ async function refreshSupervisorUsers() {
   }
 }
 
+async function sendSupervisorAnnouncement() {
+  const text = String(supervisorAnnouncementInput.value || "").trim();
+  if (!text) {
+    showToast(t("supervisorAnnouncementNeedText"));
+    return;
+  }
+  try {
+    await api("/api/admin/site-announcement", {
+      method: "POST",
+      body: { text }
+    });
+    supervisorAnnouncementInput.value = "";
+    showToast(t("supervisorAnnouncementDone"), "success");
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
 async function decideAppeal(username, action) {
   try {
     await api("/api/admin/ban-appeals/decision", {
@@ -845,7 +1328,7 @@ function roomMetaItem(label, value) {
   return item;
 }
 
-function autoOpenApprovedRoom(rooms) {
+async function autoOpenApprovedRoom(rooms) {
   const pendingCode = String(localStorage.getItem(PENDING_JOIN_KEY) || "").trim().toUpperCase();
   if (!pendingCode) {
     return false;
@@ -857,8 +1340,7 @@ function autoOpenApprovedRoom(rooms) {
   }
   if (room.isMember) {
     localStorage.removeItem(PENDING_JOIN_KEY);
-    sfx("join");
-    window.location.href = `/room.html?code=${encodeURIComponent(room.code)}`;
+    await enterRoomWithOverlay(room.code);
     return true;
   }
   if (!room.hasPendingRequest) {
@@ -872,8 +1354,7 @@ async function handleJoinRequest(code) {
     const result = await api(`/api/rooms/${encodeURIComponent(code)}/request-join`, { method: "POST" });
     if (result.status === "already_member" && result.room?.code) {
       localStorage.removeItem(PENDING_JOIN_KEY);
-      sfx("join");
-      window.location.href = `/room.html?code=${encodeURIComponent(result.room.code)}`;
+      await enterRoomWithOverlay(result.room.code);
       return;
     }
     localStorage.setItem(PENDING_JOIN_KEY, code);
@@ -890,14 +1371,15 @@ async function handleJoinRequest(code) {
 
 async function handleSupervisorDirectJoin(code) {
   try {
-    const result = await api("/api/rooms/join", {
-      method: "POST",
-      body: { code }
-    });
-    if (result.room?.code) {
+    const result = await runRoomActionWithOverlay("enter", async () =>
+      api("/api/rooms/join", {
+        method: "POST",
+        body: { code }
+      })
+    );
+    if (result?.room?.code) {
       localStorage.removeItem(PENDING_JOIN_KEY);
-      sfx("join");
-      window.location.href = `/room.html?code=${encodeURIComponent(result.room.code)}`;
+      redirectToRoom(result.room.code);
     }
   } catch (error) {
     if (error.code === "ACCOUNT_BANNED") {
@@ -1052,19 +1534,17 @@ function renderPublicRooms(rooms) {
       openBtn.type = "button";
       openBtn.className = "btn";
       openBtn.textContent = room.isHost ? t("joinHostBadge") : t("openRoomBtn");
-      openBtn.addEventListener("click", () => {
-        sfx("join");
-        window.location.href = `/room.html?code=${encodeURIComponent(room.code)}`;
+      openBtn.addEventListener("click", async () => {
+        await enterRoomWithOverlay(room.code);
       });
       actions.appendChild(openBtn);
-    } else if (room.isApproved) {
+    } else if (room.isApproved && !isSupervisor) {
       const directBtn = document.createElement("button");
       directBtn.type = "button";
       directBtn.className = "btn";
       directBtn.textContent = t("rejoinDirectBtn");
-      directBtn.addEventListener("click", () => {
-        sfx("join");
-        window.location.href = `/room.html?code=${encodeURIComponent(room.code)}`;
+      directBtn.addEventListener("click", async () => {
+        await enterRoomWithOverlay(room.code);
       });
       actions.appendChild(directBtn);
     } else if (room.hasPendingRequest) {
@@ -1112,6 +1592,9 @@ async function refreshPublicRooms() {
   if (!getToken() || lobbySection.classList.contains("hidden")) {
     return;
   }
+  if (roomActionBusy) {
+    return;
+  }
   try {
     const data = await api("/api/rooms");
     const rooms = data.rooms || [];
@@ -1121,7 +1604,7 @@ async function refreshPublicRooms() {
       refreshSupervisorAppeals();
       refreshSupervisorUsers();
     }
-    autoOpenApprovedRoom(rooms);
+    await autoOpenApprovedRoom(rooms);
   } catch (error) {
     if (error.code === "ACCOUNT_BANNED") {
       sfx("ban");
@@ -1157,14 +1640,26 @@ function applyTranslations() {
   document.getElementById("joinRoomBtn").textContent = t("joinRoomBtn");
   document.getElementById("publicRoomsTitle").textContent = t("publicRoomsTitle");
   document.getElementById("publicRoomsDesc").textContent = t("publicRoomsDesc");
+  document.getElementById("ownerRightsTitle").textContent = t("ownerRightsTitle");
+  document.getElementById("ownerRightsText").textContent = t("ownerRightsText");
+  document.getElementById("ownerRightsImageHint").textContent = t("ownerRightsImageHint");
+  document.getElementById("ownerRightsName").textContent = t("ownerRightsName");
+  document.getElementById("ownerRightsCopy").textContent = t("ownerRightsCopy");
   refreshRoomsBtn.textContent = t("refreshRoomsBtn");
-  supervisorMenuToggleBtn.textContent = "☰";
+  supervisorMenuToggleBtn.textContent = t("supervisorOpenBtn");
   supervisorMenuToggleBtn.setAttribute("aria-label", t("supervisorMenuToggle"));
   supervisorMenuToggleBtn.title = t("supervisorMenuToggle");
   supervisorSidebarTitle.textContent = t("supervisorSidebarTitle");
+  supervisorTabAnnouncement.textContent = t("supervisorTabAnnouncement");
+  supervisorTabUsers.textContent = t("supervisorTabUsers");
+  supervisorTabAppeals.textContent = t("supervisorTabAppeals");
   supervisorMenuCloseBtn.textContent = "✕";
   supervisorMenuCloseBtn.setAttribute("aria-label", t("supervisorMenuClose"));
   supervisorMenuCloseBtn.title = t("supervisorMenuClose");
+  supervisorAnnouncementTitle.textContent = t("supervisorAnnouncementTitle");
+  supervisorAnnouncementDesc.textContent = t("supervisorAnnouncementDesc");
+  supervisorAnnouncementInput.placeholder = t("supervisorAnnouncementPlaceholder");
+  supervisorAnnouncementSendBtn.textContent = t("supervisorAnnouncementSendBtn");
   supervisorAppealsTitle.textContent = t("supervisorAppealsTitle");
   supervisorAppealsDesc.textContent = t("supervisorAppealsDesc");
   supervisorAppealsRefreshBtn.textContent = t("supervisorAppealsRefreshBtn");
@@ -1183,6 +1678,14 @@ function applyTranslations() {
   renderPublicRooms(cachedRooms);
   renderSupervisorAppeals(cachedAppeals);
   renderSupervisorUsers(cachedSupervisorUsers);
+  setActiveSupervisorTab(activeSupervisorTab, false);
+  if (globalAnnouncementOverlay && !globalAnnouncementOverlay.classList.contains("hidden")) {
+    globalAnnouncementTitle.textContent = t("announcementModalTitle");
+    updateGlobalAnnouncementTimerText();
+  }
+  if (roomActionOverlay && !roomActionOverlay.classList.contains("hidden")) {
+    updateRoomActionOverlayText();
+  }
 }
 
 langSelect.addEventListener("change", (event) => {
@@ -1241,7 +1744,6 @@ authForm.addEventListener("submit", async (event) => {
   } catch (error) {
     if (error.code === "ACCOUNT_BANNED") {
       sfx("ban");
-      clearSession();
       localStorage.setItem(USER_KEY, username.toLowerCase());
       await transitionToBanned(error.data?.ban, username);
       return;
@@ -1250,25 +1752,31 @@ authForm.addEventListener("submit", async (event) => {
   }
 });
 
-logoutBtn.addEventListener("click", () => {
+logoutBtn.addEventListener("click", async () => {
   sfx("leave");
-  clearSession();
+  await logoutSession();
   showAuth();
   showToast(t("toastLogoutOk"), "success");
 });
 
 createRoomForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (roomActionBusy) {
+    return;
+  }
   const formData = new FormData(createRoomForm);
   const roomName = String(formData.get("roomName") || "").trim();
 
   try {
-    const result = await api("/api/rooms/create", {
-      method: "POST",
-      body: { roomName }
-    });
-    sfx("join");
-    window.location.href = `/room.html?code=${encodeURIComponent(result.room.code)}`;
+    const result = await runRoomActionWithOverlay("create", async () =>
+      api("/api/rooms/create", {
+        method: "POST",
+        body: { roomName }
+      })
+    );
+    if (result?.room?.code) {
+      redirectToRoom(result.room.code);
+    }
   } catch (error) {
     showToast(error.message);
   }
@@ -1276,6 +1784,9 @@ createRoomForm.addEventListener("submit", async (event) => {
 
 joinRoomForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (roomActionBusy) {
+    return;
+  }
   const formData = new FormData(joinRoomForm);
   const code = String(formData.get("roomCode") || "").trim().toUpperCase();
 
@@ -1318,6 +1829,27 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+if (supervisorTabAnnouncement) {
+  supervisorTabAnnouncement.addEventListener("click", () => {
+    sfx("click");
+    setActiveSupervisorTab("announcement");
+  });
+}
+
+if (supervisorTabUsers) {
+  supervisorTabUsers.addEventListener("click", () => {
+    sfx("click");
+    setActiveSupervisorTab("users");
+  });
+}
+
+if (supervisorTabAppeals) {
+  supervisorTabAppeals.addEventListener("click", () => {
+    sfx("click");
+    setActiveSupervisorTab("appeals");
+  });
+}
+
 supervisorAppealsRefreshBtn.addEventListener("click", () => {
   sfx("click");
   refreshSupervisorAppeals();
@@ -1327,6 +1859,13 @@ supervisorUsersRefreshBtn.addEventListener("click", () => {
   sfx("click");
   refreshSupervisorUsers();
 });
+
+if (supervisorAnnouncementSendBtn) {
+  supervisorAnnouncementSendBtn.addEventListener("click", () => {
+    sfx("click");
+    sendSupervisorAnnouncement();
+  });
+}
 
 appealForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -1354,9 +1893,9 @@ appealForm.addEventListener("submit", async (event) => {
   }
 });
 
-bannedLogoutBtn.addEventListener("click", () => {
+bannedLogoutBtn.addEventListener("click", async () => {
   sfx("leave");
-  clearSession();
+  await logoutSession();
   bannedUsername = "";
   showAuth();
 });

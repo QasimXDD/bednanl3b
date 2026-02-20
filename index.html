@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Changa:wght@600;700;800&family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=20260220h">
 </head>
 <body>
   <div class="top-controls">
@@ -18,6 +18,7 @@
     </select>
     <button id="soundToggle" class="sound-toggle" type="button">SFX: ON</button>
   </div>
+  <button id="supervisorMenuToggle" class="btn btn-ghost supervisor-global-toggle hidden" type="button" aria-controls="supervisorSidebar" aria-expanded="false" aria-label="Supervisor Menu" title="Supervisor Menu">لوحة المشرف</button>
 
   <div id="splash" class="splash">
     <div class="orb orb-1"></div>
@@ -50,53 +51,82 @@
       </form>
     </section>
 
-    <section id="lobbySection" class="panel hidden">
-      <div class="lobby-head">
-        <div>
-          <h2 id="lobbyTitle">Lobby</h2>
-          <p class="muted"><span id="welcomePrefix">Welcome</span> <span id="currentUser"></span></p>
-          <p class="muted" id="siteStatsText">Online: 0 | In Rooms: 0</p>
-        </div>
-        <div class="lobby-head-actions">
-          <button id="supervisorMenuToggle" class="btn btn-ghost supervisor-menu-toggle hidden" type="button" aria-controls="supervisorSidebar" aria-expanded="false" aria-label="Supervisor Menu" title="Supervisor Menu">☰</button>
-          <button id="logoutBtn" class="btn btn-ghost" type="button">Logout</button>
-        </div>
-      </div>
-
-      <div class="lobby-main">
-        <div class="lobby-grid">
-          <form id="createRoomForm" class="form box">
-            <h3 id="createRoomTitle">Create Room</h3>
-            <label for="roomName" id="roomNameLabel">Room Name</label>
-            <input id="roomName" name="roomName" type="text" maxlength="40" placeholder="Example: Tournament Room">
-            <button class="btn" type="submit" id="createRoomBtn">Create</button>
-          </form>
-
-          <form id="joinRoomForm" class="form box">
-            <h3 id="joinRoomTitle">Join by Invite Code</h3>
-            <label for="roomCode" id="roomCodeLabel">Room Code</label>
-            <input id="roomCode" name="roomCode" type="text" maxlength="6" placeholder="ABC123" required>
-            <button class="btn" type="submit" id="joinRoomBtn">Join</button>
-          </form>
-        </div>
-
-        <section class="box rooms-box">
-          <div class="rooms-box-head">
-            <h3 id="publicRoomsTitle">Available Rooms</h3>
-            <button id="refreshRoomsBtn" class="btn btn-ghost" type="button">Refresh</button>
+    <section id="lobbySection" class="lobby-shell hidden">
+      <div class="panel lobby-panel">
+        <div class="lobby-head">
+          <div>
+            <h2 id="lobbyTitle">Lobby</h2>
+            <p class="muted"><span id="welcomePrefix">Welcome</span> <span id="currentUser"></span></p>
+            <p class="muted" id="siteStatsText">Online: 0 | In Rooms: 0</p>
           </div>
-          <p class="muted" id="publicRoomsDesc">You can request to join any room, and the leader must approve.</p>
-          <div id="publicRoomsList" class="public-rooms-list"></div>
-        </section>
+          <div class="lobby-head-actions">
+            <button id="logoutBtn" class="btn btn-ghost" type="button">Logout</button>
+          </div>
+        </div>
+
+        <div class="lobby-main">
+          <div class="lobby-grid">
+            <form id="createRoomForm" class="form box">
+              <h3 id="createRoomTitle">Create Room</h3>
+              <label for="roomName" id="roomNameLabel">Room Name</label>
+              <input id="roomName" name="roomName" type="text" maxlength="40" placeholder="Example: Tournament Room">
+              <button class="btn" type="submit" id="createRoomBtn">Create</button>
+            </form>
+
+            <form id="joinRoomForm" class="form box">
+              <h3 id="joinRoomTitle">Join by Invite Code</h3>
+              <label for="roomCode" id="roomCodeLabel">Room Code</label>
+              <input id="roomCode" name="roomCode" type="text" maxlength="6" placeholder="ABC123" required>
+              <button class="btn" type="submit" id="joinRoomBtn">Join</button>
+            </form>
+          </div>
+
+          <section class="box rooms-box">
+            <div class="rooms-box-head">
+              <h3 id="publicRoomsTitle">Available Rooms</h3>
+              <button id="refreshRoomsBtn" class="btn btn-ghost" type="button">Refresh</button>
+            </div>
+            <p class="muted" id="publicRoomsDesc">You can request to join any room, and the leader must approve.</p>
+            <div id="publicRoomsList" class="public-rooms-list"></div>
+          </section>
+        </div>
       </div>
+
+      <aside class="panel owner-rights-box owner-rights-panel">
+        <h3 id="ownerRightsTitle">حقوق مالك السيرفر</h3>
+        <p id="ownerRightsText" class="muted">تم إنشاء هذا الموقع بواسطة</p>
+        <div class="owner-rights-poster">
+          <img id="ownerRightsImage" class="owner-rights-full-image" src="https://k.top4top.io/p_37031pht11.png" alt="Owner rights image" onerror="this.onerror=null;this.src='assets/owner-avatar.svg';">
+        </div>
+        <p id="ownerRightsName" class="owner-rights-name">Q.</p>
+        <p class="owner-rights-handle-inline">@_l86x <span class="owner-rights-flag">🇵🇸</span></p>
+        <p id="ownerRightsImageHint" class="owner-rights-caption">الصورة الرسمية لمالك السيرفر</p>
+        <p id="ownerRightsCopy" class="muted">جميع الحقوق محفوظة ©</p>
+      </aside>
 
       <div id="supervisorSidebarOverlay" class="supervisor-sidebar-overlay hidden" aria-hidden="true"></div>
       <aside id="supervisorSidebar" class="supervisor-sidebar hidden" aria-hidden="true">
         <div class="supervisor-sidebar-head">
           <h3 id="supervisorSidebarTitle">Supervisor Panel</h3>
-          <button id="supervisorMenuCloseBtn" class="btn btn-ghost supervisor-menu-close-btn" type="button" aria-label="Close" title="Close">✕</button>
+          <div class="supervisor-head-actions">
+            <button id="supervisorMenuCloseBtn" class="btn btn-ghost supervisor-menu-close-btn" type="button" aria-label="Close" title="Close">✕</button>
+          </div>
+        </div>
+        <div class="supervisor-tabs-wrap">
+          <button id="supervisorTabAnnouncement" class="supervisor-tab-btn active" type="button">General Message</button>
+          <button id="supervisorTabUsers" class="supervisor-tab-btn" type="button">All Accounts</button>
+          <button id="supervisorTabAppeals" class="supervisor-tab-btn" type="button">Unban Requests</button>
         </div>
         <div class="supervisor-sidebar-content">
+          <section id="supervisorAnnouncementSection" class="box rooms-box hidden">
+            <div class="rooms-box-head">
+              <h3 id="supervisorAnnouncementTitle">General Message</h3>
+            </div>
+            <p class="muted" id="supervisorAnnouncementDesc">Show a forced message to all users for 10 seconds.</p>
+            <textarea id="supervisorAnnouncementInput" maxlength="500" rows="4" placeholder="Write the global message..."></textarea>
+            <button id="supervisorAnnouncementSendBtn" class="btn" type="button">Send Message</button>
+          </section>
+
           <section id="supervisorUsersSection" class="box admin-users-box hidden">
             <div class="rooms-box-head">
               <h3 id="supervisorUsersTitle">All Accounts</h3>
@@ -136,6 +166,6 @@
 
   <div id="toastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
   <script src="sound.js"></script>
-  <script src="script.js"></script>
+  <script src="script.js?v=20260220i"></script>
 </body>
 </html>

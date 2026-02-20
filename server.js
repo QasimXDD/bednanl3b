@@ -6,9 +6,40 @@ const crypto = require("crypto");
 const PORT = process.env.PORT || 3000;
 const ROOT = __dirname;
 const DATA_DIR = path.join(ROOT, "data");
+const UPLOADS_DIR = path.join(ROOT, "uploads");
+const ROOM_VIDEO_UPLOAD_DIR = path.join(UPLOADS_DIR, "room-videos");
 const USERS_FILE = path.join(DATA_DIR, "users.json");
 const MODERATION_FILE = path.join(DATA_DIR, "moderation.json");
 const SUPERVISOR_USERNAME = "qasim";
+const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7;
+const USERNAME_MIN_LENGTH = 3;
+const USERNAME_MAX_LENGTH = 30;
+const PASSWORD_MIN_LENGTH = 4;
+const PASSWORD_MAX_LENGTH = 128;
+const ROOM_NAME_MAX_LENGTH = 40;
+const USERNAME_ALLOWED_REGEX = /^[\p{L}\p{N}_-]+$/u;
+const CLIENT_MESSAGE_ID_MAX_LENGTH = 80;
+const CLIENT_MESSAGE_ID_REGEX = /^[A-Za-z0-9_-]+$/;
+const MESSAGE_DEDUP_TTL_MS = 1000 * 60 * 5;
+const REPLY_PREVIEW_MAX_LENGTH = 160;
+const ROOM_VIDEO_MAX_BYTES = 80 * 1024 * 1024;
+const ROOM_VIDEO_MAX_DURATION_SEC = 60 * 60 * 8;
+const ROOM_VIDEO_MAX_FILENAME_LENGTH = 120;
+const ROOM_VIDEO_ALLOWED_MIME_TYPES = new Set([
+  "video/mp4",
+  "video/webm",
+  "video/ogg"
+]);
+const BLOCKED_STATIC_FILES = new Set([
+  "server.js",
+  "package.json",
+  "package-lock.json",
+  "yarn.lock",
+  "pnpm-lock.yaml",
+  "npm-shrinkwrap.json",
+  "agents.md"
+]);
+const BLOCKED_STATIC_DIRS = new Set(["data", ".git", "node_modules"]);
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -18,7 +49,12 @@ const MIME_TYPES = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
   ".svg": "image/svg+xml",
+  ".mp4": "video/mp4",
+  ".webm": "video/webm",
+  ".ogg": "video/ogg",
+  ".mov": "video/quicktime",
   ".ico": "image/x-icon"
 };
 
@@ -28,10 +64,17 @@ const rooms = new Map();
 const userLastSeen = new Map();
 const bannedUsers = new Map();
 const unbanRequests = new Map();
+let siteAnnouncement = null;
 
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+}
+
+function ensureUploadsDir() {
+  if (!fs.existsSync(ROOM_VIDEO_UPLOAD_DIR)) {
+    fs.mkdirSync(ROOM_VIDEO_UPLOAD_DIR, { recursive: true });
   }
 }
 
@@ -51,12 +94,15 @@ function loadUsers() {
       if (!item || typeof item.username !== "string" || typeof item.passwordHash !== "string") {
         return;
       }
-      users.set(item.username, {
+      const username = item.username.trim().toLowerCase();
+      if (!username) {
+        return;
+      }
+      users.set(username, {
         passwordHash: item.passwordHash,
+        passwordSalt: typeof item.passwordSalt === "string" ? item.passwordSalt : "",
         createdAt: Number(item.createdAt) || Date.now(),
-        displayName: typeof item.displayName === "string" && item.displayName.trim()
-          ? item.displayName.trim().slice(0, 30)
-          : item.username,
+        displayName: normalizeDisplayName(item.displayName, username),
         avatarDataUrl: typeof item.avatarDataUrl === "string" ? item.avatarDataUrl : ""
       });
     });
@@ -71,8 +117,9 @@ function saveUsers() {
     const list = Array.from(users.entries()).map(([username, info]) => ({
       username,
       passwordHash: info.passwordHash,
+      passwordSalt: typeof info.passwordSalt === "string" ? info.passwordSalt : "",
       createdAt: info.createdAt,
-      displayName: info.displayName || username,
+      displayName: normalizeDisplayName(info.displayName, username),
       avatarDataUrl: info.avatarDataUrl || ""
     }));
     fs.writeFileSync(USERS_FILE, JSON.stringify(list, null, 2), "utf8");
@@ -85,13 +132,18 @@ function loadModeration() {
   try {
     ensureDataDir();
     if (!fs.existsSync(MODERATION_FILE)) {
-      fs.writeFileSync(MODERATION_FILE, JSON.stringify({ bannedUsers: [], unbanRequests: [] }, null, 2), "utf8");
+      fs.writeFileSync(
+        MODERATION_FILE,
+        JSON.stringify({ bannedUsers: [], unbanRequests: [], siteAnnouncement: null }, null, 2),
+        "utf8"
+      );
       return;
     }
     const raw = fs.readFileSync(MODERATION_FILE, "utf8");
     const parsed = JSON.parse(raw);
     const bannedList = Array.isArray(parsed?.bannedUsers) ? parsed.bannedUsers : [];
     const requestList = Array.isArray(parsed?.unbanRequests) ? parsed.unbanRequests : [];
+    const savedAnnouncement = parsed?.siteAnnouncement;
 
     bannedList.forEach((entry) => {
       if (!entry || typeof entry.username !== "string") {
@@ -121,6 +173,8 @@ function loadModeration() {
         reviewNote: String(entry.reviewNote || "")
       });
     });
+
+    siteAnnouncement = formatSiteAnnouncement(savedAnnouncement);
   } catch (error) {
     console.error("Failed to load moderation:", error.message);
   }
@@ -131,7 +185,8 @@ function saveModeration() {
     ensureDataDir();
     const payload = {
       bannedUsers: Array.from(bannedUsers.values()),
-      unbanRequests: Array.from(unbanRequests.values())
+      unbanRequests: Array.from(unbanRequests.values()),
+      siteAnnouncement: siteAnnouncement ? { ...siteAnnouncement } : null
     };
     fs.writeFileSync(MODERATION_FILE, JSON.stringify(payload, null, 2), "utf8");
   } catch (error) {
@@ -151,6 +206,15 @@ function looksLikeMojibake(text) {
   return Boolean(suspicious && suspicious.length >= 3 && suspicious.length / text.length >= 0.2);
 }
 
+function normalizeDisplayName(value, fallbackUsername = "") {
+  const fallback = String(fallbackUsername || "").trim().toLowerCase().slice(0, 30);
+  const clean = String(value || "").trim().slice(0, 30);
+  if (!clean || looksLikeMojibake(clean)) {
+    return fallback || SUPERVISOR_USERNAME;
+  }
+  return clean;
+}
+
 function i18n(req, ar, en) {
   if (getLang(req) === "en") {
     return en;
@@ -158,13 +222,78 @@ function i18n(req, ar, en) {
   return looksLikeMojibake(ar) ? en : ar;
 }
 
+function securityHeaders(extra = {}) {
+  return {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "same-origin",
+    ...extra
+  };
+}
+
 function sendJson(res, statusCode, payload) {
-  res.writeHead(statusCode, { "Content-Type": "application/json; charset=utf-8" });
+  res.writeHead(
+    statusCode,
+    securityHeaders({
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store"
+    })
+  );
   res.end(JSON.stringify(payload));
 }
 
-function hashPassword(password) {
+function hashPasswordLegacy(password) {
   return crypto.createHash("sha256").update(password).digest("hex");
+}
+
+function hashPasswordSecure(password, salt) {
+  return crypto.scryptSync(password, salt, 64).toString("hex");
+}
+
+function createPasswordRecord(password) {
+  const passwordSalt = crypto.randomBytes(16).toString("hex");
+  return {
+    passwordSalt,
+    passwordHash: hashPasswordSecure(password, passwordSalt)
+  };
+}
+
+function verifyPassword(username, user, password) {
+  const salt = String(user?.passwordSalt || "").trim();
+  if (salt) {
+    return user.passwordHash === hashPasswordSecure(password, salt);
+  }
+  if (user.passwordHash !== hashPasswordLegacy(password)) {
+    return false;
+  }
+  // Upgrade legacy SHA-256 password hashes to salted scrypt on successful login.
+  const next = createPasswordRecord(password);
+  user.passwordSalt = next.passwordSalt;
+  user.passwordHash = next.passwordHash;
+  users.set(username, user);
+  saveUsers();
+  return true;
+}
+
+function normalizeUsername(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function isValidUsername(username) {
+  return (
+    typeof username === "string" &&
+    username.length >= USERNAME_MIN_LENGTH &&
+    username.length <= USERNAME_MAX_LENGTH &&
+    USERNAME_ALLOWED_REGEX.test(username)
+  );
+}
+
+function isValidPassword(password) {
+  return (
+    typeof password === "string" &&
+    password.length >= PASSWORD_MIN_LENGTH &&
+    password.length <= PASSWORD_MAX_LENGTH
+  );
 }
 
 function isSupervisor(username) {
@@ -210,6 +339,24 @@ function formatUnbanRequest(entry) {
   };
 }
 
+function formatSiteAnnouncement(entry) {
+  if (!entry) {
+    return null;
+  }
+  const cleanText = String(entry.text || "").trim();
+  if (!cleanText || looksLikeMojibake(cleanText)) {
+    return null;
+  }
+  const createdAt = Number(entry.createdAt) || Date.now();
+  const rawId = String(entry.id || "").trim();
+  return {
+    id: rawId || `legacy-${createdAt}`,
+    text: cleanText.slice(0, 500),
+    createdBy: String(entry.createdBy || SUPERVISOR_USERNAME).trim().toLowerCase() || SUPERVISOR_USERNAME,
+    createdAt
+  };
+}
+
 function sendBannedResponse(req, res, username) {
   const ban = formatBanRecord(getBanRecord(username));
   sendJson(res, 403, {
@@ -220,7 +367,8 @@ function sendBannedResponse(req, res, username) {
       "This account is banned from the site. You can send an unban request to the supervisor."
     ),
     ban,
-    unbanRequest: formatUnbanRequest(unbanRequests.get(String(username || "").toLowerCase()) || null)
+    unbanRequest: formatUnbanRequest(unbanRequests.get(String(username || "").toLowerCase()) || null),
+    announcement: formatSiteAnnouncement(siteAnnouncement)
   });
 }
 
@@ -268,7 +416,7 @@ function publicProfile(username) {
   }
   return {
     username,
-    displayName: info.displayName || username,
+    displayName: normalizeDisplayName(info.displayName, username),
     avatarDataUrl: info.avatarDataUrl || "",
     createdAt: info.createdAt,
     isOnline: isUserOnline(username),
@@ -276,8 +424,47 @@ function publicProfile(username) {
   };
 }
 
+function createSession(username) {
+  const token = randomToken();
+  sessions.set(token, {
+    username,
+    expiresAt: Date.now() + SESSION_TTL_MS
+  });
+  touchUser(username);
+  return token;
+}
+
+function getSessionUsername(token) {
+  if (!token || !sessions.has(token)) {
+    return null;
+  }
+  const entry = sessions.get(token);
+  const normalized =
+    typeof entry === "string"
+      ? { username: entry, expiresAt: Date.now() + SESSION_TTL_MS }
+      : {
+          username: normalizeUsername(entry?.username),
+          expiresAt: Number(entry?.expiresAt) || 0
+        };
+
+  if (!normalized.username || !users.has(normalized.username)) {
+    sessions.delete(token);
+    return null;
+  }
+  if (normalized.expiresAt && normalized.expiresAt < Date.now()) {
+    sessions.delete(token);
+    return null;
+  }
+
+  normalized.expiresAt = Date.now() + SESSION_TTL_MS;
+  sessions.set(token, normalized);
+  return normalized.username;
+}
+
 function removeUserSessions(username) {
-  sessions.forEach((sessionUser, token) => {
+  sessions.forEach((entry, token) => {
+    const sessionUser =
+      typeof entry === "string" ? entry : normalizeUsername(entry?.username);
     if (sessionUser === username) {
       sessions.delete(token);
     }
@@ -336,7 +523,7 @@ function formatAdminUserSummary(username) {
   const isOnline = isUserOnline(username);
   return {
     username,
-    displayName: info.displayName || username,
+    displayName: normalizeDisplayName(info.displayName, username),
     createdAt: Number(info.createdAt) || 0,
     isOnline,
     isBanned: isBanned(username),
@@ -358,7 +545,120 @@ function randomRoomCode() {
   return code;
 }
 
+function normalizeRoomVideoDuration(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return 0;
+  }
+  return Math.min(numeric, ROOM_VIDEO_MAX_DURATION_SEC);
+}
+
+function normalizeRoomVideoPlaybackRate(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return 1;
+  }
+  return Math.min(3, Math.max(0.25, numeric));
+}
+
+function clampRoomVideoTime(room, value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric < 0) {
+    return 0;
+  }
+  const duration = normalizeRoomVideoDuration(room?.video?.duration);
+  if (duration > 0) {
+    return Math.min(duration, numeric);
+  }
+  return numeric;
+}
+
+function roomVideoPublicToAbsolutePath(publicPath) {
+  const clean = String(publicPath || "").trim();
+  if (!clean || !clean.startsWith("/uploads/room-videos/")) {
+    return null;
+  }
+  const relative = clean.replace(/^\/+/, "");
+  const absolute = path.join(ROOT, relative);
+  const normalizedRoot = path.resolve(ROOM_VIDEO_UPLOAD_DIR);
+  const normalizedAbs = path.resolve(absolute);
+  if (!normalizedAbs.startsWith(normalizedRoot + path.sep) && normalizedAbs !== normalizedRoot) {
+    return null;
+  }
+  return absolute;
+}
+
+function removeRoomVideoAsset(room) {
+  if (!room || !room.video || !room.video.src) {
+    if (room) {
+      room.video = null;
+      room.videoSync = null;
+    }
+    return;
+  }
+  const absolutePath = roomVideoPublicToAbsolutePath(room.video.src);
+  if (absolutePath && fs.existsSync(absolutePath)) {
+    try {
+      fs.unlinkSync(absolutePath);
+    } catch (_error) {
+      // Ignore cleanup errors so room operations continue.
+    }
+  }
+  room.video = null;
+  room.videoSync = null;
+}
+
+function ensureRoomVideoRuntimeState(room) {
+  if (!room.video) {
+    room.video = null;
+  }
+  if (!room.videoSync) {
+    room.videoSync = null;
+  }
+}
+
+function getRoomVideoEffectiveTime(room, atTimestamp = Date.now()) {
+  if (!room || !room.video || !room.videoSync) {
+    return 0;
+  }
+  const sync = room.videoSync;
+  const base = clampRoomVideoTime(room, sync.baseTime);
+  if (!sync.playing) {
+    return base;
+  }
+  const playbackRate = normalizeRoomVideoPlaybackRate(sync.playbackRate);
+  const elapsedSec = Math.max(0, (Number(atTimestamp) - Number(sync.updatedAt || 0)) / 1000);
+  return clampRoomVideoTime(room, base + elapsedSec * playbackRate);
+}
+
+function formatRoomVideo(room) {
+  if (!room?.video) {
+    return null;
+  }
+  ensureRoomVideoRuntimeState(room);
+  const sync = room.videoSync;
+  const currentTime = sync ? getRoomVideoEffectiveTime(room) : 0;
+  return {
+    id: String(room.video.id || ""),
+    src: String(room.video.src || ""),
+    filename: String(room.video.filename || "video"),
+    mimeType: String(room.video.mimeType || "video/mp4"),
+    size: Number(room.video.size || 0),
+    uploadedBy: String(room.video.uploadedBy || room.host || ""),
+    uploadedAt: Number(room.video.uploadedAt || room.createdAt || Date.now()),
+    duration: normalizeRoomVideoDuration(room.video.duration),
+    sync: sync ? {
+      videoId: String(sync.videoId || ""),
+      playing: Boolean(sync.playing),
+      currentTime,
+      playbackRate: normalizeRoomVideoPlaybackRate(sync.playbackRate),
+      updatedAt: Number(sync.updatedAt || Date.now())
+    } : null
+  };
+}
+
 function formatRoom(room, viewer = null) {
+  ensureRoomRuntimeState(room);
   return {
     code: room.code,
     name: room.name,
@@ -366,7 +666,8 @@ function formatRoom(room, viewer = null) {
     members: Array.from(room.members),
     createdAt: room.createdAt,
     pendingCount: room.joinRequests.size,
-    hasPendingRequest: viewer ? room.joinRequests.has(viewer) : false
+    hasPendingRequest: viewer ? room.joinRequests.has(viewer) : false,
+    video: formatRoomVideo(room)
   };
 }
 
@@ -386,9 +687,75 @@ function formatRoomSummary(room, viewer) {
   };
 }
 
+function normalizeClientMessageId(value) {
+  const clean = String(value || "").trim();
+  if (!clean) {
+    return "";
+  }
+  if (clean.length > CLIENT_MESSAGE_ID_MAX_LENGTH) {
+    return "";
+  }
+  if (!CLIENT_MESSAGE_ID_REGEX.test(clean)) {
+    return "";
+  }
+  return clean;
+}
+
+function normalizeReplyToMessageId(value) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+  const numberValue = Number(value);
+  if (!Number.isInteger(numberValue) || numberValue <= 0) {
+    return NaN;
+  }
+  return numberValue;
+}
+
+function buildReplyReference(room, replyToMessageId) {
+  if (!Number.isInteger(replyToMessageId) || replyToMessageId <= 0) {
+    return null;
+  }
+  const target = room.messages.find((item) => item.id === replyToMessageId);
+  if (!target || target.type !== "user") {
+    return null;
+  }
+  return {
+    id: target.id,
+    user: target.user || "",
+    text: String(target.text || "").slice(0, REPLY_PREVIEW_MAX_LENGTH)
+  };
+}
+
+function ensureRoomRuntimeState(room) {
+  if (!room.approvedUsers) {
+    room.approvedUsers = new Set(room.members);
+  }
+  if (!room.messageFloorByUser) {
+    room.messageFloorByUser = new Map();
+  }
+  if (!(room.clientMessageLog instanceof Map)) {
+    room.clientMessageLog = new Map();
+  }
+  ensureRoomVideoRuntimeState(room);
+}
+
+function pruneClientMessageLog(room) {
+  if (!(room.clientMessageLog instanceof Map) || room.clientMessageLog.size === 0) {
+    return;
+  }
+  const cutoff = Date.now() - MESSAGE_DEDUP_TTL_MS;
+  room.clientMessageLog.forEach((entry, key) => {
+    if (!entry || Number(entry.timestamp || 0) < cutoff) {
+      room.clientMessageLog.delete(key);
+    }
+  });
+}
+
 function pushSystemMessage(room, key, payload = {}) {
+  const id = room.nextMessageId;
   room.messages.push({
-    id: room.nextMessageId,
+    id,
     type: "system",
     key,
     payload,
@@ -396,17 +763,21 @@ function pushSystemMessage(room, key, payload = {}) {
     timestamp: Date.now()
   });
   room.nextMessageId += 1;
+  return id;
 }
 
-function pushUserMessage(room, username, text) {
+function pushUserMessage(room, username, text, replyTo = null) {
+  const id = room.nextMessageId;
   room.messages.push({
-    id: room.nextMessageId,
+    id,
     type: "user",
     user: username,
     text,
+    replyTo: replyTo ? { ...replyTo } : null,
     timestamp: Date.now()
   });
   room.nextMessageId += 1;
+  return id;
 }
 
 function joinUserToRoom(room, username) {
@@ -430,7 +801,7 @@ function joinUserToRoom(room, username) {
 }
 
 function parseRoomPath(pathname) {
-  const match = pathname.match(/^\/api\/rooms\/([A-Za-z0-9]+)(?:\/(messages|kick|requests|request-join|leave))?$/);
+  const match = pathname.match(/^\/api\/rooms\/([A-Za-z0-9]+)(?:\/(messages|kick|requests|request-join|leave|video|video-sync))?$/);
   if (!match) {
     return null;
   }
@@ -441,15 +812,14 @@ function parseRoomPath(pathname) {
 }
 
 function removeMemberFromRoom(room, username) {
-  if (!room.messageFloorByUser) {
-    room.messageFloorByUser = new Map();
-  }
+  ensureRoomRuntimeState(room);
   // When a player leaves, hide old chat history for their next join.
   room.messageFloorByUser.set(username, room.nextMessageId - 1);
   room.members.delete(username);
   room.joinRequests.delete(username);
 
   if (room.members.size === 0) {
+    removeRoomVideoAsset(room);
     rooms.delete(room.code);
     return { deleted: true, room: null };
   }
@@ -517,6 +887,173 @@ function parseBody(req) {
   });
 }
 
+function parseMultipartFormData(req, maxBytes = ROOM_VIDEO_MAX_BYTES) {
+  return new Promise((resolve, reject) => {
+    const contentType = String(req.headers["content-type"] || "");
+    const boundaryMatch = contentType.match(/^multipart\/form-data;\s*boundary=(?:"([^"]+)"|([^;]+))/i);
+    if (!boundaryMatch) {
+      reject(new Error("Invalid multipart form data"));
+      return;
+    }
+    const boundary = String(boundaryMatch[1] || boundaryMatch[2] || "").trim();
+    if (!boundary) {
+      reject(new Error("Invalid multipart form data"));
+      return;
+    }
+
+    const contentLength = Number(req.headers["content-length"] || 0);
+    if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+      reject(new Error("Payload too large"));
+      req.destroy();
+      return;
+    }
+
+    const chunks = [];
+    let totalBytes = 0;
+    let settled = false;
+    const fail = (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      reject(error);
+    };
+    const done = (value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(value);
+    };
+
+    req.on("data", (chunk) => {
+      if (settled) {
+        return;
+      }
+      totalBytes += chunk.length;
+      if (totalBytes > maxBytes) {
+        fail(new Error("Payload too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+
+    req.on("end", () => {
+      if (settled) {
+        return;
+      }
+      try {
+        const buffer = Buffer.concat(chunks);
+        const delimiter = Buffer.from(`--${boundary}`);
+        let cursor = buffer.indexOf(delimiter);
+        if (cursor !== 0) {
+          throw new Error("Invalid multipart form data");
+        }
+
+        const fields = {};
+        const files = [];
+        while (cursor !== -1) {
+          cursor += delimiter.length;
+          if (buffer[cursor] === 45 && buffer[cursor + 1] === 45) {
+            break;
+          }
+          if (buffer[cursor] === 13 && buffer[cursor + 1] === 10) {
+            cursor += 2;
+          }
+
+          const headerEnd = buffer.indexOf(Buffer.from("\r\n\r\n"), cursor);
+          if (headerEnd === -1) {
+            throw new Error("Invalid multipart form data");
+          }
+
+          const rawHeaders = buffer.slice(cursor, headerEnd).toString("utf8");
+          const headers = {};
+          rawHeaders.split("\r\n").forEach((line) => {
+            const colon = line.indexOf(":");
+            if (colon <= 0) {
+              return;
+            }
+            const key = line.slice(0, colon).trim().toLowerCase();
+            const value = line.slice(colon + 1).trim();
+            headers[key] = value;
+          });
+
+          const disposition = String(headers["content-disposition"] || "");
+          const fieldNameMatch = disposition.match(/name="([^"]+)"/i);
+          if (!fieldNameMatch) {
+            throw new Error("Invalid multipart form data");
+          }
+          const fieldName = String(fieldNameMatch[1] || "").trim();
+          const fileNameMatch = disposition.match(/filename="([^"]*)"/i);
+
+          const dataStart = headerEnd + 4;
+          const nextBoundaryIndex = buffer.indexOf(Buffer.from(`\r\n--${boundary}`), dataStart);
+          if (nextBoundaryIndex === -1) {
+            throw new Error("Invalid multipart form data");
+          }
+          const data = buffer.slice(dataStart, nextBoundaryIndex);
+
+          if (fileNameMatch && fileNameMatch[1] !== "") {
+            files.push({
+              fieldName,
+              filename: String(fileNameMatch[1] || ""),
+              contentType: String(headers["content-type"] || "application/octet-stream"),
+              data
+            });
+          } else if (!Object.prototype.hasOwnProperty.call(fields, fieldName)) {
+            fields[fieldName] = data.toString("utf8");
+          }
+
+          cursor = nextBoundaryIndex + 2;
+          if (buffer.indexOf(Buffer.from(`--${boundary}--`), cursor) === cursor) {
+            break;
+          }
+          if (buffer.indexOf(delimiter, cursor) !== cursor) {
+            throw new Error("Invalid multipart form data");
+          }
+        }
+
+        done({ fields, files });
+      } catch (error) {
+        fail(error);
+      }
+    });
+
+    req.on("error", fail);
+  });
+}
+
+function sanitizeUploadedFilename(value) {
+  const base = path.basename(String(value || "").trim()).replace(/[^\p{L}\p{N}._ -]/gu, "_");
+  const collapsed = base.replace(/\s+/g, " ").trim();
+  if (!collapsed) {
+    return "video";
+  }
+  return collapsed.slice(0, ROOM_VIDEO_MAX_FILENAME_LENGTH);
+}
+
+function normalizeVideoMimeType(value) {
+  return String(value || "")
+    .split(";")[0]
+    .trim()
+    .toLowerCase();
+}
+
+function normalizeVideoExtension(filename, mimeType) {
+  const fromName = path.extname(String(filename || "")).trim().toLowerCase();
+  if (fromName === ".mp4" || fromName === ".webm" || fromName === ".ogg") {
+    return fromName;
+  }
+  if (mimeType === "video/webm") {
+    return ".webm";
+  }
+  if (mimeType === "video/ogg") {
+    return ".ogg";
+  }
+  return ".mp4";
+}
+
 function getBearerToken(req) {
   const auth = req.headers.authorization || "";
   if (!auth.startsWith("Bearer ")) {
@@ -535,36 +1072,159 @@ function safeDecodeURIComponent(value) {
 
 function getUserFromRequest(req) {
   const token = getBearerToken(req);
-  if (!token || !sessions.has(token)) {
+  const username = getSessionUsername(token);
+  if (!username) {
     return null;
   }
-  const username = sessions.get(token);
   touchUser(username);
   return username;
 }
 
-function serveStatic(pathname, res) {
-  const urlPath = pathname === "/" ? "/index.html" : pathname;
-  const safePath = path.normalize(urlPath).replace(/^(\.\.[/\\])+/, "");
-  const filePath = path.join(ROOT, safePath);
+function isBlockedStaticPath(relativePath) {
+  const normalized = String(relativePath || "")
+    .replace(/\\/g, "/")
+    .replace(/^\/+/, "")
+    .trim()
+    .toLowerCase();
+  if (!normalized || normalized === ".") {
+    return false;
+  }
 
-  if (!filePath.startsWith(ROOT)) {
-    res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
+  const segments = normalized.split("/").filter(Boolean);
+  if (segments.length === 0) {
+    return false;
+  }
+  if (segments.some((part) => part.startsWith("."))) {
+    return true;
+  }
+  if (BLOCKED_STATIC_DIRS.has(segments[0])) {
+    return true;
+  }
+  return BLOCKED_STATIC_FILES.has(segments[segments.length - 1]);
+}
+
+function serveStatic(pathname, req, res) {
+  const urlPath = pathname === "/" ? "/index.html" : pathname;
+  const decodedPath = safeDecodeURIComponent(urlPath);
+  if (decodedPath === null) {
+    res.writeHead(
+      400,
+      securityHeaders({
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-store"
+      })
+    );
+    res.end("400 - Bad request");
+    return;
+  }
+
+  const safePath = path.normalize(decodedPath).replace(/^([/\\])+/, "");
+  const filePath = path.join(ROOT, safePath);
+  const relativePath = path.relative(ROOT, filePath);
+
+  if (
+    !relativePath ||
+    relativePath.startsWith("..") ||
+    path.isAbsolute(relativePath) ||
+    isBlockedStaticPath(relativePath)
+  ) {
+    res.writeHead(
+      403,
+      securityHeaders({
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-store"
+      })
+    );
     res.end("403 - Forbidden");
     return;
   }
 
-  fs.readFile(filePath, (err, data) => {
-    if (err) {
-      res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+  fs.stat(filePath, (statError, stats) => {
+    if (statError || !stats.isFile()) {
+      res.writeHead(
+        404,
+        securityHeaders({
+          "Content-Type": "text/plain; charset=utf-8",
+          "Cache-Control": "no-store"
+        })
+      );
       res.end("404 - File not found");
       return;
     }
 
     const ext = path.extname(filePath).toLowerCase();
     const contentType = MIME_TYPES[ext] || "application/octet-stream";
-    res.writeHead(200, { "Content-Type": contentType });
-    res.end(data);
+    const cacheControl =
+      ext === ".html" ? "no-store" : "public, max-age=300, must-revalidate";
+    const isVideo = contentType.startsWith("video/");
+    const rangeHeader = String(req.headers.range || "").trim();
+
+    if (isVideo && rangeHeader) {
+      const match = rangeHeader.match(/^bytes=(\d*)-(\d*)$/i);
+      if (!match) {
+        res.writeHead(
+          416,
+          securityHeaders({
+            "Content-Range": `bytes */${stats.size}`,
+            "Cache-Control": "no-store"
+          })
+        );
+        res.end();
+        return;
+      }
+      const start = match[1] === "" ? 0 : Number(match[1]);
+      const end = match[2] === "" ? stats.size - 1 : Number(match[2]);
+      if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || start >= stats.size) {
+        res.writeHead(
+          416,
+          securityHeaders({
+            "Content-Range": `bytes */${stats.size}`,
+            "Cache-Control": "no-store"
+          })
+        );
+        res.end();
+        return;
+      }
+      const safeEnd = Math.min(end, stats.size - 1);
+      const chunkSize = safeEnd - start + 1;
+      res.writeHead(
+        206,
+        securityHeaders({
+          "Content-Type": contentType,
+          "Cache-Control": cacheControl,
+          "Accept-Ranges": "bytes",
+          "Content-Range": `bytes ${start}-${safeEnd}/${stats.size}`,
+          "Content-Length": chunkSize
+        })
+      );
+      const stream = fs.createReadStream(filePath, { start, end: safeEnd });
+      stream.on("error", () => {
+        if (!res.headersSent) {
+          res.writeHead(500, securityHeaders({ "Cache-Control": "no-store" }));
+        }
+        res.end();
+      });
+      stream.pipe(res);
+      return;
+    }
+
+    res.writeHead(
+      200,
+      securityHeaders({
+        "Content-Type": contentType,
+        "Cache-Control": cacheControl,
+        "Content-Length": stats.size,
+        ...(isVideo ? { "Accept-Ranges": "bytes" } : {})
+      })
+    );
+    const stream = fs.createReadStream(filePath);
+    stream.on("error", () => {
+      if (!res.headersSent) {
+        res.writeHead(500, securityHeaders({ "Cache-Control": "no-store" }));
+      }
+      res.end();
+    });
+    stream.pipe(res);
   });
 }
 
@@ -574,12 +1234,26 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && pathname === "/api/register") {
     const { username, password } = await parseBody(req);
-    const cleanUser = String(username || "").trim().toLowerCase();
+    const cleanUser = normalizeUsername(username);
     const cleanPass = String(password || "");
 
-    if (cleanUser.length < 3 || cleanPass.length < 4) {
+    if (!isValidUsername(cleanUser)) {
       sendJson(res, 400, {
-        error: i18n(req, "اسم المستخدم أو كلمة المرور قصيرة جدًا.", "Username or password is too short.")
+        error: i18n(
+          req,
+          "اسم المستخدم يجب أن يكون بين 3 و 30 حرفًا ويحتوي على أحرف/أرقام فقط.",
+          "Username must be 3-30 characters and use only letters, numbers, _ or -."
+        )
+      });
+      return;
+    }
+    if (!isValidPassword(cleanPass)) {
+      sendJson(res, 400, {
+        error: i18n(
+          req,
+          "كلمة المرور يجب أن تكون بين 4 و 128 حرفًا.",
+          "Password must be 4-128 characters."
+        )
       });
       return;
     }
@@ -590,24 +1264,31 @@ async function handleApi(req, res) {
       return;
     }
 
+    const passwordRecord = createPasswordRecord(cleanPass);
     users.set(cleanUser, {
-      passwordHash: hashPassword(cleanPass),
+      passwordHash: passwordRecord.passwordHash,
+      passwordSalt: passwordRecord.passwordSalt,
       createdAt: Date.now(),
       displayName: cleanUser,
       avatarDataUrl: ""
     });
     saveUsers();
-    const token = randomToken();
-    sessions.set(token, cleanUser);
-    touchUser(cleanUser);
-    sendJson(res, 201, { token, username: cleanUser });
+    const token = createSession(cleanUser);
+    sendJson(res, 201, { token, username: cleanUser, announcement: formatSiteAnnouncement(siteAnnouncement) });
     return;
   }
 
   if (req.method === "POST" && pathname === "/api/login") {
     const { username, password } = await parseBody(req);
-    const cleanUser = String(username || "").trim().toLowerCase();
+    const cleanUser = normalizeUsername(username);
     const cleanPass = String(password || "");
+
+    if (!cleanUser || !cleanPass || cleanPass.length > PASSWORD_MAX_LENGTH) {
+      sendJson(res, 401, {
+        error: i18n(req, "بيانات الدخول غير صحيحة.", "Invalid login credentials.")
+      });
+      return;
+    }
 
     if (!users.has(cleanUser)) {
       sendJson(res, 401, {
@@ -616,7 +1297,7 @@ async function handleApi(req, res) {
       return;
     }
     const user = users.get(cleanUser);
-    if (user.passwordHash !== hashPassword(cleanPass)) {
+    if (!verifyPassword(cleanUser, user, cleanPass)) {
       sendJson(res, 401, {
         error: i18n(req, "بيانات الدخول غير صحيحة.", "Invalid login credentials.")
       });
@@ -627,18 +1308,25 @@ async function handleApi(req, res) {
       return;
     }
 
-    const token = randomToken();
-    sessions.set(token, cleanUser);
-    touchUser(cleanUser);
-    sendJson(res, 200, { token, username: cleanUser });
+    const token = createSession(cleanUser);
+    sendJson(res, 200, { token, username: cleanUser, announcement: formatSiteAnnouncement(siteAnnouncement) });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/logout") {
+    const token = getBearerToken(req);
+    if (token) {
+      sessions.delete(token);
+    }
+    sendJson(res, 200, { ok: true });
     return;
   }
 
   if (req.method === "POST" && pathname === "/api/ban-appeals") {
     const { username: rawUsername, reason } = await parseBody(req);
-    const username = String(rawUsername || "").trim().toLowerCase();
+    const username = normalizeUsername(rawUsername);
     const cleanReason = String(reason || "").trim();
-    if (!username || !users.has(username)) {
+    if (!isValidUsername(username) || !users.has(username)) {
       sendJson(res, 404, {
         error: i18n(req, "الحساب غير موجود.", "Account not found.")
       });
@@ -681,8 +1369,8 @@ async function handleApi(req, res) {
       });
       return;
     }
-    const username = decodedUsername.trim().toLowerCase();
-    if (!username || !users.has(username)) {
+    const username = normalizeUsername(decodedUsername);
+    if (!isValidUsername(username) || !users.has(username)) {
       sendJson(res, 404, {
         error: i18n(req, "الحساب غير موجود.", "Account not found.")
       });
@@ -691,7 +1379,8 @@ async function handleApi(req, res) {
     sendJson(res, 200, {
       isBanned: isBanned(username),
       ban: formatBanRecord(getBanRecord(username)),
-      request: formatUnbanRequest(unbanRequests.get(username) || null)
+      request: formatUnbanRequest(unbanRequests.get(username) || null),
+      announcement: formatSiteAnnouncement(siteAnnouncement)
     });
     return;
   }
@@ -709,7 +1398,8 @@ async function handleApi(req, res) {
       isSupervisor: isSupervisor(username),
       banned: isBanned(username),
       ban: formatBanRecord(getBanRecord(username)),
-      unbanRequest: formatUnbanRequest(unbanRequests.get(username) || null)
+      unbanRequest: formatUnbanRequest(unbanRequests.get(username) || null),
+      announcement: formatSiteAnnouncement(siteAnnouncement)
     });
     return;
   }
@@ -762,6 +1452,41 @@ async function handleApi(req, res) {
     return;
   }
 
+  if (req.method === "POST" && pathname === "/api/admin/site-announcement") {
+    const username = getUserFromRequest(req);
+    if (!username) {
+      sendJson(res, 401, { error: i18n(req, "غير مصرح.", "Unauthorized.") });
+      return;
+    }
+    if (!assertSupervisor(req, res, username)) {
+      return;
+    }
+    const { text } = await parseBody(req);
+    const cleanText = String(text || "").trim();
+    if (!cleanText) {
+      sendJson(res, 400, {
+        error: i18n(req, "الرسالة العامة مطلوبة.", "Announcement text is required.")
+      });
+      return;
+    }
+    if (cleanText.length > 500) {
+      sendJson(res, 400, {
+        error: i18n(req, "الرسالة العامة طويلة جدًا (الحد 500 حرف).", "Announcement is too long (max 500 chars).")
+      });
+      return;
+    }
+    const now = Date.now();
+    siteAnnouncement = {
+      id: `${now}-${crypto.randomBytes(4).toString("hex")}`,
+      text: cleanText,
+      createdBy: username,
+      createdAt: now
+    };
+    saveModeration();
+    sendJson(res, 201, { ok: true, announcement: formatSiteAnnouncement(siteAnnouncement) });
+    return;
+  }
+
   if (req.method === "POST" && pathname === "/api/admin/ban-user") {
     const username = getUserFromRequest(req);
     if (!username) {
@@ -772,9 +1497,9 @@ async function handleApi(req, res) {
       return;
     }
     const { username: rawTarget, reason } = await parseBody(req);
-    const target = String(rawTarget || "").trim().toLowerCase();
+    const target = normalizeUsername(rawTarget);
     const cleanReason = String(reason || "").trim();
-    if (!target || !users.has(target)) {
+    if (!isValidUsername(target) || !users.has(target)) {
       sendJson(res, 404, { error: i18n(req, "الحساب غير موجود.", "Account not found.") });
       return;
     }
@@ -808,9 +1533,9 @@ async function handleApi(req, res) {
       return;
     }
     const { username: rawTarget, note } = await parseBody(req);
-    const target = String(rawTarget || "").trim().toLowerCase();
+    const target = normalizeUsername(rawTarget);
     const cleanNote = String(note || "").trim();
-    if (!target || !users.has(target)) {
+    if (!isValidUsername(target) || !users.has(target)) {
       sendJson(res, 404, { error: i18n(req, "الحساب غير موجود.", "Account not found.") });
       return;
     }
@@ -838,8 +1563,8 @@ async function handleApi(req, res) {
       return;
     }
     const { username: rawTarget } = await parseBody(req);
-    const target = String(rawTarget || "").trim().toLowerCase();
-    if (!target || !users.has(target)) {
+    const target = normalizeUsername(rawTarget);
+    if (!isValidUsername(target) || !users.has(target)) {
       sendJson(res, 404, { error: i18n(req, "الحساب غير موجود.", "Account not found.") });
       return;
     }
@@ -870,10 +1595,10 @@ async function handleApi(req, res) {
       return;
     }
     const { username: rawTarget, action, note } = await parseBody(req);
-    const target = String(rawTarget || "").trim().toLowerCase();
+    const target = normalizeUsername(rawTarget);
     const cleanAction = String(action || "").trim().toLowerCase();
     const cleanNote = String(note || "").trim();
-    if (!target || !unbanRequests.has(target)) {
+    if (!isValidUsername(target) || !unbanRequests.has(target)) {
       sendJson(res, 404, { error: i18n(req, "طلب غير موجود.", "Request not found.") });
       return;
     }
@@ -988,8 +1713,8 @@ async function handleApi(req, res) {
       sendJson(res, 400, { error: i18n(req, "معرف المستخدم غير صالح.", "Invalid user identifier.") });
       return;
     }
-    const target = decodedTarget.trim().toLowerCase();
-    if (!target) {
+    const target = normalizeUsername(decodedTarget);
+    if (!isValidUsername(target)) {
       sendJson(res, 400, { error: i18n(req, "معرف المستخدم غير صالح.", "Invalid user identifier.") });
       return;
     }
@@ -1023,6 +1748,17 @@ async function handleApi(req, res) {
     }
 
     const { roomName } = await parseBody(req);
+    const cleanRoomName = String(roomName || "").trim();
+    if (cleanRoomName.length > ROOM_NAME_MAX_LENGTH) {
+      sendJson(res, 400, {
+        error: i18n(
+          req,
+          "اسم الغرفة طويل جدًا (الحد 40 حرفًا).",
+          "Room name is too long (max 40 characters)."
+        )
+      });
+      return;
+    }
     let code = randomRoomCode();
     while (rooms.has(code)) {
       code = randomRoomCode();
@@ -1030,16 +1766,19 @@ async function handleApi(req, res) {
 
     const room = {
       code,
-      name: String(roomName || "").trim() || i18n(req, "غرفة جديدة", "New Room"),
+      name: cleanRoomName || i18n(req, "غرفة جديدة", "New Room"),
       host: username,
       pendingHostRestore: null,
       members: new Set([username]),
       approvedUsers: new Set([username]),
       joinRequests: new Set(),
       messageFloorByUser: new Map([[username, 0]]),
+      clientMessageLog: new Map(),
       messages: [],
       nextMessageId: 1,
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      video: null,
+      videoSync: null
     };
     pushSystemMessage(room, "room_created", { user: username });
     rooms.set(code, room);
@@ -1066,7 +1805,8 @@ async function handleApi(req, res) {
       stats: {
         onlineUsers: countOnlineUsers(),
         usersInRooms: countUsersInsideRooms()
-      }
+      },
+      announcement: formatSiteAnnouncement(siteAnnouncement)
     });
     return;
   }
@@ -1093,12 +1833,7 @@ async function handleApi(req, res) {
     }
 
     const room = rooms.get(roomCode);
-    if (!room.approvedUsers) {
-      room.approvedUsers = new Set(room.members);
-    }
-    if (!room.messageFloorByUser) {
-      room.messageFloorByUser = new Map();
-    }
+    ensureRoomRuntimeState(room);
 
     if (!room.members.has(username)) {
       if (room.approvedUsers.has(username) || isSupervisor(username)) {
@@ -1139,13 +1874,7 @@ async function handleApi(req, res) {
       return;
     }
     const room = rooms.get(roomPath.code);
-
-    if (!room.approvedUsers) {
-      room.approvedUsers = new Set(room.members);
-    }
-    if (!room.messageFloorByUser) {
-      room.messageFloorByUser = new Map();
-    }
+    ensureRoomRuntimeState(room);
     if (req.method === "POST" && roomPath.action === "request-join") {
       if (room.members.has(username)) {
         sendJson(res, 200, {
@@ -1155,7 +1884,22 @@ async function handleApi(req, res) {
         });
         return;
       }
-      if (room.approvedUsers.has(username) || isSupervisor(username)) {
+      if (room.approvedUsers.has(username)) {
+        if (isSupervisor(username)) {
+          if (room.joinRequests.has(username)) {
+            sendJson(res, 200, {
+              ok: true,
+              status: "pending"
+            });
+            return;
+          }
+          room.joinRequests.add(username);
+          sendJson(res, 202, {
+            ok: true,
+            status: "pending"
+          });
+          return;
+        }
         joinUserToRoom(room, username);
         sendJson(res, 200, {
           ok: true,
@@ -1202,11 +1946,12 @@ async function handleApi(req, res) {
     }
 
     if (req.method === "GET" && roomPath.action === "messages") {
-      const since = Number(fullUrl.searchParams.get("since") || "0");
+      const rawSince = Number(fullUrl.searchParams.get("since"));
+      const since = Number.isFinite(rawSince) && rawSince > 0 ? Math.floor(rawSince) : 0;
       const floor = room.messageFloorByUser.get(username) || 0;
       const fromId = Math.max(since, floor);
       const messages = room.messages.filter((msg) => msg.id > fromId);
-      sendJson(res, 200, { room: formatRoom(room, username), messages });
+      sendJson(res, 200, { room: formatRoom(room, username), messages, announcement: formatSiteAnnouncement(siteAnnouncement) });
       return;
     }
 
@@ -1229,9 +1974,9 @@ async function handleApi(req, res) {
         return;
       }
       const { username: targetRaw, action } = await parseBody(req);
-      const target = String(targetRaw || "").trim().toLowerCase();
+      const target = normalizeUsername(targetRaw);
       const cleanAction = String(action || "").trim().toLowerCase();
-      if (!target) {
+      if (!isValidUsername(target)) {
         sendJson(res, 400, {
           error: i18n(req, "اسم اللاعب المستهدف مطلوب.", "Target username is required.")
         });
@@ -1271,7 +2016,7 @@ async function handleApi(req, res) {
     }
 
     if (req.method === "POST" && roomPath.action === "messages") {
-      const { text } = await parseBody(req);
+      const { text, clientMessageId, replyToMessageId } = await parseBody(req);
       const messageText = String(text || "").trim();
       if (!messageText) {
         sendJson(res, 400, {
@@ -1286,8 +2031,197 @@ async function handleApi(req, res) {
         return;
       }
 
-      pushUserMessage(room, username, messageText);
-      sendJson(res, 201, { ok: true });
+      const normalizedReplyToMessageId = normalizeReplyToMessageId(replyToMessageId);
+      if (Number.isNaN(normalizedReplyToMessageId)) {
+        sendJson(res, 400, {
+          error: i18n(req, "معرف الرد غير صالح.", "Invalid reply identifier.")
+        });
+        return;
+      }
+      let replyTo = null;
+      if (normalizedReplyToMessageId) {
+        replyTo = buildReplyReference(room, normalizedReplyToMessageId);
+        if (!replyTo) {
+          sendJson(res, 400, {
+            error: i18n(
+              req,
+              "لا يمكن الرد على هذه الرسالة.",
+              "You can only reply to an existing player message."
+            )
+          });
+          return;
+        }
+      }
+
+      const normalizedClientMessageId = normalizeClientMessageId(clientMessageId);
+      if (clientMessageId !== undefined && !normalizedClientMessageId) {
+        sendJson(res, 400, {
+          error: i18n(req, "معرف الرسالة غير صالح.", "Invalid message identifier.")
+        });
+        return;
+      }
+
+      let dedupeKey = "";
+      if (normalizedClientMessageId) {
+        dedupeKey = `${username}:${normalizedClientMessageId}`;
+        pruneClientMessageLog(room);
+        const existing = room.clientMessageLog.get(dedupeKey);
+        if (existing) {
+          sendJson(res, 200, { ok: true, duplicate: true, messageId: existing.messageId });
+          return;
+        }
+      }
+
+      const messageId = pushUserMessage(room, username, messageText, replyTo);
+      if (dedupeKey) {
+        room.clientMessageLog.set(dedupeKey, {
+          messageId,
+          timestamp: Date.now()
+        });
+      }
+      sendJson(res, 201, { ok: true, messageId });
+      return;
+    }
+
+    if (req.method === "POST" && roomPath.action === "video") {
+      if (room.host !== username) {
+        sendJson(res, 403, {
+          code: "VIDEO_HOST_ONLY",
+          error: i18n(req, "فقط قائد الغرفة يمكنه رفع الفيديو.", "Only the room leader can upload videos.")
+        });
+        return;
+      }
+
+      const multipart = await parseMultipartFormData(req, ROOM_VIDEO_MAX_BYTES);
+      const uploaded = multipart.files.find((file) => file.fieldName === "video") || multipart.files[0] || null;
+      if (!uploaded || !uploaded.data || uploaded.data.length === 0) {
+        sendJson(res, 400, {
+          code: "VIDEO_FILE_REQUIRED",
+          error: i18n(req, "اختر ملف فيديو صالح.", "Please choose a valid video file.")
+        });
+        return;
+      }
+      if (uploaded.data.length > ROOM_VIDEO_MAX_BYTES) {
+        sendJson(res, 413, {
+          code: "VIDEO_TOO_LARGE",
+          error: i18n(req, "حجم الفيديو كبير جدًا (الحد 80MB).", "Video file is too large (max 80MB).")
+        });
+        return;
+      }
+
+      const mimeType = normalizeVideoMimeType(uploaded.contentType);
+      if (!ROOM_VIDEO_ALLOWED_MIME_TYPES.has(mimeType)) {
+        sendJson(res, 415, {
+          code: "VIDEO_INVALID_TYPE",
+          error: i18n(req, "نوع الفيديو غير مدعوم. استخدم MP4 أو WebM أو OGG.", "Unsupported video type. Use MP4, WebM or OGG.")
+        });
+        return;
+      }
+
+      ensureUploadsDir();
+      const cleanFileName = sanitizeUploadedFilename(uploaded.filename || "room-video");
+      const extension = normalizeVideoExtension(cleanFileName, mimeType);
+      const storedFileName = `room-${room.code.toLowerCase()}-${Date.now()}-${crypto.randomBytes(6).toString("hex")}${extension}`;
+      const absolutePath = path.join(ROOM_VIDEO_UPLOAD_DIR, storedFileName);
+      fs.writeFileSync(absolutePath, uploaded.data);
+
+      const normalizedDuration = normalizeRoomVideoDuration(multipart.fields.duration);
+      removeRoomVideoAsset(room);
+      room.video = {
+        id: randomToken(),
+        src: `/uploads/room-videos/${storedFileName}`,
+        filename: cleanFileName,
+        mimeType,
+        size: uploaded.data.length,
+        uploadedBy: username,
+        uploadedAt: Date.now(),
+        duration: normalizedDuration
+      };
+      room.videoSync = {
+        videoId: room.video.id,
+        playing: false,
+        baseTime: 0,
+        playbackRate: 1,
+        updatedAt: Date.now()
+      };
+
+      sendJson(res, 201, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });
+      return;
+    }
+
+    if (req.method === "POST" && roomPath.action === "video-sync") {
+      if (room.host !== username) {
+        sendJson(res, 403, {
+          code: "VIDEO_HOST_ONLY",
+          error: i18n(req, "فقط قائد الغرفة يمكنه مزامنة الفيديو.", "Only the room leader can sync the video.")
+        });
+        return;
+      }
+      if (!room.video || !room.videoSync) {
+        sendJson(res, 404, {
+          code: "VIDEO_NOT_FOUND",
+          error: i18n(req, "لا يوجد فيديو في الغرفة.", "No room video is available.")
+        });
+        return;
+      }
+
+      const { action, currentTime, playbackRate, duration, videoId } = await parseBody(req);
+      const cleanAction = String(action || "").trim().toLowerCase();
+      if (!["play", "pause", "seek", "rate", "stop"].includes(cleanAction)) {
+        sendJson(res, 400, {
+          error: i18n(req, "إجراء مزامنة فيديو غير صالح.", "Invalid video sync action.")
+        });
+        return;
+      }
+
+      const clientVideoId = String(videoId || "").trim();
+      if (clientVideoId && clientVideoId !== String(room.video.id || "")) {
+        sendJson(res, 409, {
+          code: "VIDEO_STALE",
+          error: i18n(req, "هذه النسخة من الفيديو قديمة. قم بتحديث الغرفة.", "This video version is outdated. Refresh room data.")
+        });
+        return;
+      }
+
+      const now = Date.now();
+      const effective = getRoomVideoEffectiveTime(room, now);
+      const nextRate = normalizeRoomVideoPlaybackRate(
+        playbackRate !== undefined ? playbackRate : room.videoSync.playbackRate
+      );
+      const nextTime = currentTime !== undefined ? clampRoomVideoTime(room, currentTime) : effective;
+      const normalizedDuration = normalizeRoomVideoDuration(duration);
+      if (normalizedDuration > 0) {
+        room.video.duration = normalizedDuration;
+      }
+
+      if (cleanAction === "play") {
+        room.videoSync.playing = true;
+        room.videoSync.baseTime = nextTime;
+        room.videoSync.playbackRate = nextRate;
+        room.videoSync.updatedAt = now;
+      } else if (cleanAction === "pause") {
+        room.videoSync.playing = false;
+        room.videoSync.baseTime = nextTime;
+        room.videoSync.playbackRate = nextRate;
+        room.videoSync.updatedAt = now;
+      } else if (cleanAction === "seek") {
+        room.videoSync.baseTime = nextTime;
+        room.videoSync.updatedAt = now;
+        if (playbackRate !== undefined) {
+          room.videoSync.playbackRate = nextRate;
+        }
+      } else if (cleanAction === "rate") {
+        room.videoSync.baseTime = effective;
+        room.videoSync.playbackRate = nextRate;
+        room.videoSync.updatedAt = now;
+      } else if (cleanAction === "stop") {
+        room.videoSync.playing = false;
+        room.videoSync.baseTime = 0;
+        room.videoSync.playbackRate = 1;
+        room.videoSync.updatedAt = now;
+      }
+
+      sendJson(res, 200, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });
       return;
     }
 
@@ -1300,8 +2234,8 @@ async function handleApi(req, res) {
       }
 
       const { username: targetRaw } = await parseBody(req);
-      const target = String(targetRaw || "").trim().toLowerCase();
-      if (!target) {
+      const target = normalizeUsername(targetRaw);
+      if (!isValidUsername(target)) {
         sendJson(res, 400, {
           error: i18n(req, "اسم اللاعب المستهدف مطلوب.", "Target username is required.")
         });
@@ -1310,6 +2244,13 @@ async function handleApi(req, res) {
       if (target === room.host) {
         sendJson(res, 400, {
           error: i18n(req, "لا يمكن للقائد طرد نفسه.", "Leader cannot kick themselves.")
+        });
+        return;
+      }
+      if (isSupervisor(target)) {
+        sendJson(res, 403, {
+          code: "SUPERVISOR_KICK_FORBIDDEN",
+          error: i18n(req, "لا يمكن طرد مشرف من الغرفة.", "A supervisor cannot be kicked from this room.")
         });
         return;
       }
@@ -1351,7 +2292,7 @@ const server = http.createServer(async (req, res) => {
       await handleApi(req, res);
       return;
     }
-    serveStatic(pathname, res);
+    serveStatic(pathname, req, res);
   } catch (error) {
     if (error.message === "Payload too large") {
       sendJson(res, 413, {
@@ -1365,6 +2306,12 @@ const server = http.createServer(async (req, res) => {
       });
       return;
     }
+    if (error.message === "Invalid multipart form data") {
+      sendJson(res, 400, {
+        error: i18n(req, "ملف الفيديو غير صالح.", "Invalid video upload payload.")
+      });
+      return;
+    }
     sendJson(res, 500, {
       error: i18n(req, "خطأ داخلي في الخادم.", "Internal server error.")
     });
@@ -1373,6 +2320,7 @@ const server = http.createServer(async (req, res) => {
 
 loadUsers();
 loadModeration();
+ensureUploadsDir();
 
 server.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
