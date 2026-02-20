@@ -2176,7 +2176,7 @@ ul {
 
   .room-grid {
     grid-template-columns: 1fr;
-    gap: 0.75rem;
+    gap: 0.65rem;
   }
 
   .video-box,
@@ -2186,18 +2186,28 @@ ul {
     min-height: auto;
   }
 
+  .room-layout {
+    min-height: calc(100dvh - 5.4rem);
+  }
+
+  .video-box {
+    order: 1;
+  }
+
   .chat-box {
+    order: 2;
     display: grid;
     grid-template-rows: auto minmax(0, 1fr) auto;
-    gap: 0.6rem;
+    gap: 0.5rem;
   }
 
   .chat-messages {
-    height: clamp(220px, 36vh, 320px);
-    padding: 0.65rem;
+    height: clamp(200px, 30vh, 300px);
+    padding: 0.62rem;
   }
 
   .players-box {
+    order: 3;
     min-height: 0;
   }
 
@@ -2220,6 +2230,7 @@ ul {
 @media (max-width: 640px) {
   .app {
     padding-top: 4.15rem;
+    padding-inline: 0.55rem;
   }
 
   .lobby-head,
@@ -2262,12 +2273,30 @@ ul {
     gap: 0.42rem;
   }
 
+  .room-layout {
+    padding: 0.82rem;
+    border-radius: 14px;
+  }
+
+  .video-player-frame {
+    border-radius: 12px;
+  }
+
+  .room-video-player {
+    aspect-ratio: 16 / 10;
+  }
+
   .video-hint {
     font-size: 0.82rem;
   }
 
   .chat-messages {
-    height: min(46vh, 320px);
+    height: clamp(180px, 28vh, 260px);
+  }
+
+  .players-box {
+    max-height: 34vh;
+    overflow: auto;
   }
 
   .video-controls-bar {
