@@ -1167,8 +1167,8 @@ function showFullscreenChatNotice(message) {
     return;
   }
   const sender = displayNameFor(message.user);
-  const preview = String(message.text || "").trim().slice(0, 90);
-  notice.textContent = `${fmt(t("videoIncomingMessage"), { user: sender })}: ${preview}`;
+  const fullText = String(message.text || "").trim();
+  notice.textContent = `${fmt(t("videoIncomingMessage"), { user: sender })}: ${fullText}`;
   notice.classList.add("show");
   clearFullscreenChatNoticeTimer();
   fullscreenChatNoticeTimer = setTimeout(() => {

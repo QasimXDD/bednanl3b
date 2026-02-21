@@ -1471,9 +1471,9 @@ ul {
 .fullscreen-chat-notice {
   position: absolute;
   inset-inline-start: 50%;
-  inset-block-start: 0.6rem;
+  inset-block-start: max(0.6rem, env(safe-area-inset-top));
   z-index: 5;
-  width: min(92%, 720px);
+  width: min(96%, 980px);
   transform: translate(-50%, -8px);
   opacity: 0;
   pointer-events: none;
@@ -1486,6 +1486,11 @@ ul {
   line-height: 1.4;
   padding: 0.5rem 0.72rem;
   text-align: center;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-height: 34vh;
+  overflow-y: auto;
   box-shadow: 0 12px 26px rgba(1, 10, 25, 0.45);
   transition: opacity 0.2s ease, transform 0.2s ease;
 }
