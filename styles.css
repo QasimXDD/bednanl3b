@@ -2876,9 +2876,14 @@ ul {
   .players-drawer-toggle {
     position: absolute;
     display: inline-flex;
+    inset: auto;
     top: 0.52rem;
     right: 0.52rem;
+    left: auto;
+    bottom: auto;
     z-index: 141;
+    width: auto;
+    max-width: none;
     min-width: 2.1rem;
     min-height: 2.1rem;
     padding: 0.36rem 0.52rem;
@@ -2983,8 +2988,10 @@ ul {
 
   .players-box {
     position: fixed;
+    inset: auto;
     top: 4.2rem;
     right: 0.4rem;
+    left: auto;
     bottom: calc(0.42rem + env(safe-area-inset-bottom, 0px));
     width: min(88vw, 310px);
     margin: 0;
