@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Changa:wght@600;700;800&family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=20260221a">
+  <link rel="stylesheet" href="styles.css?v=20260221b">
 </head>
 <body>
   <div class="top-controls">
@@ -50,6 +50,9 @@
             <span id="playersDrawerToggleText" class="players-drawer-toggle-text">Users</span>
             <span id="playersDrawerCountBadge" class="players-drawer-count-badge">0</span>
           </button>
+          <button id="videoToolsToggle" class="video-tools-toggle hidden" type="button" aria-controls="videoLeaderTools" aria-expanded="false">
+            <span class="video-tools-toggle-icon" aria-hidden="true">+</span>
+          </button>
           <div class="video-player-frame controls-visible" id="videoPlayerFrame">
             <video id="roomVideoPlayer" class="room-video-player" playsinline preload="metadata" disablepictureinpicture disableremoteplayback></video>
             <div id="videoControlsBar" class="video-controls-bar">
@@ -61,6 +64,10 @@
           </div>
           <p id="videoHintText" class="muted video-hint">Only the room leader can upload and sync video.</p>
           <div id="videoLeaderTools" class="video-leader-tools hidden">
+            <div class="video-tools-head">
+              <h4 id="videoToolsTitle">Video Tools</h4>
+              <button id="videoToolsClose" class="btn btn-ghost video-tools-close" type="button" aria-label="Close">X</button>
+            </div>
             <label for="videoFileInput" id="videoFileLabel">Choose video from device</label>
             <input id="videoFileInput" type="file" accept="video/mp4,video/webm,video/ogg">
             <div class="room-actions">
@@ -99,6 +106,7 @@
         </aside>
       </div>
       <div id="playersDrawerOverlay" class="players-drawer-overlay hidden" aria-hidden="true"></div>
+      <div id="videoToolsOverlay" class="video-tools-overlay hidden" aria-hidden="true"></div>
     </section>
   </main>
 
@@ -219,7 +227,7 @@
 
   <div id="toastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
   <script src="sound.js"></script>
-  <script src="room.js?v=20260221a"></script>
+  <script src="room.js?v=20260221b"></script>
 </body>
 </html>
 

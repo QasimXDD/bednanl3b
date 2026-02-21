@@ -103,6 +103,11 @@ const videoSeekRange = document.getElementById("videoSeekRange");
 const videoTimeText = document.getElementById("videoTimeText");
 const videoFullscreenBtn = document.getElementById("videoFullscreenBtn");
 const videoLeaderTools = document.getElementById("videoLeaderTools");
+const videoToolsToggle = document.getElementById("videoToolsToggle");
+const videoToolsToggleIcon = videoToolsToggle ? videoToolsToggle.querySelector(".video-tools-toggle-icon") : null;
+const videoToolsOverlay = document.getElementById("videoToolsOverlay");
+const videoToolsClose = document.getElementById("videoToolsClose");
+const videoToolsTitle = document.getElementById("videoToolsTitle");
 const videoFileLabel = document.getElementById("videoFileLabel");
 const videoFileInput = document.getElementById("videoFileInput");
 const videoUploadBtn = document.getElementById("videoUploadBtn");
@@ -129,6 +134,7 @@ let isSupervisor = false;
 let activeProfileModeration = null;
 let roomSupervisorOpen = false;
 let playersDrawerOpen = false;
+let videoToolsOpen = false;
 let roomSupervisorTab = "announcement";
 let roomCachedAppeals = [];
 let roomCachedUsers = [];
@@ -184,6 +190,9 @@ const I18N = {
     videoNoVideo: "لا يوجد فيديو مرفوع بعد.",
     videoNowPlaying: "الفيديو الحالي: {name}",
     videoHint: "قائد الغرفة فقط يمكنه رفع ومزامنة الفيديو.",
+    videoToolsTitle: "أدوات الفيديو",
+    videoToolsOpenLabel: "فتح أدوات الفيديو",
+    videoToolsCloseLabel: "إغلاق أدوات الفيديو",
     videoFileLabel: "اختيار فيديو من الجهاز",
     videoUploadBtn: "رفع الفيديو",
     videoUploadBusy: "جارٍ رفع الفيديو...",
@@ -306,6 +315,9 @@ const I18N = {
     videoNoVideo: "No video uploaded yet.",
     videoNowPlaying: "Current video: {name}",
     videoHint: "Only the room leader can upload and sync video.",
+    videoToolsTitle: "Video Tools",
+    videoToolsOpenLabel: "Open video tools",
+    videoToolsCloseLabel: "Close video tools",
     videoFileLabel: "Choose video from device",
     videoUploadBtn: "Upload Video",
     videoUploadBusy: "Uploading...",
@@ -956,7 +968,7 @@ function isRoomMobileLayout() {
 }
 
 function syncRoomBodyLock() {
-  const shouldLock = Boolean(roomSupervisorOpen || playersDrawerOpen);
+  const shouldLock = Boolean(roomSupervisorOpen || playersDrawerOpen || videoToolsOpen);
   document.body.classList.toggle("supervisor-menu-open", shouldLock);
   document.body.classList.toggle("members-drawer-open", Boolean(playersDrawerOpen));
 }
@@ -982,6 +994,46 @@ function setPlayersDrawerOpen(open) {
     playersDrawerToggle.setAttribute("aria-label", toggleLabel);
     playersDrawerToggle.title = toggleLabel;
   }
+  if (nextOpen) {
+    setVideoToolsDrawerOpen(false);
+  }
+  syncRoomBodyLock();
+}
+
+function setVideoToolsDrawerOpen(open) {
+  const mobile = isRoomMobileLayout();
+  const canOpen = mobile && isRoomLeader();
+  const nextOpen = Boolean(open && canOpen);
+  videoToolsOpen = nextOpen;
+  if (videoLeaderTools) {
+    if (mobile) {
+      videoLeaderTools.classList.toggle("is-open", nextOpen);
+      videoLeaderTools.classList.toggle("hidden", !canOpen);
+      videoLeaderTools.setAttribute("aria-hidden", canOpen ? (nextOpen ? "false" : "true") : "true");
+    } else {
+      videoLeaderTools.classList.remove("is-open");
+      videoLeaderTools.setAttribute("aria-hidden", "false");
+    }
+  }
+  if (videoToolsOverlay) {
+    videoToolsOverlay.classList.toggle("hidden", !nextOpen);
+    videoToolsOverlay.classList.toggle("is-open", nextOpen);
+    videoToolsOverlay.setAttribute("aria-hidden", nextOpen ? "false" : "true");
+  }
+  if (videoToolsToggle) {
+    videoToolsToggle.classList.toggle("is-open", nextOpen);
+    videoToolsToggle.classList.toggle("hidden", !canOpen || !mobile);
+    videoToolsToggle.setAttribute("aria-expanded", nextOpen ? "true" : "false");
+    const label = nextOpen ? t("videoToolsCloseLabel") : t("videoToolsOpenLabel");
+    videoToolsToggle.setAttribute("aria-label", label);
+    videoToolsToggle.title = label;
+  }
+  if (videoToolsToggleIcon) {
+    videoToolsToggleIcon.textContent = nextOpen ? "X" : "+";
+  }
+  if (nextOpen) {
+    setPlayersDrawerOpen(false);
+  }
   syncRoomBodyLock();
 }
 
@@ -993,6 +1045,7 @@ function syncPlayersDrawerMode() {
   playersDrawerToggle.classList.toggle("hidden", !mobile);
   if (!mobile) {
     playersDrawerOpen = false;
+    videoToolsOpen = false;
     if (playersDrawer) {
       playersDrawer.classList.remove("hidden", "is-open");
       playersDrawer.setAttribute("aria-hidden", "false");
@@ -1002,10 +1055,28 @@ function syncPlayersDrawerMode() {
       playersDrawerOverlay.classList.remove("is-open");
       playersDrawerOverlay.setAttribute("aria-hidden", "true");
     }
+    if (videoLeaderTools) {
+      videoLeaderTools.classList.remove("is-open");
+      videoLeaderTools.setAttribute("aria-hidden", "false");
+    }
+    if (videoToolsOverlay) {
+      videoToolsOverlay.classList.add("hidden");
+      videoToolsOverlay.classList.remove("is-open");
+      videoToolsOverlay.setAttribute("aria-hidden", "true");
+    }
+    if (videoToolsToggle) {
+      videoToolsToggle.classList.add("hidden");
+      videoToolsToggle.classList.remove("is-open");
+      videoToolsToggle.setAttribute("aria-expanded", "false");
+    }
+    if (videoToolsToggleIcon) {
+      videoToolsToggleIcon.textContent = "+";
+    }
     syncRoomBodyLock();
     return;
   }
   setPlayersDrawerOpen(playersDrawerOpen);
+  setVideoToolsDrawerOpen(videoToolsOpen);
 }
 
 function isRoomLeader() {
@@ -1348,7 +1419,14 @@ function renderRoomVideo(room) {
   }
 
   const canControl = isRoomLeader();
-  videoLeaderTools.classList.toggle("hidden", !canControl);
+  if (!isRoomMobileLayout()) {
+    videoLeaderTools.classList.toggle("hidden", !canControl);
+  }
+  if (!canControl) {
+    setVideoToolsDrawerOpen(false);
+  } else {
+    setVideoToolsDrawerOpen(videoToolsOpen);
+  }
   videoHintText.textContent = t("videoHint");
 
   const nextVideo = room?.video && room.video.src ? room.video : null;
@@ -1709,6 +1787,7 @@ function setRoomSupervisorOpen(open) {
   syncRoomBodyLock();
   if (nextOpen) {
     setPlayersDrawerOpen(false);
+    setVideoToolsDrawerOpen(false);
     setRoomSupervisorTab(roomSupervisorTab, false);
     refreshRoomSupervisorUsers();
     refreshRoomSupervisorAppeals();
@@ -2461,6 +2540,9 @@ function applyTranslations() {
   sendBtn.textContent = t("sendBtn");
   videoTitle.textContent = t("videoTitle");
   videoHintText.textContent = t("videoHint");
+  if (videoToolsTitle) {
+    videoToolsTitle.textContent = t("videoToolsTitle");
+  }
   videoFileLabel.textContent = t("videoFileLabel");
   if (roomVideoState && roomVideoState.filename) {
     videoStatusText.textContent = fmt(t("videoNowPlaying"), { name: roomVideoState.filename });
@@ -2483,7 +2565,13 @@ function applyTranslations() {
     playersDrawerClose.setAttribute("aria-label", t("playersDrawerCloseLabel"));
     playersDrawerClose.title = t("playersDrawerCloseLabel");
   }
+  if (videoToolsClose) {
+    videoToolsClose.textContent = "X";
+    videoToolsClose.setAttribute("aria-label", t("videoToolsCloseLabel"));
+    videoToolsClose.title = t("videoToolsCloseLabel");
+  }
   setPlayersDrawerOpen(playersDrawerOpen);
+  setVideoToolsDrawerOpen(videoToolsOpen);
   renderRoomMembersCount(currentMembers.length);
   openMyProfileBtn.textContent = t("profileBtn");
   profileModalTitle.textContent = t("profileTitle");
@@ -2769,21 +2857,52 @@ if (playersDrawerOverlay) {
   });
 }
 
+if (videoToolsToggle) {
+  videoToolsToggle.addEventListener("click", () => {
+    sfx("click");
+    setVideoToolsDrawerOpen(!videoToolsOpen);
+  });
+}
+
+if (videoToolsClose) {
+  videoToolsClose.addEventListener("click", () => {
+    sfx("click");
+    setVideoToolsDrawerOpen(false);
+  });
+}
+
+if (videoToolsOverlay) {
+  videoToolsOverlay.addEventListener("click", () => {
+    setVideoToolsDrawerOpen(false);
+  });
+}
+
 document.addEventListener("pointerdown", (event) => {
-  if (!playersDrawerOpen || !isRoomMobileLayout()) {
+  if ((!playersDrawerOpen && !videoToolsOpen) || !isRoomMobileLayout()) {
     return;
   }
   const target = event.target;
   if (!target) {
     return;
   }
-  if (playersDrawer && playersDrawer.contains(target)) {
+  if (playersDrawerOpen && playersDrawer && playersDrawer.contains(target)) {
     return;
   }
-  if (playersDrawerToggle && playersDrawerToggle.contains(target)) {
+  if (playersDrawerOpen && playersDrawerToggle && playersDrawerToggle.contains(target)) {
     return;
   }
-  setPlayersDrawerOpen(false);
+  if (videoToolsOpen && videoLeaderTools && videoLeaderTools.contains(target)) {
+    return;
+  }
+  if (videoToolsOpen && videoToolsToggle && videoToolsToggle.contains(target)) {
+    return;
+  }
+  if (playersDrawerOpen) {
+    setPlayersDrawerOpen(false);
+  }
+  if (videoToolsOpen) {
+    setVideoToolsDrawerOpen(false);
+  }
 });
 
 roomTabAnnouncement.addEventListener("click", () => {
@@ -3005,6 +3124,10 @@ document.addEventListener("keydown", (event) => {
   }
   if (event.key === "Escape" && playersDrawerOpen) {
     setPlayersDrawerOpen(false);
+    return;
+  }
+  if (event.key === "Escape" && videoToolsOpen) {
+    setVideoToolsDrawerOpen(false);
     return;
   }
   if (event.key === "Escape" && roomSupervisorOpen) {
