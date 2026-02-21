@@ -3124,14 +3124,15 @@ ul {
   }
 
   .video-controls-bar {
-    grid-template-columns: auto minmax(70px, 1fr) auto;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
     gap: 0.46rem;
     padding: 0.52rem 0.5rem 0.58rem;
   }
 
   .video-seek-range {
-    grid-column: 1 / -1;
+    grid-column: auto;
     height: 3px;
+    min-width: 0;
   }
 
   .video-control-btn {
@@ -3141,8 +3142,9 @@ ul {
   }
 
   .video-time-text {
-    min-width: 0;
+    min-width: 64px;
     font-size: 0.68rem;
+    text-align: center;
   }
 
   .players-box {
