@@ -1324,6 +1324,7 @@ ul {
   inset-inline: 0;
   inset-block-end: 0;
   z-index: 4;
+  direction: ltr;
   padding: 0.62rem 0.72rem 0.72rem;
   display: grid;
   grid-template-columns: auto minmax(140px, 1fr) auto auto;
@@ -1394,6 +1395,8 @@ ul {
   color: #fff;
   letter-spacing: 0.01em;
   font-variant-numeric: tabular-nums;
+  direction: ltr;
+  unicode-bidi: isolate;
 }
 
 .video-seek-range::-webkit-slider-runnable-track {
