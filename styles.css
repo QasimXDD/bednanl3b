@@ -1202,6 +1202,8 @@ ul {
   min-height: 2rem;
   padding: 0.3rem 0.52rem;
   border-radius: 999px;
+  position: relative;
+  z-index: 2;
 }
 
 .players-drawer-toggle {
@@ -1278,7 +1280,7 @@ ul {
 .players-drawer-overlay {
   position: fixed;
   inset: 0;
-  z-index: 84;
+  z-index: 80;
   background: rgba(4, 11, 26, 0.62);
   opacity: 0;
   pointer-events: none;
@@ -2876,7 +2878,7 @@ ul {
     display: inline-flex;
     top: 0.52rem;
     right: 0.52rem;
-    z-index: 120;
+    z-index: 141;
     min-width: 2.1rem;
     min-height: 2.1rem;
     padding: 0.36rem 0.52rem;
@@ -2986,7 +2988,7 @@ ul {
     bottom: calc(0.42rem + env(safe-area-inset-bottom, 0px));
     width: min(88vw, 310px);
     margin: 0;
-    z-index: 115;
+    z-index: 140;
     overflow: auto;
     border-radius: 18px;
     transform: translateX(112%);

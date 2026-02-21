@@ -2479,6 +2479,7 @@ function applyTranslations() {
     playersDrawerToggle.title = t("playersDrawerOpenLabel");
   }
   if (playersDrawerClose) {
+    playersDrawerClose.textContent = "X";
     playersDrawerClose.setAttribute("aria-label", t("playersDrawerCloseLabel"));
     playersDrawerClose.title = t("playersDrawerCloseLabel");
   }
