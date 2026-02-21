@@ -966,6 +966,7 @@ function setPlayersDrawerOpen(open) {
   const nextOpen = Boolean(open && canOpen);
   playersDrawerOpen = nextOpen;
   if (playersDrawer) {
+    playersDrawer.classList.toggle("hidden", canOpen && !nextOpen);
     playersDrawer.classList.toggle("is-open", nextOpen);
     playersDrawer.setAttribute("aria-hidden", canOpen ? (nextOpen ? "false" : "true") : "false");
   }
@@ -982,6 +983,29 @@ function setPlayersDrawerOpen(open) {
     playersDrawerToggle.title = toggleLabel;
   }
   syncRoomBodyLock();
+}
+
+function syncPlayersDrawerMode() {
+  if (!playersDrawerToggle) {
+    return;
+  }
+  const mobile = isRoomMobileLayout();
+  playersDrawerToggle.classList.toggle("hidden", !mobile);
+  if (!mobile) {
+    playersDrawerOpen = false;
+    if (playersDrawer) {
+      playersDrawer.classList.remove("hidden", "is-open");
+      playersDrawer.setAttribute("aria-hidden", "false");
+    }
+    if (playersDrawerOverlay) {
+      playersDrawerOverlay.classList.add("hidden");
+      playersDrawerOverlay.classList.remove("is-open");
+      playersDrawerOverlay.setAttribute("aria-hidden", "true");
+    }
+    syncRoomBodyLock();
+    return;
+  }
+  setPlayersDrawerOpen(playersDrawerOpen);
 }
 
 function isRoomLeader() {
@@ -2988,10 +3012,8 @@ document.addEventListener("keydown", (event) => {
 });
 
 if (roomMobileLayoutQuery && typeof roomMobileLayoutQuery.addEventListener === "function") {
-  roomMobileLayoutQuery.addEventListener("change", (event) => {
-    if (!event.matches) {
-      setPlayersDrawerOpen(false);
-    }
+  roomMobileLayoutQuery.addEventListener("change", () => {
+    syncPlayersDrawerMode();
   });
 }
 
@@ -3100,6 +3122,7 @@ window.addEventListener("beforeunload", () => {
 updateRoomVideoControls();
 
 setLang(getLang());
+syncPlayersDrawerMode();
 bootRoom();
 
 
