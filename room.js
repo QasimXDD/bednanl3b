@@ -200,6 +200,8 @@ const I18N = {
     videoUploadSuccess: "تم رفع الفيديو وتحديث المزامنة.",
     videoUploadTooLarge: "حجم الفيديو كبير جدًا (الحد 80MB).",
     videoUploadType: "نوع الفيديو غير مدعوم. استخدم MP4 أو WebM أو OGG.",
+    videoUploadNetworkError: "تعذر رفع الفيديو بسبب مشكلة اتصال. تأكد من الإنترنت وحاول مرة أخرى.",
+    requestNetworkError: "تعذر الاتصال بالخادم. تأكد من الإنترنت وحاول مرة أخرى.",
     videoHostOnly: "التحكم بالفيديو متاح لقائد الغرفة فقط.",
     videoSyncFailed: "تعذر مزامنة الفيديو.",
     videoControlLocked: "المزامنة بيد قائد الغرفة.",
@@ -325,6 +327,8 @@ const I18N = {
     videoUploadSuccess: "Video uploaded and sync updated.",
     videoUploadTooLarge: "Video is too large (max 80MB).",
     videoUploadType: "Unsupported video type. Use MP4, WebM, or OGG.",
+    videoUploadNetworkError: "Video upload failed due to a network issue. Check your connection and try again.",
+    requestNetworkError: "Could not reach the server. Check your connection and try again.",
     videoHostOnly: "Video controls are leader-only.",
     videoSyncFailed: "Failed to sync video.",
     videoControlLocked: "Video sync is controlled by room leader.",
@@ -1536,6 +1540,10 @@ async function uploadRoomVideo() {
     }
     await refreshMessages();
   } catch (error) {
+    if (error.code === "NETWORK_ERROR") {
+      showToast(t("videoUploadNetworkError"));
+      return;
+    }
     if (error.code === "VIDEO_TOO_LARGE") {
       showToast(t("videoUploadTooLarge"));
       return;
@@ -1732,13 +1740,22 @@ async function api(pathname, options = {}) {
     headers.Authorization = `Bearer ${token}`;
   }
 
-  const response = await fetch(pathname, {
-    method: options.method || "GET",
-    headers,
-    body: options.body
-      ? (isFormDataBody ? options.body : JSON.stringify(options.body))
-      : undefined
-  });
+  let response;
+  try {
+    response = await fetch(pathname, {
+      method: options.method || "GET",
+      headers,
+      body: options.body
+        ? (isFormDataBody ? options.body : JSON.stringify(options.body))
+        : undefined
+    });
+  } catch (error) {
+    const wrapped = new Error(t("requestNetworkError"));
+    wrapped.status = 0;
+    wrapped.code = "NETWORK_ERROR";
+    wrapped.cause = error;
+    throw wrapped;
+  }
 
   const data = await response.json().catch(() => ({}));
   if (data && data.announcement) {

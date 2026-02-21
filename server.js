@@ -23,6 +23,7 @@ const CLIENT_MESSAGE_ID_REGEX = /^[A-Za-z0-9_-]+$/;
 const MESSAGE_DEDUP_TTL_MS = 1000 * 60 * 5;
 const REPLY_PREVIEW_MAX_LENGTH = 160;
 const ROOM_VIDEO_MAX_BYTES = 80 * 1024 * 1024;
+const ROOM_VIDEO_MULTIPART_OVERHEAD_BYTES = 1024 * 1024;
 const ROOM_VIDEO_MAX_DURATION_SEC = 60 * 60 * 8;
 const ROOM_VIDEO_MAX_FILENAME_LENGTH = 120;
 const ROOM_VIDEO_ALLOWED_MIME_TYPES = new Set([
@@ -864,7 +865,7 @@ function parseBody(req) {
       byteLength += chunk.length;
       if (byteLength > MAX_BODY_SIZE) {
         fail(new Error("Payload too large"));
-        req.destroy();
+        req.resume();
         return;
       }
       body += chunk.toString("utf8");
@@ -901,10 +902,11 @@ function parseMultipartFormData(req, maxBytes = ROOM_VIDEO_MAX_BYTES) {
       return;
     }
 
+    const maxPayloadBytes = maxBytes + ROOM_VIDEO_MULTIPART_OVERHEAD_BYTES;
     const contentLength = Number(req.headers["content-length"] || 0);
-    if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    if (Number.isFinite(contentLength) && contentLength > maxPayloadBytes) {
       reject(new Error("Payload too large"));
-      req.destroy();
+      req.resume();
       return;
     }
 
@@ -931,9 +933,9 @@ function parseMultipartFormData(req, maxBytes = ROOM_VIDEO_MAX_BYTES) {
         return;
       }
       totalBytes += chunk.length;
-      if (totalBytes > maxBytes) {
+      if (totalBytes > maxPayloadBytes) {
         fail(new Error("Payload too large"));
-        req.destroy();
+        req.resume();
         return;
       }
       chunks.push(chunk);
