@@ -1123,6 +1123,33 @@ function isVideoFrameFullscreen() {
   return document.fullscreenElement === videoPlayerFrame || videoPlayerFrame.contains(document.fullscreenElement);
 }
 
+async function lockLandscapeForMobileFullscreen() {
+  try {
+    if (!window.matchMedia || !window.matchMedia("(max-width: 980px)").matches) {
+      return;
+    }
+    const orientationApi = screen && screen.orientation;
+    if (!orientationApi || typeof orientationApi.lock !== "function") {
+      return;
+    }
+    await orientationApi.lock("landscape");
+  } catch (_error) {
+    // Best effort only; ignore unsupported/blocked orientation lock.
+  }
+}
+
+async function unlockOrientationAfterFullscreen() {
+  try {
+    const orientationApi = screen && screen.orientation;
+    if (!orientationApi || typeof orientationApi.unlock !== "function") {
+      return;
+    }
+    orientationApi.unlock();
+  } catch (_error) {
+    // Best effort only.
+  }
+}
+
 function clearFullscreenChatNoticeTimer() {
   if (!fullscreenChatNoticeTimer) {
     return;
@@ -3102,8 +3129,10 @@ if (videoFullscreenBtn) {
       }
       if (videoPlayerFrame && typeof videoPlayerFrame.requestFullscreen === "function") {
         await videoPlayerFrame.requestFullscreen();
+        await lockLandscapeForMobileFullscreen();
       } else if (roomVideoPlayer && typeof roomVideoPlayer.webkitEnterFullscreen === "function") {
         roomVideoPlayer.webkitEnterFullscreen();
+        await lockLandscapeForMobileFullscreen();
       }
     } catch (_error) {
       // Ignore fullscreen errors.
@@ -3112,18 +3141,25 @@ if (videoFullscreenBtn) {
   });
 }
 
-document.addEventListener("fullscreenchange", () => {
+document.addEventListener("fullscreenchange", async () => {
+  if (isVideoFrameFullscreen()) {
+    await lockLandscapeForMobileFullscreen();
+  } else {
+    await unlockOrientationAfterFullscreen();
+  }
   revealRoomVideoControls();
   updateRoomVideoControls();
 });
 
 if (roomVideoPlayer) {
-  roomVideoPlayer.addEventListener("webkitbeginfullscreen", () => {
+  roomVideoPlayer.addEventListener("webkitbeginfullscreen", async () => {
+    await lockLandscapeForMobileFullscreen();
     revealRoomVideoControls();
     updateRoomVideoControls();
   });
 
-  roomVideoPlayer.addEventListener("webkitendfullscreen", () => {
+  roomVideoPlayer.addEventListener("webkitendfullscreen", async () => {
+    await unlockOrientationAfterFullscreen();
     hideFullscreenChatNotice();
     revealRoomVideoControls();
     updateRoomVideoControls();
@@ -3321,6 +3357,7 @@ window.addEventListener("beforeunload", () => {
   closeRequestModal();
   hideFullscreenChatNotice();
   clearRoomVideoPlayer();
+  unlockOrientationAfterFullscreen();
 });
 
 updateRoomVideoControls();
