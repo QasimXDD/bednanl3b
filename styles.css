@@ -1245,6 +1245,19 @@ ul {
   height: 100%;
 }
 
+.players-drawer-toggle-icon-close {
+  display: none;
+  font-size: 0.95rem;
+}
+
+.players-drawer-toggle.is-open .players-drawer-toggle-icon-open {
+  display: none;
+}
+
+.players-drawer-toggle.is-open .players-drawer-toggle-icon-close {
+  display: inline-flex;
+}
+
 .players-drawer-toggle-text {
   font-size: 0.85rem;
   line-height: 1;
@@ -2303,7 +2316,7 @@ ul {
     display: inline-flex;
     inset-inline-end: 0.78rem;
     inset-block-end: calc(0.94rem + env(safe-area-inset-bottom, 0px));
-    z-index: 85;
+    z-index: 94;
   }
 
   .players-box {
@@ -2314,7 +2327,7 @@ ul {
     width: min(84vw, 320px);
     margin: 0;
     overflow: auto;
-    z-index: 86;
+    z-index: 92;
     transform: translateX(110%);
     opacity: 0;
     pointer-events: none;

@@ -2744,6 +2744,23 @@ if (playersDrawerOverlay) {
   });
 }
 
+document.addEventListener("pointerdown", (event) => {
+  if (!playersDrawerOpen || !isRoomMobileLayout()) {
+    return;
+  }
+  const target = event.target;
+  if (!target) {
+    return;
+  }
+  if (playersDrawer && playersDrawer.contains(target)) {
+    return;
+  }
+  if (playersDrawerToggle && playersDrawerToggle.contains(target)) {
+    return;
+  }
+  setPlayersDrawerOpen(false);
+});
+
 roomTabAnnouncement.addEventListener("click", () => {
   sfx("click");
   setRoomSupervisorTab("announcement");
