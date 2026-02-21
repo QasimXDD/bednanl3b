@@ -975,6 +975,7 @@ function setPlayersDrawerOpen(open) {
     playersDrawerOverlay.setAttribute("aria-hidden", nextOpen ? "false" : "true");
   }
   if (playersDrawerToggle) {
+    playersDrawerToggle.classList.toggle("is-open", nextOpen);
     playersDrawerToggle.setAttribute("aria-expanded", nextOpen ? "true" : "false");
     const toggleLabel = nextOpen ? t("playersDrawerCloseLabel") : t("playersDrawerOpenLabel");
     playersDrawerToggle.setAttribute("aria-label", toggleLabel);
