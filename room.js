@@ -1529,10 +1529,7 @@ async function uploadRoomVideo() {
 
   setVideoUploadBusy(true);
   try {
-    const result = await api(`/api/rooms/${encodedCode}/video`, {
-      method: "POST",
-      body: formData
-    });
+    const result = await uploadRoomVideoRequest(`/api/rooms/${encodedCode}/video`, formData);
     videoFileInput.value = "";
     showToast(t("videoUploadSuccess"), "success");
     if (result?.room) {
@@ -1556,6 +1553,65 @@ async function uploadRoomVideo() {
   } finally {
     setVideoUploadBusy(false);
   }
+}
+
+function uploadRoomVideoRequest(pathname, formData) {
+  return new Promise((resolve, reject) => {
+    const token = getToken();
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", pathname, true);
+    xhr.responseType = "json";
+    xhr.timeout = 180000;
+    xhr.setRequestHeader("X-Lang", getLang());
+    if (token) {
+      xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+    }
+
+    xhr.onload = () => {
+      const payload =
+        xhr.response && typeof xhr.response === "object"
+          ? xhr.response
+          : (() => {
+              try {
+                return JSON.parse(xhr.responseText || "{}");
+              } catch (_error) {
+                return {};
+              }
+            })();
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(payload);
+        return;
+      }
+      const error = new Error(payload.error || t("toastRequestFailed"));
+      error.status = xhr.status;
+      error.code = payload.code || "";
+      error.data = payload;
+      reject(error);
+    };
+
+    xhr.onerror = () => {
+      const error = new Error(t("requestNetworkError"));
+      error.status = 0;
+      error.code = "NETWORK_ERROR";
+      reject(error);
+    };
+
+    xhr.onabort = () => {
+      const error = new Error(t("requestNetworkError"));
+      error.status = 0;
+      error.code = "NETWORK_ERROR";
+      reject(error);
+    };
+
+    xhr.ontimeout = () => {
+      const error = new Error(t("requestNetworkError"));
+      error.status = 0;
+      error.code = "NETWORK_ERROR";
+      reject(error);
+    };
+
+    xhr.send(formData);
+  });
 }
 
 async function sendRoomVideoSync(action) {
