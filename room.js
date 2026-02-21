@@ -1234,6 +1234,8 @@ function updateRoomVideoControls({ previewTime = null } = {}) {
       const progress = duration > 0 ? Math.round((currentTime / duration) * 1000) : 0;
       videoSeekRange.value = String(Math.max(0, Math.min(1000, progress)));
     }
+    const progressPercent = duration > 0 ? Math.max(0, Math.min(100, (currentTime / duration) * 100)) : 0;
+    videoSeekRange.style.setProperty("--video-progress", `${progressPercent}%`);
     videoSeekRange.disabled = !hasVideo || duration <= 0;
   }
 
@@ -1244,12 +1246,17 @@ function updateRoomVideoControls({ previewTime = null } = {}) {
   if (videoPlayPauseBtn) {
     const isPlaying = hasVideo && roomVideoPlayer && !roomVideoPlayer.paused && !roomVideoPlayer.ended;
     videoPlayPauseBtn.disabled = !hasVideo;
-    videoPlayPauseBtn.textContent = isPlaying ? t("videoPauseBtn") : t("videoPlayBtn");
+    videoPlayPauseBtn.textContent = isPlaying ? "❚❚" : "▶";
+    videoPlayPauseBtn.setAttribute("aria-label", isPlaying ? t("videoPauseBtn") : t("videoPlayBtn"));
+    videoPlayPauseBtn.title = isPlaying ? t("videoPauseBtn") : t("videoPlayBtn");
   }
 
   if (videoFullscreenBtn) {
     videoFullscreenBtn.disabled = !hasVideo;
-    videoFullscreenBtn.textContent = isVideoFrameFullscreen() ? t("videoExitFullscreenBtn") : t("videoFullscreenBtn");
+    const isFullscreen = isVideoFrameFullscreen();
+    videoFullscreenBtn.textContent = isFullscreen ? "⤢" : "⛶";
+    videoFullscreenBtn.setAttribute("aria-label", isFullscreen ? t("videoExitFullscreenBtn") : t("videoFullscreenBtn"));
+    videoFullscreenBtn.title = isFullscreen ? t("videoExitFullscreenBtn") : t("videoFullscreenBtn");
   }
 
   if (!hasVideo || !shouldAutoHideRoomVideoControls()) {
