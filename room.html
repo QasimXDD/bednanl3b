@@ -33,6 +33,16 @@
           <a class="btn btn-ghost" href="/" id="backToLobby">Back to Lobby</a>
         </div>
       </header>
+      <button id="playersDrawerToggle" class="players-drawer-toggle" type="button" aria-controls="playersDrawer" aria-expanded="false">
+        <span class="players-drawer-toggle-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" focusable="false" aria-hidden="true">
+            <path d="M7 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm10 0a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+            <path d="M2.5 19.2a4.8 4.8 0 0 1 9.6 0M11.9 19.2a4.8 4.8 0 0 1 9.6 0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+          </svg>
+        </span>
+        <span id="playersDrawerToggleText" class="players-drawer-toggle-text">Users</span>
+        <span id="playersDrawerCountBadge" class="players-drawer-count-badge">0</span>
+      </button>
 
       <div class="room-grid">
         <section class="video-box box">
@@ -75,8 +85,11 @@
           </form>
         </section>
 
-        <aside class="players-box box">
-          <h3 id="playersTitle">Players</h3>
+        <aside id="playersDrawer" class="players-box box" aria-hidden="false">
+          <div class="players-box-head">
+            <h3 id="playersTitle">Players</h3>
+            <button id="playersDrawerClose" class="btn btn-ghost players-drawer-close" type="button" aria-label="Close">×</button>
+          </div>
           <p class="muted" id="roomMembersCountText">Inside room: 0</p>
           <ul id="playersList" class="players-list"></ul>
           <section id="pendingRequestsBox" class="pending-requests hidden">
@@ -87,6 +100,7 @@
       </div>
     </section>
   </main>
+  <div id="playersDrawerOverlay" class="players-drawer-overlay hidden" aria-hidden="true"></div>
 
   <div id="joinRequestModal" class="modal-overlay hidden">
     <div class="modal-card">

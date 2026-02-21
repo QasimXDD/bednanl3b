@@ -12,6 +12,12 @@ const roomMembersCountText = document.getElementById("roomMembersCountText");
 const pendingRequestsBox = document.getElementById("pendingRequestsBox");
 const pendingRequestsTitle = document.getElementById("pendingRequestsTitle");
 const pendingRequestsList = document.getElementById("pendingRequestsList");
+const playersDrawer = document.getElementById("playersDrawer");
+const playersDrawerToggle = document.getElementById("playersDrawerToggle");
+const playersDrawerToggleText = document.getElementById("playersDrawerToggleText");
+const playersDrawerCountBadge = document.getElementById("playersDrawerCountBadge");
+const playersDrawerClose = document.getElementById("playersDrawerClose");
+const playersDrawerOverlay = document.getElementById("playersDrawerOverlay");
 const backToLobbyLink = document.getElementById("backToLobby");
 const joinRequestModal = document.getElementById("joinRequestModal");
 const joinModalTitle = document.getElementById("joinModalTitle");
@@ -104,6 +110,7 @@ const videoUploadBtn = document.getElementById("videoUploadBtn");
 const query = new URLSearchParams(window.location.search);
 const code = String(query.get("code") || "").trim().toUpperCase();
 const encodedCode = encodeURIComponent(code);
+const roomMobileLayoutQuery = window.matchMedia("(max-width: 980px)");
 
 let me = "";
 let host = "";
@@ -121,6 +128,7 @@ const profileCache = new Map();
 let isSupervisor = false;
 let activeProfileModeration = null;
 let roomSupervisorOpen = false;
+let playersDrawerOpen = false;
 let roomSupervisorTab = "announcement";
 let roomCachedAppeals = [];
 let roomCachedUsers = [];
@@ -195,6 +203,9 @@ const I18N = {
     replyingTo: "الرد على {user}",
     replyCancel: "إلغاء الرد",
     playersTitle: "اللاعبون",
+    playersDrawerBtn: "الأعضاء",
+    playersDrawerOpenLabel: "فتح قائمة الأعضاء",
+    playersDrawerCloseLabel: "إغلاق قائمة الأعضاء",
     roomMembersCount: "داخل الغرفة الآن: {count}",
     pendingRequestsTitle: "طلبات الانضمام",
     pendingEmpty: "لا توجد طلبات حالياً.",
@@ -314,6 +325,9 @@ const I18N = {
     replyingTo: "Replying to {user}",
     replyCancel: "Cancel reply",
     playersTitle: "Players",
+    playersDrawerBtn: "Members",
+    playersDrawerOpenLabel: "Open members list",
+    playersDrawerCloseLabel: "Close members list",
     roomMembersCount: "Inside room now: {count}",
     pendingRequestsTitle: "Join Requests",
     pendingEmpty: "No pending requests.",
@@ -930,7 +944,43 @@ function openActionDialog(options = {}) {
 }
 
 function renderRoomMembersCount(count = 0) {
-  roomMembersCountText.textContent = fmt(t("roomMembersCount"), { count: Number(count || 0) });
+  const safeCount = Number(count || 0);
+  roomMembersCountText.textContent = fmt(t("roomMembersCount"), { count: safeCount });
+  if (playersDrawerCountBadge) {
+    playersDrawerCountBadge.textContent = String(safeCount);
+  }
+}
+
+function isRoomMobileLayout() {
+  return Boolean(roomMobileLayoutQuery?.matches);
+}
+
+function syncRoomBodyLock() {
+  const shouldLock = Boolean(roomSupervisorOpen || playersDrawerOpen);
+  document.body.classList.toggle("supervisor-menu-open", shouldLock);
+  document.body.classList.toggle("members-drawer-open", Boolean(playersDrawerOpen));
+}
+
+function setPlayersDrawerOpen(open) {
+  const canOpen = isRoomMobileLayout();
+  const nextOpen = Boolean(open && canOpen);
+  playersDrawerOpen = nextOpen;
+  if (playersDrawer) {
+    playersDrawer.classList.toggle("is-open", nextOpen);
+    playersDrawer.setAttribute("aria-hidden", canOpen ? (nextOpen ? "false" : "true") : "false");
+  }
+  if (playersDrawerOverlay) {
+    playersDrawerOverlay.classList.toggle("hidden", !nextOpen);
+    playersDrawerOverlay.classList.toggle("is-open", nextOpen);
+    playersDrawerOverlay.setAttribute("aria-hidden", nextOpen ? "false" : "true");
+  }
+  if (playersDrawerToggle) {
+    playersDrawerToggle.setAttribute("aria-expanded", nextOpen ? "true" : "false");
+    const toggleLabel = nextOpen ? t("playersDrawerCloseLabel") : t("playersDrawerOpenLabel");
+    playersDrawerToggle.setAttribute("aria-label", toggleLabel);
+    playersDrawerToggle.title = toggleLabel;
+  }
+  syncRoomBodyLock();
 }
 
 function isRoomLeader() {
@@ -1631,8 +1681,9 @@ function setRoomSupervisorOpen(open) {
   roomSupervisorOverlay.setAttribute("aria-hidden", nextOpen ? "false" : "true");
   roomSupervisorPanel.setAttribute("aria-hidden", nextOpen ? "false" : "true");
   roomSupervisorToggle.setAttribute("aria-expanded", nextOpen ? "true" : "false");
-  document.body.classList.toggle("supervisor-menu-open", nextOpen);
+  syncRoomBodyLock();
   if (nextOpen) {
+    setPlayersDrawerOpen(false);
     setRoomSupervisorTab(roomSupervisorTab, false);
     refreshRoomSupervisorUsers();
     refreshRoomSupervisorAppeals();
@@ -2395,6 +2446,18 @@ function applyTranslations() {
   updateRoomVideoControls();
   renderReplyDraft();
   document.getElementById("playersTitle").textContent = t("playersTitle");
+  if (playersDrawerToggleText) {
+    playersDrawerToggleText.textContent = t("playersDrawerBtn");
+  }
+  if (playersDrawerToggle) {
+    playersDrawerToggle.setAttribute("aria-label", t("playersDrawerOpenLabel"));
+    playersDrawerToggle.title = t("playersDrawerOpenLabel");
+  }
+  if (playersDrawerClose) {
+    playersDrawerClose.setAttribute("aria-label", t("playersDrawerCloseLabel"));
+    playersDrawerClose.title = t("playersDrawerCloseLabel");
+  }
+  setPlayersDrawerOpen(playersDrawerOpen);
   renderRoomMembersCount(currentMembers.length);
   openMyProfileBtn.textContent = t("profileBtn");
   profileModalTitle.textContent = t("profileTitle");
@@ -2660,6 +2723,26 @@ roomSupervisorOverlay.addEventListener("click", () => {
   setRoomSupervisorOpen(false);
 });
 
+if (playersDrawerToggle) {
+  playersDrawerToggle.addEventListener("click", () => {
+    sfx("click");
+    setPlayersDrawerOpen(!playersDrawerOpen);
+  });
+}
+
+if (playersDrawerClose) {
+  playersDrawerClose.addEventListener("click", () => {
+    sfx("click");
+    setPlayersDrawerOpen(false);
+  });
+}
+
+if (playersDrawerOverlay) {
+  playersDrawerOverlay.addEventListener("click", () => {
+    setPlayersDrawerOpen(false);
+  });
+}
+
 roomTabAnnouncement.addEventListener("click", () => {
   sfx("click");
   setRoomSupervisorTab("announcement");
@@ -2877,10 +2960,22 @@ document.addEventListener("keydown", (event) => {
     clearReplyTarget();
     return;
   }
+  if (event.key === "Escape" && playersDrawerOpen) {
+    setPlayersDrawerOpen(false);
+    return;
+  }
   if (event.key === "Escape" && roomSupervisorOpen) {
     setRoomSupervisorOpen(false);
   }
 });
+
+if (roomMobileLayoutQuery && typeof roomMobileLayoutQuery.addEventListener === "function") {
+  roomMobileLayoutQuery.addEventListener("change", (event) => {
+    if (!event.matches) {
+      setPlayersDrawerOpen(false);
+    }
+  });
+}
 
 backToLobbyLink.addEventListener("click", async (event) => {
   event.preventDefault();
