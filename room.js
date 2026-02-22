@@ -1650,7 +1650,8 @@ function withSuppressedRoomVideoEvents(callback) {
 }
 
 function isYouTubeRoomVideo(video = roomVideoState) {
-  return Boolean(video && String(video.sourceType || "").toLowerCase() === "youtube");
+  void video;
+  return false;
 }
 
 function setVideoUploadBusy(busy) {

@@ -18,6 +18,7 @@ const UPLOADS_DIR = path.join(ROOT, "uploads");
 const ROOM_VIDEO_UPLOAD_DIR = path.join(UPLOADS_DIR, "room-videos");
 const USERS_FILE = path.join(DATA_DIR, "users.json");
 const MODERATION_FILE = path.join(DATA_DIR, "moderation.json");
+const YOUTUBE_CACHE_FILE = path.join(DATA_DIR, "youtube-cache.json");
 const SUPERVISOR_USERNAME = "qasim";
 const GUEST_USERNAME_PREFIX = "guest_";
 const SITE_ANNOUNCEMENT_LIVE_MS = 15000;
@@ -40,6 +41,8 @@ const YOUTUBE_SEARCH_TIMEOUT_MS = 9000;
 const YOUTUBE_DOWNLOAD_TIMEOUT_MS = 1000 * 60 * 4;
 const YOUTUBE_INPUT_MAX_LENGTH = 300;
 const YOUTUBE_VIDEO_ID_REGEX = /^[A-Za-z0-9_-]{11}$/;
+const YOUTUBE_CACHE_MAX_ITEMS = 180;
+const YOUTUBE_CACHE_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 30;
 const ROOM_VIDEO_ALLOWED_MIME_TYPES = new Set([
   "video/mp4",
   "video/webm",
@@ -80,6 +83,7 @@ const rooms = new Map();
 const userLastSeen = new Map();
 const bannedUsers = new Map();
 const unbanRequests = new Map();
+const youtubeVideoCache = new Map();
 let siteAnnouncement = null;
 
 function ensureDataDir() {
@@ -208,6 +212,210 @@ function saveModeration() {
   } catch (error) {
     console.error("Failed to save moderation:", error.message);
   }
+}
+
+function normalizeYouTubeCacheEntry(entry) {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+  const videoId = String(entry.videoId || "").trim();
+  if (!YOUTUBE_VIDEO_ID_REGEX.test(videoId)) {
+    return null;
+  }
+  const storedFileName = path.basename(String(entry.storedFileName || "").trim());
+  if (!storedFileName) {
+    return null;
+  }
+  const cleanFileName = sanitizeUploadedFilename(entry.cleanFileName || `youtube-${videoId}`);
+  const durationSec = normalizeRoomVideoDuration(entry.durationSec);
+  const downloadedBytes = Math.max(0, Number(entry.downloadedBytes || 0));
+  const mimeType = normalizeVideoMimeType(entry.mimeType || "video/mp4") || "video/mp4";
+  const downloadedAt = Number(entry.downloadedAt) || Date.now();
+  const lastUsedAt = Number(entry.lastUsedAt) || downloadedAt;
+  const hitCount = Math.max(0, Number(entry.hitCount || 0));
+  return {
+    videoId,
+    storedFileName,
+    cleanFileName,
+    durationSec,
+    downloadedBytes,
+    mimeType,
+    downloadedAt,
+    lastUsedAt,
+    hitCount
+  };
+}
+
+function isStoredVideoFileUsedInAnyRoom(storedFileName) {
+  const normalized = String(storedFileName || "").trim();
+  if (!normalized) {
+    return false;
+  }
+  const publicSrc = `/uploads/room-videos/${normalized}`;
+  for (const room of rooms.values()) {
+    if (String(room?.video?.src || "") === publicSrc) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function removeCachedVideoFileIfSafe(storedFileName) {
+  if (!storedFileName || isStoredVideoFileUsedInAnyRoom(storedFileName)) {
+    return;
+  }
+  const absolutePath = path.join(ROOM_VIDEO_UPLOAD_DIR, storedFileName);
+  if (!fs.existsSync(absolutePath)) {
+    return;
+  }
+  try {
+    fs.unlinkSync(absolutePath);
+  } catch (_error) {
+    // Ignore cleanup errors.
+  }
+}
+
+function saveYouTubeCache() {
+  try {
+    ensureDataDir();
+    const list = Array.from(youtubeVideoCache.values()).sort((a, b) => Number(b.lastUsedAt || 0) - Number(a.lastUsedAt || 0));
+    fs.writeFileSync(YOUTUBE_CACHE_FILE, JSON.stringify(list, null, 2), "utf8");
+  } catch (error) {
+    console.error("Failed to save YouTube cache:", error.message);
+  }
+}
+
+function pruneYouTubeCache() {
+  const now = Date.now();
+  const entries = Array.from(youtubeVideoCache.values());
+
+  for (const entry of entries) {
+    const absolutePath = path.join(ROOM_VIDEO_UPLOAD_DIR, entry.storedFileName);
+    if (!fs.existsSync(absolutePath)) {
+      youtubeVideoCache.delete(entry.videoId);
+      continue;
+    }
+    const ageMs = now - Number(entry.lastUsedAt || entry.downloadedAt || now);
+    if (ageMs > YOUTUBE_CACHE_MAX_AGE_MS && !isStoredVideoFileUsedInAnyRoom(entry.storedFileName)) {
+      removeCachedVideoFileIfSafe(entry.storedFileName);
+      youtubeVideoCache.delete(entry.videoId);
+    }
+  }
+
+  if (youtubeVideoCache.size > YOUTUBE_CACHE_MAX_ITEMS) {
+    const overflow = youtubeVideoCache.size - YOUTUBE_CACHE_MAX_ITEMS;
+    const sorted = Array.from(youtubeVideoCache.values()).sort((a, b) => Number(a.lastUsedAt || 0) - Number(b.lastUsedAt || 0));
+    let removed = 0;
+    for (const entry of sorted) {
+      if (removed >= overflow) {
+        break;
+      }
+      if (isStoredVideoFileUsedInAnyRoom(entry.storedFileName)) {
+        continue;
+      }
+      removeCachedVideoFileIfSafe(entry.storedFileName);
+      youtubeVideoCache.delete(entry.videoId);
+      removed += 1;
+    }
+  }
+}
+
+function loadYouTubeCache() {
+  try {
+    ensureDataDir();
+    ensureUploadsDir();
+    if (!fs.existsSync(YOUTUBE_CACHE_FILE)) {
+      fs.writeFileSync(YOUTUBE_CACHE_FILE, "[]", "utf8");
+      return;
+    }
+    const raw = fs.readFileSync(YOUTUBE_CACHE_FILE, "utf8");
+    const list = JSON.parse(raw);
+    if (!Array.isArray(list)) {
+      return;
+    }
+    youtubeVideoCache.clear();
+    for (const item of list) {
+      const normalized = normalizeYouTubeCacheEntry(item);
+      if (!normalized) {
+        continue;
+      }
+      youtubeVideoCache.set(normalized.videoId, normalized);
+    }
+    pruneYouTubeCache();
+    saveYouTubeCache();
+  } catch (error) {
+    console.error("Failed to load YouTube cache:", error.message);
+  }
+}
+
+function getStoredFileNameFromPublicSrc(src) {
+  const clean = String(src || "").trim();
+  if (!clean.startsWith("/uploads/room-videos/")) {
+    return "";
+  }
+  const value = path.basename(clean.slice("/uploads/room-videos/".length));
+  return value || "";
+}
+
+function isVideoSrcInYouTubeCache(src) {
+  const storedFileName = getStoredFileNameFromPublicSrc(src);
+  if (!storedFileName) {
+    return false;
+  }
+  for (const entry of youtubeVideoCache.values()) {
+    if (entry.storedFileName === storedFileName) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function getCachedYouTubeVideo(videoId) {
+  const cleanVideoId = String(videoId || "").trim();
+  if (!YOUTUBE_VIDEO_ID_REGEX.test(cleanVideoId)) {
+    return null;
+  }
+  pruneYouTubeCache();
+  const entry = youtubeVideoCache.get(cleanVideoId);
+  if (!entry) {
+    return null;
+  }
+  const absolutePath = path.join(ROOM_VIDEO_UPLOAD_DIR, entry.storedFileName);
+  if (!fs.existsSync(absolutePath)) {
+    youtubeVideoCache.delete(cleanVideoId);
+    saveYouTubeCache();
+    return null;
+  }
+  entry.lastUsedAt = Date.now();
+  entry.hitCount = Math.max(0, Number(entry.hitCount || 0)) + 1;
+  youtubeVideoCache.set(cleanVideoId, entry);
+  saveYouTubeCache();
+  return { ...entry };
+}
+
+function rememberYouTubeCache(videoId, downloaded) {
+  const cleanVideoId = String(videoId || "").trim();
+  if (!YOUTUBE_VIDEO_ID_REGEX.test(cleanVideoId) || !downloaded) {
+    return null;
+  }
+  const entry = normalizeYouTubeCacheEntry({
+    videoId: cleanVideoId,
+    storedFileName: downloaded.storedFileName,
+    cleanFileName: downloaded.cleanFileName,
+    durationSec: downloaded.durationSec,
+    downloadedBytes: downloaded.downloadedBytes,
+    mimeType: downloaded.mimeType,
+    downloadedAt: Date.now(),
+    lastUsedAt: Date.now(),
+    hitCount: 1
+  });
+  if (!entry) {
+    return null;
+  }
+  youtubeVideoCache.set(cleanVideoId, entry);
+  pruneYouTubeCache();
+  saveYouTubeCache();
+  return { ...entry };
 }
 
 function getLang(req) {
@@ -706,7 +914,8 @@ function removeRoomVideoAsset(room) {
     }
     return;
   }
-  const absolutePath = roomVideoPublicToAbsolutePath(room.video.src);
+  const shouldPreserveCachedFile = Boolean(room.video.isYouTubeCached || isVideoSrcInYouTubeCache(room.video.src));
+  const absolutePath = shouldPreserveCachedFile ? null : roomVideoPublicToAbsolutePath(room.video.src);
   if (absolutePath && fs.existsSync(absolutePath)) {
     try {
       fs.unlinkSync(absolutePath);
@@ -719,6 +928,12 @@ function removeRoomVideoAsset(room) {
 }
 
 function ensureRoomVideoRuntimeState(room) {
+  const sourceType = String(room?.video?.sourceType || "").toLowerCase();
+  const src = String(room?.video?.src || "");
+  if (room?.video && (sourceType === "youtube" || (sourceType === "file" && src && !src.startsWith("/uploads/room-videos/")))) {
+    room.video = null;
+    room.videoSync = null;
+  }
   if (!room.video) {
     room.video = null;
   }
@@ -1297,45 +1512,13 @@ async function resolveYouTubeInput(rawInput) {
   return { videoId: foundId, label: cleanInput };
 }
 
-function buildYouTubeEmbedSrc(videoId) {
-  const cleanVideoId = String(videoId || "").trim();
-  if (!YOUTUBE_VIDEO_ID_REGEX.test(cleanVideoId)) {
-    return "";
-  }
-  const params = new URLSearchParams({
-    enablejsapi: "1",
-    controls: "0",
-    disablekb: "1",
-    fs: "0",
-    rel: "0",
-    modestbranding: "1",
-    playsinline: "1",
-    iv_load_policy: "3"
-  });
-  return `https://www.youtube-nocookie.com/embed/${cleanVideoId}?${params.toString()}`;
-}
-
-async function fetchYouTubeOEmbed(videoId) {
-  const cleanVideoId = String(videoId || "").trim();
-  if (!YOUTUBE_VIDEO_ID_REGEX.test(cleanVideoId)) {
-    return null;
-  }
-  const watchUrl = `https://www.youtube.com/watch?v=${cleanVideoId}`;
-  const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(watchUrl)}&format=json`;
-  const raw = await fetchText(oembedUrl);
+async function getYouTubeInfoRobust(videoId) {
+  const url = `https://www.youtube.com/watch?v=${videoId}`;
+  const playerClients = ["ANDROID", "IOS", "TV", "WEB_EMBEDDED", "WEB"];
   try {
-    const parsed = JSON.parse(raw);
-    return {
-      title: sanitizeUploadedFilename(parsed?.title || `youtube-${cleanVideoId}`),
-      authorName: String(parsed?.author_name || ""),
-      thumbnailUrl: String(parsed?.thumbnail_url || "")
-    };
+    return await ytdl.getInfo(url, { playerClients });
   } catch (_error) {
-    return {
-      title: sanitizeUploadedFilename(`youtube-${cleanVideoId}`),
-      authorName: "",
-      thumbnailUrl: ""
-    };
+    return ytdl.getInfo(url);
   }
 }
 
@@ -1387,50 +1570,8 @@ function selectYouTubeDownloadFormats(info) {
   return { formats: eligible, onlyTooLarge };
 }
 
-function selectYouTubePlayableFormats(info) {
-  const source = Array.isArray(info?.formats) ? info.formats : [];
-  return source
-    .filter((item) => {
-      if (!item || !item.hasVideo || !item.hasAudio || !item.url) {
-        return false;
-      }
-      const container = String(item.container || "").toLowerCase();
-      if (container !== "mp4" && container !== "webm" && container !== "ogg") {
-        return false;
-      }
-      // Prefer direct progressive streams for stable playback in <video>.
-      if (item.isHLS || item.isDashMPD) {
-        return false;
-      }
-      return true;
-    })
-    .sort(compareYouTubeFormats);
-}
-
-async function getYouTubeDirectPlayableSource(videoId) {
-  const url = `https://www.youtube.com/watch?v=${videoId}`;
-  const info = await ytdl.getInfo(url);
-  const formats = selectYouTubePlayableFormats(info);
-  if (!formats.length) {
-    const noFormatError = new Error("No playable YouTube format");
-    noFormatError.code = "YOUTUBE_FORMAT_UNSUPPORTED";
-    throw noFormatError;
-  }
-  const format = formats[0];
-  const container = String(format?.container || "mp4").toLowerCase();
-  const mimeType = `video/${container === "ogg" ? "ogg" : container === "webm" ? "webm" : "mp4"}`;
-  return {
-    src: String(format.url || "").trim(),
-    cleanFileName: sanitizeUploadedFilename(info?.videoDetails?.title || `youtube-${videoId}`),
-    durationSec: normalizeRoomVideoDuration(Number(info?.videoDetails?.lengthSeconds || 0)),
-    mimeType,
-    estimatedBytes: estimateYouTubeFormatSizeBytes(format)
-  };
-}
-
-async function downloadYouTubeVideoToLocalFile(videoId, roomCode) {
-  const url = `https://www.youtube.com/watch?v=${videoId}`;
-  const info = await ytdl.getInfo(url);
+async function downloadYouTubeVideoToLocalFile(videoId) {
+  const info = await getYouTubeInfoRobust(videoId);
   const picked = selectYouTubeDownloadFormats(info);
   if (picked.onlyTooLarge) {
     const tooLargeError = new Error("YouTube video is too large");
@@ -1450,7 +1591,7 @@ async function downloadYouTubeVideoToLocalFile(videoId, roomCode) {
   for (const format of picked.formats) {
     const container = String(format?.container || "mp4").toLowerCase();
     const extension = container === "webm" ? ".webm" : container === "ogg" ? ".ogg" : ".mp4";
-    const storedFileName = `room-${String(roomCode || "").toLowerCase()}-${Date.now()}-${crypto.randomBytes(6).toString("hex")}${extension}`;
+    const storedFileName = `yt-${videoId}-${Date.now()}-${crypto.randomBytes(4).toString("hex")}${extension}`;
     const absolutePath = path.join(ROOM_VIDEO_UPLOAD_DIR, storedFileName);
     let downloadedBytes = 0;
     try {
@@ -2655,7 +2796,8 @@ async function handleApi(req, res) {
         size: uploaded.data.length,
         uploadedBy: username,
         uploadedAt: Date.now(),
-        duration: normalizedDuration
+        duration: normalizedDuration,
+        isYouTubeCached: false
       };
       room.videoSync = {
         videoId: room.video.id,
@@ -2708,101 +2850,67 @@ async function handleApi(req, res) {
       }
 
       ensureUploadsDir();
-      let downloaded = null;
-      try {
-        downloaded = await downloadYouTubeVideoToLocalFile(resolved.videoId, room.code);
-      } catch (error) {
-        console.warn("YouTube local download failed, falling back to direct stream:", error?.message || error);
+      let selectedVideo = getCachedYouTubeVideo(resolved.videoId);
+      if (!selectedVideo) {
+        let downloaded = null;
         try {
-          const direct = await getYouTubeDirectPlayableSource(resolved.videoId);
-          removeRoomVideoAsset(room);
-          room.video = {
-            id: randomToken(),
-            sourceType: "file",
-            youtubeId: resolved.videoId,
-            src: direct.src,
-            filename: direct.cleanFileName,
-            mimeType: direct.mimeType,
-            size: Number(direct.estimatedBytes || 0),
-            uploadedBy: username,
-            uploadedAt: Date.now(),
-            duration: direct.durationSec
-          };
-          room.videoSync = {
-            videoId: room.video.id,
-            playing: false,
-            baseTime: 0,
-            playbackRate: 1,
-            updatedAt: Date.now()
-          };
-          sendJson(res, 201, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });
-          return;
-        } catch (fallbackError) {
-          console.warn("YouTube direct stream fallback failed, switching to embed mode:", fallbackError?.message || fallbackError);
-          const embedSrc = buildYouTubeEmbedSrc(resolved.videoId);
-          if (!embedSrc) {
-            sendJson(res, 502, {
-              code: "YOUTUBE_DOWNLOAD_FAILED",
-              error: i18n(req, "تعذر تنزيل/تشغيل فيديو يوتيوب حاليًا. حاول فيديو آخر.", "Could not download/play this YouTube video right now. Try another one.")
+          downloaded = await downloadYouTubeVideoToLocalFile(resolved.videoId);
+        } catch (error) {
+          const code = String(error?.code || "");
+          const message = String(error?.message || "");
+          if (code === "YOUTUBE_VIDEO_TOO_LARGE") {
+            sendJson(res, 413, {
+              code: "YOUTUBE_VIDEO_TOO_LARGE",
+              error: i18n(req, "الفيديو كبير جدًا (الحد 80MB).", "YouTube video is too large (max 80MB).")
             });
             return;
           }
-          let embedFileName = sanitizeUploadedFilename(`youtube-${resolved.videoId}`);
-          try {
-            const embedMeta = await fetchYouTubeOEmbed(resolved.videoId);
-            if (embedMeta?.title) {
-              embedFileName = sanitizeUploadedFilename(embedMeta.title);
-            }
-          } catch (metaError) {
-            const metaMessage = String(metaError?.message || "");
-            const statusMatch = metaMessage.match(/status\s+(\d{3})/i);
-            const upstreamStatus = statusMatch ? Number(statusMatch[1]) : 0;
-            if (upstreamStatus >= 400 && upstreamStatus < 500 && upstreamStatus !== 429) {
-              sendJson(res, 404, {
-                code: "YOUTUBE_NOT_FOUND",
-                error: i18n(req, "لم يتم العثور على فيديو مناسب.", "No matching YouTube video was found.")
-              });
-              return;
-            }
-            console.warn("YouTube embed metadata fetch failed:", metaMessage || metaError);
+          if (code === "YOUTUBE_FORMAT_UNSUPPORTED") {
+            sendJson(res, 415, {
+              code: "YOUTUBE_FORMAT_UNSUPPORTED",
+              error: i18n(req, "تعذر العثور على صيغة فيديو مدعومة.", "No supported downloadable video format was found.")
+            });
+            return;
           }
-          removeRoomVideoAsset(room);
-          room.video = {
-            id: randomToken(),
-            sourceType: "youtube",
-            youtubeId: resolved.videoId,
-            src: embedSrc,
-            filename: embedFileName,
-            mimeType: "video/youtube",
-            size: 0,
-            uploadedBy: username,
-            uploadedAt: Date.now(),
-            duration: 0
-          };
-          room.videoSync = {
-            videoId: room.video.id,
-            playing: false,
-            baseTime: 0,
-            playbackRate: 1,
-            updatedAt: Date.now()
-          };
-          sendJson(res, 201, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });
+          const statusMatch = message.match(/status\s+(\d{3})/i);
+          const upstreamStatus = statusMatch ? Number(statusMatch[1]) : 0;
+          if (upstreamStatus >= 400 && upstreamStatus < 500 && upstreamStatus !== 429) {
+            sendJson(res, 404, {
+              code: "YOUTUBE_NOT_FOUND",
+              error: i18n(req, "لم يتم العثور على فيديو مناسب.", "No matching YouTube video was found.")
+            });
+            return;
+          }
+          console.warn("YouTube local download failed:", message || error);
+          sendJson(res, 502, {
+            code: "YOUTUBE_DOWNLOAD_FAILED",
+            error: i18n(req, "تعذر تنزيل فيديو يوتيوب الآن. حاول فيديو آخر.", "Could not download this YouTube video right now. Try another one.")
+          });
           return;
         }
+        selectedVideo = rememberYouTubeCache(resolved.videoId, downloaded) || {
+          videoId: resolved.videoId,
+          storedFileName: downloaded.storedFileName,
+          cleanFileName: downloaded.cleanFileName,
+          durationSec: downloaded.durationSec,
+          downloadedBytes: downloaded.downloadedBytes,
+          mimeType: downloaded.mimeType
+        };
       }
 
       removeRoomVideoAsset(room);
       room.video = {
         id: randomToken(),
         sourceType: "file",
-        youtubeId: "",
-        src: `/uploads/room-videos/${downloaded.storedFileName}`,
-        filename: downloaded.cleanFileName,
-        mimeType: downloaded.mimeType,
-        size: downloaded.downloadedBytes,
+        youtubeId: resolved.videoId,
+        src: `/uploads/room-videos/${selectedVideo.storedFileName}`,
+        filename: selectedVideo.cleanFileName,
+        mimeType: selectedVideo.mimeType,
+        size: Number(selectedVideo.downloadedBytes || 0),
         uploadedBy: username,
         uploadedAt: Date.now(),
-        duration: downloaded.durationSec
+        duration: selectedVideo.durationSec,
+        isYouTubeCached: true
       };
       room.videoSync = {
         videoId: room.video.id,
@@ -2998,6 +3106,7 @@ const server = http.createServer(async (req, res) => {
 loadUsers();
 loadModeration();
 ensureUploadsDir();
+loadYouTubeCache();
 
 server.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
