@@ -3258,3 +3258,20 @@ ul {
 #roomVideoEmbed {
   border: 0;
 }
+
+#roomVideoEmbed iframe {
+  width: calc(100% + 180px);
+  height: calc(100% + 180px);
+  margin-top: -90px;
+  margin-left: -90px;
+  border: 0;
+  pointer-events: none;
+}
+
+.video-youtube-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  background: linear-gradient(180deg, rgba(5, 11, 28, 0.12), rgba(5, 11, 28, 0.7));
+  pointer-events: none;
+}

@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Changa:wght@600;700;800&family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=20260222b">
+  <link rel="stylesheet" href="styles.css?v=20260222e">
 </head>
 <body>
   <div class="top-controls">
@@ -55,7 +55,8 @@
           </button>
           <div class="video-player-frame controls-visible" id="videoPlayerFrame">
             <video id="roomVideoPlayer" class="room-video-player" playsinline preload="metadata" disablepictureinpicture disableremoteplayback></video>
-            <iframe id="roomVideoEmbed" class="room-video-player hidden" title="YouTube player" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
+            <div id="roomVideoEmbed" class="room-video-player hidden"></div>
+            <div id="videoYouTubeMask" class="video-youtube-mask hidden"></div>
             <div id="videoControlsBar" class="video-controls-bar">
               <button id="videoPlayPauseBtn" class="btn btn-ghost video-control-btn" type="button">Play</button>
               <input id="videoSeekRange" class="video-seek-range" type="range" min="0" max="1000" step="1" value="0" aria-label="Video progress">
@@ -231,7 +232,7 @@
 
   <div id="toastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
   <script src="sound.js"></script>
-  <script src="room.js?v=20260222c"></script>
+  <script src="room.js?v=20260222g"></script>
 </body>
 </html>
 

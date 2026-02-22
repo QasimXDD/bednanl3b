@@ -3,6 +3,7 @@ const fs = require("fs");
 const https = require("https");
 const path = require("path");
 const crypto = require("crypto");
+const ytdl = require("@distube/ytdl-core");
 
 const PORT = process.env.PORT || 3000;
 const ROOT = __dirname;
@@ -30,6 +31,7 @@ const ROOM_VIDEO_MULTIPART_OVERHEAD_BYTES = 1024 * 1024;
 const ROOM_VIDEO_MAX_DURATION_SEC = 60 * 60 * 8;
 const ROOM_VIDEO_MAX_FILENAME_LENGTH = 120;
 const YOUTUBE_SEARCH_TIMEOUT_MS = 9000;
+const YOUTUBE_DOWNLOAD_TIMEOUT_MS = 1000 * 60 * 4;
 const YOUTUBE_INPUT_MAX_LENGTH = 300;
 const YOUTUBE_VIDEO_ID_REGEX = /^[A-Za-z0-9_-]{11}$/;
 const ROOM_VIDEO_ALLOWED_MIME_TYPES = new Set([
@@ -1289,6 +1291,160 @@ async function resolveYouTubeInput(rawInput) {
   return { videoId: foundId, label: cleanInput };
 }
 
+function estimateYouTubeFormatSizeBytes(format) {
+  const direct = Number(format?.contentLength || 0);
+  if (Number.isFinite(direct) && direct > 0) {
+    return direct;
+  }
+  const bitrate = Number(format?.bitrate || format?.averageBitrate || 0);
+  const approxDurationMs = Number(format?.approxDurationMs || 0);
+  if (Number.isFinite(bitrate) && bitrate > 0 && Number.isFinite(approxDurationMs) && approxDurationMs > 0) {
+    return Math.floor((bitrate * (approxDurationMs / 1000)) / 8);
+  }
+  return 0;
+}
+
+function compareYouTubeFormats(a, b) {
+  const heightA = Number(a?.height || 0);
+  const heightB = Number(b?.height || 0);
+  if (heightA !== heightB) {
+    return heightB - heightA;
+  }
+  const bitrateA = Number(a?.bitrate || a?.averageBitrate || 0);
+  const bitrateB = Number(b?.bitrate || b?.averageBitrate || 0);
+  if (bitrateA !== bitrateB) {
+    return bitrateB - bitrateA;
+  }
+  return Number(b?.itag || 0) - Number(a?.itag || 0);
+}
+
+function selectYouTubeDownloadFormats(info) {
+  const source = Array.isArray(info?.formats) ? info.formats : [];
+  const candidates = source.filter((item) => {
+    if (!item || !item.hasVideo || !item.hasAudio) {
+      return false;
+    }
+    const container = String(item.container || "").toLowerCase();
+    return container === "mp4" || container === "webm" || container === "ogg";
+  });
+  const withSize = candidates.map((item) => ({
+    format: item,
+    estimatedBytes: estimateYouTubeFormatSizeBytes(item)
+  }));
+  const eligible = withSize
+    .filter((entry) => entry.estimatedBytes <= 0 || entry.estimatedBytes <= ROOM_VIDEO_MAX_BYTES)
+    .sort((a, b) => compareYouTubeFormats(a.format, b.format))
+    .map((entry) => entry.format);
+  const onlyTooLarge = withSize.length > 0 && eligible.length === 0;
+  return { formats: eligible, onlyTooLarge };
+}
+
+async function downloadYouTubeVideoToLocalFile(videoId, roomCode) {
+  const url = `https://www.youtube.com/watch?v=${videoId}`;
+  const info = await ytdl.getInfo(url);
+  const picked = selectYouTubeDownloadFormats(info);
+  if (picked.onlyTooLarge) {
+    const tooLargeError = new Error("YouTube video is too large");
+    tooLargeError.code = "YOUTUBE_VIDEO_TOO_LARGE";
+    throw tooLargeError;
+  }
+  if (!picked.formats.length) {
+    const formatError = new Error("No supported YouTube format");
+    formatError.code = "YOUTUBE_FORMAT_UNSUPPORTED";
+    throw formatError;
+  }
+
+  const cleanFileName = sanitizeUploadedFilename(info?.videoDetails?.title || `youtube-${videoId}`);
+  const durationSec = normalizeRoomVideoDuration(Number(info?.videoDetails?.lengthSeconds || 0));
+  let lastError = null;
+
+  for (const format of picked.formats) {
+    const container = String(format?.container || "mp4").toLowerCase();
+    const extension = container === "webm" ? ".webm" : container === "ogg" ? ".ogg" : ".mp4";
+    const storedFileName = `room-${String(roomCode || "").toLowerCase()}-${Date.now()}-${crypto.randomBytes(6).toString("hex")}${extension}`;
+    const absolutePath = path.join(ROOM_VIDEO_UPLOAD_DIR, storedFileName);
+    let downloadedBytes = 0;
+    try {
+      await new Promise((resolve, reject) => {
+        let writer = null;
+        let stream = null;
+        let timer = null;
+        let done = false;
+        const finish = (error) => {
+          if (done) {
+            return;
+          }
+          done = true;
+          if (timer) {
+            clearTimeout(timer);
+          }
+          if (error) {
+            if (stream && typeof stream.destroy === "function") {
+              stream.destroy();
+            }
+            if (writer && typeof writer.destroy === "function") {
+              writer.destroy();
+            }
+            try {
+              if (fs.existsSync(absolutePath)) {
+                fs.unlinkSync(absolutePath);
+              }
+            } catch (_unlinkError) {
+              // Ignore file cleanup errors.
+            }
+            reject(error);
+            return;
+          }
+          resolve();
+        };
+
+        writer = fs.createWriteStream(absolutePath, { flags: "wx" });
+        stream = ytdl.downloadFromInfo(info, { format });
+        timer = setTimeout(() => {
+          const timeoutError = new Error("YouTube download timeout");
+          timeoutError.code = "YOUTUBE_DOWNLOAD_TIMEOUT";
+          finish(timeoutError);
+        }, YOUTUBE_DOWNLOAD_TIMEOUT_MS);
+
+        stream.on("data", (chunk) => {
+          downloadedBytes += chunk.length;
+          if (downloadedBytes > ROOM_VIDEO_MAX_BYTES) {
+            const sizeError = new Error("YouTube video exceeds max size");
+            sizeError.code = "YOUTUBE_VIDEO_TOO_LARGE";
+            finish(sizeError);
+          }
+        });
+        stream.on("error", (error) => finish(error));
+        writer.on("error", (error) => finish(error));
+        writer.on("finish", () => finish());
+        stream.pipe(writer);
+      });
+
+      return {
+        storedFileName,
+        cleanFileName,
+        durationSec,
+        downloadedBytes,
+        mimeType: `video/${container === "ogg" ? "ogg" : container === "webm" ? "webm" : "mp4"}`
+      };
+    } catch (error) {
+      lastError = error;
+      if (error?.code === "YOUTUBE_VIDEO_TOO_LARGE") {
+        continue;
+      }
+      // Try the next compatible format when download fails.
+      continue;
+    }
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+  const fallbackError = new Error("YouTube download failed");
+  fallbackError.code = "YOUTUBE_DOWNLOAD_FAILED";
+  throw fallbackError;
+}
+
 function getBearerToken(req) {
   const auth = req.headers.authorization || "";
   if (!auth.startsWith("Bearer ")) {
@@ -2462,21 +2618,57 @@ async function handleApi(req, res) {
         return;
       }
 
+      ensureUploadsDir();
+      let downloaded = null;
+      try {
+        downloaded = await downloadYouTubeVideoToLocalFile(resolved.videoId, room.code);
+      } catch (error) {
+        const code = String(error?.code || "");
+        if (code === "YOUTUBE_VIDEO_TOO_LARGE") {
+          sendJson(res, 413, {
+            code: "YOUTUBE_VIDEO_TOO_LARGE",
+            error: i18n(
+              req,
+              "فيديو يوتيوب أكبر من الحد المسموح (80MB). اختر فيديو أقصر أو بجودة أقل.",
+              "YouTube video exceeds max allowed size (80MB). Choose a shorter or lower-quality video."
+            )
+          });
+          return;
+        }
+        if (code === "YOUTUBE_FORMAT_UNSUPPORTED") {
+          sendJson(res, 415, {
+            code: "YOUTUBE_FORMAT_UNSUPPORTED",
+            error: i18n(req, "تعذر العثور على صيغة فيديو مدعومة لهذا الرابط.", "No supported downloadable format was found for this video.")
+          });
+          return;
+        }
+        sendJson(res, 502, {
+          code: "YOUTUBE_DOWNLOAD_FAILED",
+          error: i18n(req, "تعذر تنزيل فيديو يوتيوب حاليًا. حاول فيديو آخر.", "Could not download this YouTube video right now. Try another one.")
+        });
+        return;
+      }
+
       removeRoomVideoAsset(room);
-      const embedSrc = `https://www.youtube.com/embed/${resolved.videoId}?autoplay=1&rel=0&modestbranding=1&playsinline=1&controls=0&disablekb=1&fs=0&iv_load_policy=3&enablejsapi=1`;
       room.video = {
         id: randomToken(),
-        sourceType: "youtube",
-        youtubeId: resolved.videoId,
-        src: embedSrc,
-        filename: resolved.label || `YouTube ${resolved.videoId}`,
-        mimeType: "video/youtube",
-        size: 0,
+        sourceType: "file",
+        youtubeId: "",
+        src: `/uploads/room-videos/${downloaded.storedFileName}`,
+        filename: downloaded.cleanFileName,
+        mimeType: downloaded.mimeType,
+        size: downloaded.downloadedBytes,
         uploadedBy: username,
         uploadedAt: Date.now(),
-        duration: 0
+        duration: downloaded.durationSec
       };
-      room.videoSync = null;
+      room.videoSync = {
+        videoId: room.video.id,
+        playing: false,
+        baseTime: 0,
+        playbackRate: 1,
+        updatedAt: Date.now()
+      };
 
       sendJson(res, 201, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });
       return;
@@ -2490,12 +2682,22 @@ async function handleApi(req, res) {
         });
         return;
       }
-      if (!room.video || !room.videoSync) {
+      if (!room.video) {
         sendJson(res, 404, {
           code: "VIDEO_NOT_FOUND",
           error: i18n(req, "لا يوجد فيديو في الغرفة.", "No room video is available.")
         });
         return;
+      }
+      // Backward-compatible guard: older in-memory rooms might have a YouTube video without sync state.
+      if (!room.videoSync) {
+        room.videoSync = {
+          videoId: String(room.video.id || randomToken()),
+          playing: false,
+          baseTime: 0,
+          playbackRate: 1,
+          updatedAt: Date.now()
+        };
       }
 
       const { action, currentTime, playbackRate, duration, videoId } = await parseBody(req);

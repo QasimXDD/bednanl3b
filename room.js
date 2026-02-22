@@ -98,6 +98,7 @@ const videoHintText = document.getElementById("videoHintText");
 const videoPlayerFrame = document.getElementById("videoPlayerFrame");
 const roomVideoPlayer = document.getElementById("roomVideoPlayer");
 const roomVideoEmbed = document.getElementById("roomVideoEmbed");
+const videoYouTubeMask = document.getElementById("videoYouTubeMask");
 const videoControlsBar = document.getElementById("videoControlsBar");
 const videoPlayPauseBtn = document.getElementById("videoPlayPauseBtn");
 const videoSeekRange = document.getElementById("videoSeekRange");
@@ -184,6 +185,7 @@ let youTubePlayerReady = false;
 let youTubeState = -1;
 let youTubeTickTimer = null;
 let activeYouTubeVideoId = "";
+let suppressYouTubeStateBroadcast = false;
 
 const I18N = {
   ar: {
@@ -1178,7 +1180,9 @@ function destroyYouTubePlayer() {
   stopYouTubeTick();
   if (youTubePlayer) {
     try {
-      if (typeof youTubePlayer.stopVideo === "function") {
+      if (typeof youTubePlayer.destroy === "function") {
+        youTubePlayer.destroy();
+      } else if (typeof youTubePlayer.stopVideo === "function") {
         youTubePlayer.stopVideo();
       } else if (typeof youTubePlayer.pauseVideo === "function") {
         youTubePlayer.pauseVideo();
@@ -1187,8 +1191,27 @@ function destroyYouTubePlayer() {
       // Ignore teardown errors.
     }
   }
+  if (roomVideoEmbed) {
+    roomVideoEmbed.innerHTML = "";
+  }
+  youTubePlayer = null;
+  youTubePlayerReady = false;
   youTubeState = -1;
   activeYouTubeVideoId = "";
+  setYouTubeMaskVisible(false);
+}
+
+function hardenYouTubeIframeUi() {
+  if (!youTubePlayer || typeof youTubePlayer.getIframe !== "function") {
+    return;
+  }
+  const iframe = youTubePlayer.getIframe();
+  if (!iframe) {
+    return;
+  }
+  iframe.setAttribute("tabindex", "-1");
+  iframe.setAttribute("aria-hidden", "true");
+  iframe.style.pointerEvents = "none";
 }
 
 function getYouTubeDuration() {
@@ -1211,6 +1234,14 @@ function isYouTubePlaying() {
   return youTubeState === 1;
 }
 
+function setYouTubeMaskVisible(visible) {
+  if (!videoYouTubeMask) {
+    return;
+  }
+  const show = Boolean(visible && isYouTubeRoomVideo(roomVideoState));
+  videoYouTubeMask.classList.toggle("hidden", !show);
+}
+
 async function ensureYouTubePlayer(videoId, { autoplay = true } = {}) {
   if (!videoId || !roomVideoEmbed) {
     return;
@@ -1222,6 +1253,7 @@ async function ensureYouTubePlayer(videoId, { autoplay = true } = {}) {
   const startMuted = !isRoomLeader();
   if (!youTubePlayer) {
     youTubePlayer = new window.YT.Player("roomVideoEmbed", {
+      host: "https://www.youtube-nocookie.com",
       videoId,
       playerVars: {
         autoplay: autoplay ? 1 : 0,
@@ -1236,10 +1268,12 @@ async function ensureYouTubePlayer(videoId, { autoplay = true } = {}) {
       events: {
         onReady: (event) => {
           youTubePlayerReady = true;
+          hardenYouTubeIframeUi();
           if (startMuted && event?.target?.mute) {
             event.target.mute();
           }
           youTubeState = Number(event?.target?.getPlayerState?.() ?? -1);
+          setYouTubeMaskVisible(youTubeState !== 1);
           updateRoomVideoControls();
           startYouTubeTick();
           if (autoplay && event?.target?.playVideo) {
@@ -1247,12 +1281,24 @@ async function ensureYouTubePlayer(videoId, { autoplay = true } = {}) {
           }
         },
         onStateChange: (event) => {
+          hardenYouTubeIframeUi();
           youTubeState = Number(event?.data ?? -1);
+          setYouTubeMaskVisible(youTubeState !== 1);
           updateRoomVideoControls();
           if (youTubeState === 1) {
             scheduleRoomVideoControlsAutoHide();
           } else {
             setRoomVideoControlsVisible(true);
+          }
+          if (suppressRoomVideoEvents || suppressYouTubeStateBroadcast || !isRoomLeader()) {
+            return;
+          }
+          if (youTubeState === 1) {
+            sendRoomVideoSync("play");
+          } else if (youTubeState === 2) {
+            sendRoomVideoSync("pause");
+          } else if (youTubeState === 0) {
+            sendRoomVideoSync("stop");
           }
         },
         onError: () => {
@@ -1268,9 +1314,14 @@ async function ensureYouTubePlayer(videoId, { autoplay = true } = {}) {
     if (typeof youTubePlayer.loadVideoById === "function") {
       youTubePlayer.loadVideoById(videoId);
     }
-  } else if (autoplay && typeof youTubePlayer.playVideo === "function") {
-    youTubePlayer.playVideo();
+  } else if (autoplay) {
+    if (typeof youTubePlayer.playVideo === "function") {
+      youTubePlayer.playVideo();
+    }
+  } else if (typeof youTubePlayer.pauseVideo === "function") {
+    youTubePlayer.pauseVideo();
   }
+  hardenYouTubeIframeUi();
   startYouTubeTick();
 }
 
@@ -1625,7 +1676,54 @@ function clearRoomVideoPlayer() {
 }
 
 async function applyRoomVideoSyncToPlayer({ forceSeek = false } = {}) {
-  if (!roomVideoPlayer || !roomVideoState || !roomVideoSyncState) {
+  if (!roomVideoState || !roomVideoSyncState) {
+    return;
+  }
+  if (isYouTubeRoomVideo(roomVideoState)) {
+    if (!youTubePlayer || !youTubePlayerReady) {
+      return;
+    }
+    const duration = getYouTubeDuration();
+    const targetTime = computeRoomVideoTargetTime(roomVideoSyncState, duration);
+    const current = clampVideoTime(getYouTubeCurrentTime(), duration);
+    const drift = Math.abs(targetTime - current);
+    const leaderControl = isRoomLeader();
+    const hardSeekThreshold = leaderControl ? ROOM_VIDEO_LEADER_SEEK_DRIFT_SEC : ROOM_VIDEO_MEMBER_HARD_SEEK_DRIFT_SEC;
+    const nextRate = normalizeVideoRate(roomVideoSyncState.playbackRate);
+
+    suppressRoomVideoEvents = true;
+    suppressYouTubeStateBroadcast = true;
+    try {
+      if (typeof youTubePlayer.setPlaybackRate === "function") {
+        try {
+          youTubePlayer.setPlaybackRate(nextRate);
+        } catch (_) {
+          // Some videos restrict playback rates.
+        }
+      }
+      if (forceSeek || drift > hardSeekThreshold) {
+        if (typeof youTubePlayer.seekTo === "function") {
+          youTubePlayer.seekTo(targetTime, true);
+        }
+      }
+      if (roomVideoSyncState.playing) {
+        if (typeof youTubePlayer.playVideo === "function") {
+          youTubePlayer.playVideo();
+        }
+      } else if (typeof youTubePlayer.pauseVideo === "function") {
+        youTubePlayer.pauseVideo();
+      }
+    } finally {
+      setTimeout(() => {
+        suppressRoomVideoEvents = false;
+        suppressYouTubeStateBroadcast = false;
+      }, 0);
+      setYouTubeMaskVisible(!roomVideoSyncState.playing);
+      updateRoomVideoControls();
+    }
+    return;
+  }
+  if (!roomVideoPlayer) {
     return;
   }
   suppressRoomVideoEvents = true;
@@ -1711,6 +1809,15 @@ function renderRoomVideo(room) {
   const sourceChanged = activeRoomVideoId !== nextVideoId || currentSource !== expectedSource;
   activeRoomVideoId = nextVideoId;
 
+  // Always enforce a single visible renderer to avoid stacked video views.
+  roomVideoPlayer.classList.toggle("hidden", isYoutube);
+  if (roomVideoEmbed) {
+    roomVideoEmbed.classList.toggle("hidden", !isYoutube);
+  }
+  if (!isYoutube) {
+    setYouTubeMaskVisible(false);
+  }
+
   if (isYoutube) {
     roomVideoMetadataReady = false;
     withSuppressedRoomVideoEvents(() => {
@@ -1718,22 +1825,12 @@ function renderRoomVideo(room) {
       roomVideoPlayer.removeAttribute("src");
       roomVideoPlayer.load();
     });
-    roomVideoPlayer.classList.add("hidden");
-    if (roomVideoEmbed) {
-      roomVideoEmbed.classList.remove("hidden");
-    }
     const youtubeId = parseYouTubeVideoId(nextVideo.youtubeId) || parseYouTubeVideoId(nextVideo.src);
-    ensureYouTubePlayer(youtubeId, { autoplay: true }).catch(() => {
+    ensureYouTubePlayer(youtubeId, { autoplay: Boolean(roomVideoSyncState?.playing) }).catch(() => {
       showToast(t("videoSyncFailed"));
     });
-    roomVideoSyncState = null;
   } else if (sourceChanged) {
     destroyYouTubePlayer();
-    roomVideoPlayer.classList.remove("hidden");
-    if (roomVideoEmbed) {
-      roomVideoEmbed.classList.add("hidden");
-      roomVideoEmbed.removeAttribute("src");
-    }
     roomVideoMetadataReady = false;
     withSuppressedRoomVideoEvents(() => {
       roomVideoPlayer.pause();
@@ -1748,7 +1845,11 @@ function renderRoomVideo(room) {
   const fileLabel = String(nextVideo.filename || "video");
   videoStatusText.textContent = fmt(t("videoNowPlaying"), { name: fileLabel });
   updateRoomVideoControls();
-  if (!roomVideoSyncState || isYoutube) {
+  if (!roomVideoSyncState) {
+    return;
+  }
+  if (isYoutube) {
+    applyRoomVideoSyncToPlayer({ forceSeek: sourceChanged });
     return;
   }
   if (roomVideoMetadataReady || roomVideoPlayer.readyState >= 1) {
@@ -3381,6 +3482,11 @@ if (videoPlayPauseBtn) {
     sfx("click");
     revealRoomVideoControls();
     if (isYouTubeRoomVideo(roomVideoState)) {
+      if (!isRoomLeader()) {
+        showVideoControlLockedToast();
+        applyRoomVideoSyncToPlayer({ forceSeek: true });
+        return;
+      }
       if (!youTubePlayerReady || !youTubePlayer) {
         return;
       }
@@ -3388,8 +3494,10 @@ if (videoPlayPauseBtn) {
         if (typeof youTubePlayer.pauseVideo === "function") {
           youTubePlayer.pauseVideo();
         }
+        sendRoomVideoSync("pause");
       } else if (typeof youTubePlayer.playVideo === "function") {
         youTubePlayer.playVideo();
+        sendRoomVideoSync("play");
       }
       return;
     }
@@ -3429,9 +3537,16 @@ if (videoSeekRange) {
     const progress = Number(videoSeekRange.value || 0) / 1000;
     const targetTime = clampVideoTime(progress * duration, duration);
     if (isYouTubeRoomVideo(roomVideoState)) {
+      if (!isRoomLeader()) {
+        roomVideoSeekDragging = false;
+        showVideoControlLockedToast();
+        applyRoomVideoSyncToPlayer({ forceSeek: true });
+        return;
+      }
       if (youTubePlayerReady && youTubePlayer && typeof youTubePlayer.seekTo === "function") {
         youTubePlayer.seekTo(targetTime, true);
       }
+      sendRoomVideoSync("seek");
     } else if (roomVideoPlayer) {
       roomVideoPlayer.currentTime = targetTime;
     }
