@@ -4,6 +4,7 @@ const https = require("https");
 const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
+const { spawn } = require("child_process");
 if (!process.env.YTDL_NO_DEBUG_FILE) {
   process.env.YTDL_NO_DEBUG_FILE = "1";
 }
@@ -47,6 +48,7 @@ const YOUTUBE_VIDEO_ID_REGEX = /^[A-Za-z0-9_-]{11}$/;
 const YOUTUBE_CACHE_MAX_ITEMS = 180;
 const YOUTUBE_CACHE_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 30;
 const YOUTUBE_PROXY_TTL_MS = 1000 * 60 * 60 * 6;
+const YT_DLP_BINARY = String(process.env.YT_DLP_BINARY || "yt-dlp").trim() || "yt-dlp";
 const ROOM_VIDEO_ALLOWED_MIME_TYPES = new Set([
   "video/mp4",
   "video/webm",
@@ -91,6 +93,7 @@ const youtubeVideoCache = new Map();
 const youtubeProxyStreams = new Map();
 let siteAnnouncement = null;
 let activeRoomVideoUploadDir = ROOM_VIDEO_UPLOAD_DIR_DEFAULT;
+let ytDlpCommandOverride = null;
 
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) {
@@ -1836,6 +1839,180 @@ async function getYouTubeDirectPlayableSource(videoId) {
   };
 }
 
+function runYtDlp(args, timeoutMs = YOUTUBE_DOWNLOAD_TIMEOUT_MS) {
+  const commandCandidates = [];
+  if (ytDlpCommandOverride) {
+    commandCandidates.push(ytDlpCommandOverride);
+  } else {
+    commandCandidates.push([YT_DLP_BINARY, []], ["python3", ["-m", "yt_dlp"]], ["python", ["-m", "yt_dlp"]]);
+  }
+
+  const runWithCommand = (command, baseArgs) => new Promise((resolve, reject) => {
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let timer = null;
+    const mergedArgs = [...baseArgs, ...args];
+    let child = null;
+    try {
+      child = spawn(command, mergedArgs, { windowsHide: true });
+    } catch (error) {
+      const wrapped = new Error(`yt-dlp spawn failed: ${error?.message || error}`);
+      wrapped.code = "YT_DLP_UNAVAILABLE";
+      reject(wrapped);
+      return;
+    }
+
+    const finish = (error, result = null) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(result);
+    };
+
+    timer = setTimeout(() => {
+      if (child && !child.killed) {
+        child.kill("SIGKILL");
+      }
+      const timeoutError = new Error("yt-dlp timeout");
+      timeoutError.code = "YT_DLP_TIMEOUT";
+      finish(timeoutError);
+    }, timeoutMs);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk || "");
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk || "");
+    });
+
+    child.on("error", (error) => {
+      const wrapped = new Error(`yt-dlp execution failed: ${error?.message || error}`);
+      wrapped.code = error?.code === "ENOENT" ? "YT_DLP_UNAVAILABLE" : "YT_DLP_FAILED";
+      finish(wrapped);
+    });
+
+    child.on("close", (code) => {
+      if (code !== 0) {
+        const runError = new Error(`yt-dlp exited with code ${code}: ${stderr.trim() || stdout.trim()}`);
+        runError.code = "YT_DLP_FAILED";
+        finish(runError);
+        return;
+      }
+      finish(null, { stdout, stderr });
+    });
+  });
+
+  const attempt = async () => {
+    let unavailableCount = 0;
+    let lastError = null;
+    for (const candidate of commandCandidates) {
+      const [command, baseArgs] = candidate;
+      try {
+        const result = await runWithCommand(command, baseArgs);
+        ytDlpCommandOverride = [command, baseArgs];
+        return result;
+      } catch (error) {
+        lastError = error;
+        if (error?.code === "YT_DLP_UNAVAILABLE") {
+          unavailableCount += 1;
+          continue;
+        }
+        throw error;
+      }
+    }
+    const unavailable = new Error("yt-dlp is unavailable");
+    unavailable.code = unavailableCount === commandCandidates.length ? "YT_DLP_UNAVAILABLE" : (lastError?.code || "YT_DLP_FAILED");
+    throw unavailable;
+  };
+
+  return attempt();
+}
+
+async function downloadYouTubeVideoToLocalFileWithYtDlp(videoId) {
+  const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  const outputBase = `yt-${videoId}-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+  const outputTemplate = path.join(getRoomVideoUploadDir(), `${outputBase}.%(ext)s`);
+
+  let infoPayload = null;
+  try {
+    const meta = await runYtDlp(["--dump-single-json", "--no-warnings", "--no-playlist", watchUrl]);
+    infoPayload = JSON.parse(String(meta.stdout || "{}"));
+  } catch (error) {
+    if (error?.code === "YT_DLP_UNAVAILABLE") {
+      throw error;
+    }
+    // Continue without metadata if extraction fails; download attempt may still succeed.
+  }
+
+  await runYtDlp([
+    "--no-warnings",
+    "--no-playlist",
+    "--max-filesize",
+    String(ROOM_VIDEO_MAX_BYTES),
+    "-f",
+    "best[ext=mp4][acodec!=none][vcodec!=none]/best[acodec!=none][vcodec!=none]",
+    "-o",
+    outputTemplate,
+    watchUrl
+  ]);
+
+  const candidates = fs
+    .readdirSync(getRoomVideoUploadDir())
+    .filter((name) => name.startsWith(`${outputBase}.`))
+    .sort((a, b) => a.localeCompare(b));
+  if (!candidates.length) {
+    const missing = new Error("yt-dlp output not found");
+    missing.code = "YT_DLP_FAILED";
+    throw missing;
+  }
+
+  const storedFileName = candidates[0];
+  const absolutePath = path.join(getRoomVideoUploadDir(), storedFileName);
+  const stats = fs.statSync(absolutePath);
+  const downloadedBytes = Number(stats.size || 0);
+  if (downloadedBytes <= 0) {
+    try {
+      fs.unlinkSync(absolutePath);
+    } catch (_error) {
+      // Ignore cleanup errors.
+    }
+    const empty = new Error("yt-dlp produced empty file");
+    empty.code = "YT_DLP_FAILED";
+    throw empty;
+  }
+  if (downloadedBytes > ROOM_VIDEO_MAX_BYTES) {
+    try {
+      fs.unlinkSync(absolutePath);
+    } catch (_error) {
+      // Ignore cleanup errors.
+    }
+    const tooLarge = new Error("yt-dlp file too large");
+    tooLarge.code = "YOUTUBE_VIDEO_TOO_LARGE";
+    throw tooLarge;
+  }
+
+  const ext = path.extname(storedFileName).toLowerCase();
+  const mimeType = ext === ".webm" ? "video/webm" : ext === ".ogg" ? "video/ogg" : "video/mp4";
+  const cleanFileName = sanitizeUploadedFilename(infoPayload?.title || `youtube-${videoId}`);
+  const durationSec = normalizeRoomVideoDuration(Number(infoPayload?.duration || 0));
+  return {
+    storedFileName,
+    cleanFileName,
+    durationSec,
+    downloadedBytes,
+    mimeType
+  };
+}
+
 async function downloadYouTubeVideoToLocalFile(videoId) {
   const info = await getYouTubeInfoRobust(videoId);
   const picked = selectYouTubeDownloadFormats(info);
@@ -1930,6 +2107,19 @@ async function downloadYouTubeVideoToLocalFile(videoId) {
       }
       // Try the next compatible format when download fails.
       continue;
+    }
+  }
+
+  try {
+    return await downloadYouTubeVideoToLocalFileWithYtDlp(videoId);
+  } catch (ytDlpError) {
+    if (ytDlpError?.code === "YOUTUBE_VIDEO_TOO_LARGE") {
+      throw ytDlpError;
+    }
+    if (ytDlpError?.code === "YT_DLP_UNAVAILABLE") {
+      console.warn("yt-dlp is not available on this host.");
+    } else {
+      console.warn("yt-dlp fallback download failed:", ytDlpError?.message || ytDlpError);
     }
   }
 
