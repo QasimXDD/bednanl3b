@@ -3271,7 +3271,7 @@ ul {
 .video-youtube-mask {
   position: absolute;
   inset: 0;
-  z-index: 4;
+  z-index: 3;
   background: linear-gradient(180deg, rgba(5, 11, 28, 0.12), rgba(5, 11, 28, 0.7));
-  pointer-events: none;
+  pointer-events: auto;
 }

@@ -3,6 +3,12 @@ const fs = require("fs");
 const https = require("https");
 const path = require("path");
 const crypto = require("crypto");
+if (!process.env.YTDL_NO_DEBUG_FILE) {
+  process.env.YTDL_NO_DEBUG_FILE = "1";
+}
+if (!process.env.YTDL_NO_UPDATE) {
+  process.env.YTDL_NO_UPDATE = "1";
+}
 const ytdl = require("@distube/ytdl-core");
 
 const PORT = process.env.PORT || 3000;
@@ -1291,6 +1297,48 @@ async function resolveYouTubeInput(rawInput) {
   return { videoId: foundId, label: cleanInput };
 }
 
+function buildYouTubeEmbedSrc(videoId) {
+  const cleanVideoId = String(videoId || "").trim();
+  if (!YOUTUBE_VIDEO_ID_REGEX.test(cleanVideoId)) {
+    return "";
+  }
+  const params = new URLSearchParams({
+    enablejsapi: "1",
+    controls: "0",
+    disablekb: "1",
+    fs: "0",
+    rel: "0",
+    modestbranding: "1",
+    playsinline: "1",
+    iv_load_policy: "3"
+  });
+  return `https://www.youtube-nocookie.com/embed/${cleanVideoId}?${params.toString()}`;
+}
+
+async function fetchYouTubeOEmbed(videoId) {
+  const cleanVideoId = String(videoId || "").trim();
+  if (!YOUTUBE_VIDEO_ID_REGEX.test(cleanVideoId)) {
+    return null;
+  }
+  const watchUrl = `https://www.youtube.com/watch?v=${cleanVideoId}`;
+  const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(watchUrl)}&format=json`;
+  const raw = await fetchText(oembedUrl);
+  try {
+    const parsed = JSON.parse(raw);
+    return {
+      title: sanitizeUploadedFilename(parsed?.title || `youtube-${cleanVideoId}`),
+      authorName: String(parsed?.author_name || ""),
+      thumbnailUrl: String(parsed?.thumbnail_url || "")
+    };
+  } catch (_error) {
+    return {
+      title: sanitizeUploadedFilename(`youtube-${cleanVideoId}`),
+      authorName: "",
+      thumbnailUrl: ""
+    };
+  }
+}
+
 function estimateYouTubeFormatSizeBytes(format) {
   const direct = Number(format?.contentLength || 0);
   if (Number.isFinite(direct) && direct > 0) {
@@ -1337,6 +1385,47 @@ function selectYouTubeDownloadFormats(info) {
     .map((entry) => entry.format);
   const onlyTooLarge = withSize.length > 0 && eligible.length === 0;
   return { formats: eligible, onlyTooLarge };
+}
+
+function selectYouTubePlayableFormats(info) {
+  const source = Array.isArray(info?.formats) ? info.formats : [];
+  return source
+    .filter((item) => {
+      if (!item || !item.hasVideo || !item.hasAudio || !item.url) {
+        return false;
+      }
+      const container = String(item.container || "").toLowerCase();
+      if (container !== "mp4" && container !== "webm" && container !== "ogg") {
+        return false;
+      }
+      // Prefer direct progressive streams for stable playback in <video>.
+      if (item.isHLS || item.isDashMPD) {
+        return false;
+      }
+      return true;
+    })
+    .sort(compareYouTubeFormats);
+}
+
+async function getYouTubeDirectPlayableSource(videoId) {
+  const url = `https://www.youtube.com/watch?v=${videoId}`;
+  const info = await ytdl.getInfo(url);
+  const formats = selectYouTubePlayableFormats(info);
+  if (!formats.length) {
+    const noFormatError = new Error("No playable YouTube format");
+    noFormatError.code = "YOUTUBE_FORMAT_UNSUPPORTED";
+    throw noFormatError;
+  }
+  const format = formats[0];
+  const container = String(format?.container || "mp4").toLowerCase();
+  const mimeType = `video/${container === "ogg" ? "ogg" : container === "webm" ? "webm" : "mp4"}`;
+  return {
+    src: String(format.url || "").trim(),
+    cleanFileName: sanitizeUploadedFilename(info?.videoDetails?.title || `youtube-${videoId}`),
+    durationSec: normalizeRoomVideoDuration(Number(info?.videoDetails?.lengthSeconds || 0)),
+    mimeType,
+    estimatedBytes: estimateYouTubeFormatSizeBytes(format)
+  };
 }
 
 async function downloadYouTubeVideoToLocalFile(videoId, roomCode) {
@@ -2623,30 +2712,83 @@ async function handleApi(req, res) {
       try {
         downloaded = await downloadYouTubeVideoToLocalFile(resolved.videoId, room.code);
       } catch (error) {
-        const code = String(error?.code || "");
-        if (code === "YOUTUBE_VIDEO_TOO_LARGE") {
-          sendJson(res, 413, {
-            code: "YOUTUBE_VIDEO_TOO_LARGE",
-            error: i18n(
-              req,
-              "فيديو يوتيوب أكبر من الحد المسموح (80MB). اختر فيديو أقصر أو بجودة أقل.",
-              "YouTube video exceeds max allowed size (80MB). Choose a shorter or lower-quality video."
-            )
-          });
+        console.warn("YouTube local download failed, falling back to direct stream:", error?.message || error);
+        try {
+          const direct = await getYouTubeDirectPlayableSource(resolved.videoId);
+          removeRoomVideoAsset(room);
+          room.video = {
+            id: randomToken(),
+            sourceType: "file",
+            youtubeId: resolved.videoId,
+            src: direct.src,
+            filename: direct.cleanFileName,
+            mimeType: direct.mimeType,
+            size: Number(direct.estimatedBytes || 0),
+            uploadedBy: username,
+            uploadedAt: Date.now(),
+            duration: direct.durationSec
+          };
+          room.videoSync = {
+            videoId: room.video.id,
+            playing: false,
+            baseTime: 0,
+            playbackRate: 1,
+            updatedAt: Date.now()
+          };
+          sendJson(res, 201, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });
+          return;
+        } catch (fallbackError) {
+          console.warn("YouTube direct stream fallback failed, switching to embed mode:", fallbackError?.message || fallbackError);
+          const embedSrc = buildYouTubeEmbedSrc(resolved.videoId);
+          if (!embedSrc) {
+            sendJson(res, 502, {
+              code: "YOUTUBE_DOWNLOAD_FAILED",
+              error: i18n(req, "تعذر تنزيل/تشغيل فيديو يوتيوب حاليًا. حاول فيديو آخر.", "Could not download/play this YouTube video right now. Try another one.")
+            });
+            return;
+          }
+          let embedFileName = sanitizeUploadedFilename(`youtube-${resolved.videoId}`);
+          try {
+            const embedMeta = await fetchYouTubeOEmbed(resolved.videoId);
+            if (embedMeta?.title) {
+              embedFileName = sanitizeUploadedFilename(embedMeta.title);
+            }
+          } catch (metaError) {
+            const metaMessage = String(metaError?.message || "");
+            const statusMatch = metaMessage.match(/status\s+(\d{3})/i);
+            const upstreamStatus = statusMatch ? Number(statusMatch[1]) : 0;
+            if (upstreamStatus >= 400 && upstreamStatus < 500 && upstreamStatus !== 429) {
+              sendJson(res, 404, {
+                code: "YOUTUBE_NOT_FOUND",
+                error: i18n(req, "لم يتم العثور على فيديو مناسب.", "No matching YouTube video was found.")
+              });
+              return;
+            }
+            console.warn("YouTube embed metadata fetch failed:", metaMessage || metaError);
+          }
+          removeRoomVideoAsset(room);
+          room.video = {
+            id: randomToken(),
+            sourceType: "youtube",
+            youtubeId: resolved.videoId,
+            src: embedSrc,
+            filename: embedFileName,
+            mimeType: "video/youtube",
+            size: 0,
+            uploadedBy: username,
+            uploadedAt: Date.now(),
+            duration: 0
+          };
+          room.videoSync = {
+            videoId: room.video.id,
+            playing: false,
+            baseTime: 0,
+            playbackRate: 1,
+            updatedAt: Date.now()
+          };
+          sendJson(res, 201, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });
           return;
         }
-        if (code === "YOUTUBE_FORMAT_UNSUPPORTED") {
-          sendJson(res, 415, {
-            code: "YOUTUBE_FORMAT_UNSUPPORTED",
-            error: i18n(req, "تعذر العثور على صيغة فيديو مدعومة لهذا الرابط.", "No supported downloadable format was found for this video.")
-          });
-          return;
-        }
-        sendJson(res, 502, {
-          code: "YOUTUBE_DOWNLOAD_FAILED",
-          error: i18n(req, "تعذر تنزيل فيديو يوتيوب حاليًا. حاول فيديو آخر.", "Could not download this YouTube video right now. Try another one.")
-        });
-        return;
       }
 
       removeRoomVideoAsset(room);

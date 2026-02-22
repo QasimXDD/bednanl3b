@@ -1120,13 +1120,44 @@ function parseYouTubeVideoId(value) {
   if (!raw) {
     return "";
   }
-  const direct = raw.match(/^[A-Za-z0-9_-]{11}$/);
-  if (direct) {
-    return direct[0];
+  if (/^[A-Za-z0-9_-]{11}$/.test(raw)) {
+    return raw;
   }
-  const embedMatch = raw.match(/\/embed\/([A-Za-z0-9_-]{11})/i);
+  try {
+    const parsed = new URL(raw);
+    const host = String(parsed.hostname || "").toLowerCase();
+    const parts = String(parsed.pathname || "")
+      .split("/")
+      .filter(Boolean);
+    if (host === "youtu.be") {
+      const shortId = String(parts[0] || "").trim();
+      return /^[A-Za-z0-9_-]{11}$/.test(shortId) ? shortId : "";
+    }
+    if (host === "youtube.com" || host.endsWith(".youtube.com") || host === "music.youtube.com") {
+      const watchId = String(parsed.searchParams.get("v") || "").trim();
+      if (/^[A-Za-z0-9_-]{11}$/.test(watchId)) {
+        return watchId;
+      }
+      const first = String(parts[0] || "").trim();
+      const second = String(parts[1] || "").trim();
+      if ((first === "embed" || first === "shorts" || first === "live") && /^[A-Za-z0-9_-]{11}$/.test(second)) {
+        return second;
+      }
+    }
+  } catch (_error) {
+    // Non-URL value, continue to regex fallbacks.
+  }
+  const watchMatch = raw.match(/[?&]v=([A-Za-z0-9_-]{11})/i);
+  if (watchMatch) {
+    return watchMatch[1];
+  }
+  const embedMatch = raw.match(/\/(?:embed|shorts|live)\/([A-Za-z0-9_-]{11})/i);
   if (embedMatch) {
     return embedMatch[1];
+  }
+  const shortMatch = raw.match(/youtu\.be\/([A-Za-z0-9_-]{11})/i);
+  if (shortMatch) {
+    return shortMatch[1];
   }
   return "";
 }
@@ -1238,7 +1269,7 @@ function setYouTubeMaskVisible(visible) {
   if (!videoYouTubeMask) {
     return;
   }
-  const show = Boolean(visible && isYouTubeRoomVideo(roomVideoState));
+  const show = Boolean(isYouTubeRoomVideo(roomVideoState));
   videoYouTubeMask.classList.toggle("hidden", !show);
 }
 
@@ -1670,6 +1701,7 @@ function clearRoomVideoPlayer() {
   roomVideoMetadataReady = false;
   roomVideoState = null;
   roomVideoSyncState = null;
+  setYouTubeMaskVisible(false);
   hideFullscreenChatNotice();
   setRoomVideoControlsVisible(true);
   updateRoomVideoControls();
