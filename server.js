@@ -43,6 +43,7 @@ const YOUTUBE_INPUT_MAX_LENGTH = 300;
 const YOUTUBE_VIDEO_ID_REGEX = /^[A-Za-z0-9_-]{11}$/;
 const YOUTUBE_CACHE_MAX_ITEMS = 180;
 const YOUTUBE_CACHE_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 30;
+const YOUTUBE_PROXY_TTL_MS = 1000 * 60 * 60 * 6;
 const ROOM_VIDEO_ALLOWED_MIME_TYPES = new Set([
   "video/mp4",
   "video/webm",
@@ -84,6 +85,7 @@ const userLastSeen = new Map();
 const bannedUsers = new Map();
 const unbanRequests = new Map();
 const youtubeVideoCache = new Map();
+const youtubeProxyStreams = new Map();
 let siteAnnouncement = null;
 
 function ensureDataDir() {
@@ -93,8 +95,14 @@ function ensureDataDir() {
 }
 
 function ensureUploadsDir() {
-  if (!fs.existsSync(ROOM_VIDEO_UPLOAD_DIR)) {
-    fs.mkdirSync(ROOM_VIDEO_UPLOAD_DIR, { recursive: true });
+  try {
+    if (!fs.existsSync(ROOM_VIDEO_UPLOAD_DIR)) {
+      fs.mkdirSync(ROOM_VIDEO_UPLOAD_DIR, { recursive: true });
+    }
+    return true;
+  } catch (error) {
+    console.warn("Uploads directory is not writable:", error.message);
+    return false;
   }
 }
 
@@ -416,6 +424,175 @@ function rememberYouTubeCache(videoId, downloaded) {
   pruneYouTubeCache();
   saveYouTubeCache();
   return { ...entry };
+}
+
+function extractYouTubeProxyIdFromSrc(src) {
+  const clean = String(src || "").trim();
+  const prefix = "/api/youtube-proxy/";
+  if (!clean.startsWith(prefix)) {
+    return "";
+  }
+  const value = clean.slice(prefix.length).split(/[?#]/)[0] || "";
+  if (!/^[A-Za-z0-9]+$/.test(value)) {
+    return "";
+  }
+  return value;
+}
+
+function pruneYouTubeProxyStreams(now = Date.now()) {
+  youtubeProxyStreams.forEach((item, id) => {
+    if (!item || Number(item.expiresAt || 0) <= now) {
+      youtubeProxyStreams.delete(id);
+    }
+  });
+}
+
+function registerYouTubeProxyStream(videoId, direct) {
+  pruneYouTubeProxyStreams();
+  const id = randomToken().slice(0, 24);
+  youtubeProxyStreams.set(id, {
+    id,
+    videoId: String(videoId || ""),
+    preferredItag: Number(direct?.itag || 0),
+    mimeType: String(direct?.mimeType || "video/mp4"),
+    estimatedBytes: Number(direct?.estimatedBytes || 0),
+    createdAt: Date.now(),
+    expiresAt: Date.now() + YOUTUBE_PROXY_TTL_MS
+  });
+  return {
+    streamId: id,
+    src: `/api/youtube-proxy/${id}`
+  };
+}
+
+function getYouTubeProxyStream(streamId) {
+  pruneYouTubeProxyStreams();
+  const key = String(streamId || "").trim();
+  const entry = youtubeProxyStreams.get(key);
+  if (!entry) {
+    return null;
+  }
+  if (!YOUTUBE_VIDEO_ID_REGEX.test(String(entry.videoId || ""))) {
+    youtubeProxyStreams.delete(key);
+    return null;
+  }
+  return entry;
+}
+
+async function serveYouTubeProxyStream(req, res, streamId) {
+  const item = getYouTubeProxyStream(streamId);
+  if (!item) {
+    sendJson(res, 404, { error: i18n(req, "انتهت صلاحية رابط الفيديو. أعد اختيار الفيديو.", "Video stream link expired. Please set the video again.") });
+    return;
+  }
+
+  const method = req.method === "HEAD" ? "HEAD" : "GET";
+  const rangeHeader = String(req.headers.range || "").trim();
+
+  let info;
+  try {
+    info = await getYouTubeInfoRobust(item.videoId);
+  } catch (error) {
+    sendJson(res, 502, {
+      error: i18n(req, "تعذر تمرير فيديو يوتيوب الآن.", "Could not proxy YouTube video right now.")
+    });
+    return;
+  }
+
+  const playable = selectYouTubePlayableFormats(info);
+  let format = null;
+  if (item.preferredItag > 0) {
+    format = playable.find((entry) => Number(entry?.itag || 0) === item.preferredItag) || null;
+  }
+  if (!format) {
+    format = playable[0] || null;
+  }
+  if (!format) {
+    sendJson(res, 415, {
+      error: i18n(req, "تعذر العثور على صيغة تشغيل مناسبة للفيديو.", "Could not find a compatible playable format.")
+    });
+    return;
+  }
+
+  const mimeType = String(format?.mimeType || item.mimeType || "video/mp4").split(";")[0].trim() || "video/mp4";
+  const totalSize = Number(format?.contentLength || 0);
+  const headers = {
+    "content-type": mimeType,
+    "cache-control": "no-store"
+  };
+
+  let statusCode = 200;
+  let range = null;
+  if (rangeHeader && totalSize > 0) {
+    const match = rangeHeader.match(/^bytes=(\d*)-(\d*)$/i);
+    if (!match) {
+      res.writeHead(
+        416,
+        securityHeaders({
+          "content-range": `bytes */${totalSize}`,
+          "cache-control": "no-store"
+        })
+      );
+      res.end();
+      return;
+    }
+    const start = match[1] === "" ? 0 : Number(match[1]);
+    const end = match[2] === "" ? totalSize - 1 : Number(match[2]);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= totalSize) {
+      res.writeHead(
+        416,
+        securityHeaders({
+          "content-range": `bytes */${totalSize}`,
+          "cache-control": "no-store"
+        })
+      );
+      res.end();
+      return;
+    }
+    const safeEnd = Math.min(totalSize - 1, end);
+    range = { start, end: safeEnd };
+    statusCode = 206;
+    headers["accept-ranges"] = "bytes";
+    headers["content-range"] = `bytes ${start}-${safeEnd}/${totalSize}`;
+    headers["content-length"] = String(safeEnd - start + 1);
+  } else if (totalSize > 0) {
+    headers["accept-ranges"] = "bytes";
+    headers["content-length"] = String(totalSize);
+  }
+
+  res.writeHead(statusCode, securityHeaders(headers));
+  if (method === "HEAD") {
+    res.end();
+    return;
+  }
+
+  const streamOptions = { format };
+  if (range) {
+    streamOptions.range = range;
+  }
+
+  const stream = ytdl.downloadFromInfo(info, streamOptions);
+  let completed = false;
+  const fail = () => {
+    if (completed) {
+      return;
+    }
+    completed = true;
+    if (!res.writableEnded) {
+      res.end();
+    }
+  };
+
+  stream.on("error", fail);
+  stream.on("end", () => {
+    completed = true;
+  });
+  req.on("close", () => {
+    if (!stream.destroyed) {
+      stream.destroy();
+    }
+  });
+  stream.pipe(res);
 }
 
 function getLang(req) {
@@ -923,14 +1100,47 @@ function removeRoomVideoAsset(room) {
       // Ignore cleanup errors so room operations continue.
     }
   }
+  const proxyId = extractYouTubeProxyIdFromSrc(room.video.src);
+  if (proxyId) {
+    youtubeProxyStreams.delete(proxyId);
+  }
   room.video = null;
   room.videoSync = null;
+}
+
+function setRoomVideoFromYouTubeProxy(room, videoId, direct, uploadedBy) {
+  const proxy = registerYouTubeProxyStream(videoId, direct);
+  removeRoomVideoAsset(room);
+  room.video = {
+    id: randomToken(),
+    sourceType: "file",
+    youtubeId: videoId,
+    src: proxy.src,
+    filename: direct.cleanFileName,
+    mimeType: direct.mimeType,
+    size: Number(direct.estimatedBytes || 0),
+    uploadedBy,
+    uploadedAt: Date.now(),
+    duration: direct.durationSec,
+    isYouTubeCached: false,
+    isYouTubeProxy: true
+  };
+  room.videoSync = {
+    videoId: room.video.id,
+    playing: false,
+    baseTime: 0,
+    playbackRate: 1,
+    updatedAt: Date.now()
+  };
 }
 
 function ensureRoomVideoRuntimeState(room) {
   const sourceType = String(room?.video?.sourceType || "").toLowerCase();
   const src = String(room?.video?.src || "");
-  if (room?.video && (sourceType === "youtube" || (sourceType === "file" && src && !src.startsWith("/uploads/room-videos/")))) {
+  const isAllowedFileSrc =
+    src.startsWith("/uploads/room-videos/") ||
+    src.startsWith("/api/youtube-proxy/");
+  if (room?.video && (sourceType === "youtube" || (sourceType === "file" && src && !isAllowedFileSrc))) {
     room.video = null;
     room.videoSync = null;
   }
@@ -1570,6 +1780,44 @@ function selectYouTubeDownloadFormats(info) {
   return { formats: eligible, onlyTooLarge };
 }
 
+function selectYouTubePlayableFormats(info) {
+  const source = Array.isArray(info?.formats) ? info.formats : [];
+  return source
+    .filter((item) => {
+      if (!item || !item.hasVideo || !item.hasAudio || !item.url) {
+        return false;
+      }
+      const container = String(item.container || "").toLowerCase();
+      if (container !== "mp4" && container !== "webm" && container !== "ogg") {
+        return false;
+      }
+      if (item.isHLS || item.isDashMPD) {
+        return false;
+      }
+      return true;
+    })
+    .sort(compareYouTubeFormats);
+}
+
+async function getYouTubeDirectPlayableSource(videoId) {
+  const info = await getYouTubeInfoRobust(videoId);
+  const formats = selectYouTubePlayableFormats(info);
+  if (!formats.length) {
+    const formatError = new Error("No supported direct YouTube format");
+    formatError.code = "YOUTUBE_FORMAT_UNSUPPORTED";
+    throw formatError;
+  }
+  const format = formats[0];
+  const container = String(format?.container || "mp4").toLowerCase();
+  return {
+    itag: Number(format?.itag || 0),
+    cleanFileName: sanitizeUploadedFilename(info?.videoDetails?.title || `youtube-${videoId}`),
+    durationSec: normalizeRoomVideoDuration(Number(info?.videoDetails?.lengthSeconds || 0)),
+    mimeType: `video/${container === "ogg" ? "ogg" : container === "webm" ? "webm" : "mp4"}`,
+    estimatedBytes: estimateYouTubeFormatSizeBytes(format)
+  };
+}
+
 async function downloadYouTubeVideoToLocalFile(videoId) {
   const info = await getYouTubeInfoRobust(videoId);
   const picked = selectYouTubeDownloadFormats(info);
@@ -1852,6 +2100,15 @@ function serveStatic(pathname, req, res) {
 async function handleApi(req, res) {
   const fullUrl = new URL(req.url, "http://localhost");
   const pathname = fullUrl.pathname;
+  if ((req.method === "GET" || req.method === "HEAD") && pathname.startsWith("/api/youtube-proxy/")) {
+    const streamId = pathname.slice("/api/youtube-proxy/".length).split("/")[0];
+    if (!/^[A-Za-z0-9]+$/.test(streamId)) {
+      sendJson(res, 404, { error: i18n(req, "رابط الفيديو غير صالح.", "Invalid video stream link.") });
+      return;
+    }
+    await serveYouTubeProxyStream(req, res, streamId);
+    return;
+  }
 
   if (req.method === "POST" && pathname === "/api/register") {
     const { username, password } = await parseBody(req);
@@ -2777,12 +3034,26 @@ async function handleApi(req, res) {
         return;
       }
 
-      ensureUploadsDir();
+      if (!ensureUploadsDir()) {
+        sendJson(res, 503, {
+          code: "VIDEO_STORAGE_UNAVAILABLE",
+          error: i18n(req, "تعذر حفظ الفيديو على الخادم حاليًا.", "Server storage is unavailable right now.")
+        });
+        return;
+      }
       const cleanFileName = sanitizeUploadedFilename(uploaded.filename || "room-video");
       const extension = normalizeVideoExtension(cleanFileName, mimeType);
       const storedFileName = `room-${room.code.toLowerCase()}-${Date.now()}-${crypto.randomBytes(6).toString("hex")}${extension}`;
       const absolutePath = path.join(ROOM_VIDEO_UPLOAD_DIR, storedFileName);
-      fs.writeFileSync(absolutePath, uploaded.data);
+      try {
+        fs.writeFileSync(absolutePath, uploaded.data);
+      } catch (_error) {
+        sendJson(res, 503, {
+          code: "VIDEO_STORAGE_UNAVAILABLE",
+          error: i18n(req, "تعذر حفظ الفيديو على الخادم حاليًا.", "Server storage is unavailable right now.")
+        });
+        return;
+      }
 
       const normalizedDuration = normalizeRoomVideoDuration(multipart.fields.duration);
       removeRoomVideoAsset(room);
@@ -2849,7 +3120,37 @@ async function handleApi(req, res) {
         return;
       }
 
-      ensureUploadsDir();
+      const canStoreRoomVideos = ensureUploadsDir();
+      const useYouTubeProxyFallback = async () => {
+        try {
+          const direct = await getYouTubeDirectPlayableSource(resolved.videoId);
+          setRoomVideoFromYouTubeProxy(room, resolved.videoId, direct, username);
+          sendJson(res, 201, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });
+          return true;
+        } catch (fallbackError) {
+          const fallbackCode = String(fallbackError?.code || "");
+          if (fallbackCode === "YOUTUBE_FORMAT_UNSUPPORTED") {
+            sendJson(res, 415, {
+              code: "YOUTUBE_FORMAT_UNSUPPORTED",
+              error: i18n(req, "تعذر العثور على صيغة فيديو مدعومة.", "No supported downloadable video format was found.")
+            });
+            return true;
+          }
+          console.warn("YouTube proxy fallback failed:", fallbackError?.message || fallbackError);
+          sendJson(res, 502, {
+            code: "YOUTUBE_DOWNLOAD_FAILED",
+            error: i18n(req, "تعذر تنزيل فيديو يوتيوب الآن. حاول فيديو آخر.", "Could not download this YouTube video right now. Try another one.")
+          });
+          return true;
+        }
+      };
+
+      if (!canStoreRoomVideos) {
+        console.warn("Uploads directory unavailable, using YouTube proxy fallback directly.");
+        await useYouTubeProxyFallback();
+        return;
+      }
+
       let selectedVideo = getCachedYouTubeVideo(resolved.videoId);
       if (!selectedVideo) {
         let downloaded = null;
@@ -2881,11 +3182,8 @@ async function handleApi(req, res) {
             });
             return;
           }
-          console.warn("YouTube local download failed:", message || error);
-          sendJson(res, 502, {
-            code: "YOUTUBE_DOWNLOAD_FAILED",
-            error: i18n(req, "تعذر تنزيل فيديو يوتيوب الآن. حاول فيديو آخر.", "Could not download this YouTube video right now. Try another one.")
-          });
+          console.warn("YouTube local download failed, trying proxy stream fallback:", message || error);
+          await useYouTubeProxyFallback();
           return;
         }
         selectedVideo = rememberYouTubeCache(resolved.videoId, downloaded) || {
