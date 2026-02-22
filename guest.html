@@ -1,15 +1,23 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="ar" dir="rtl">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>دخول كضيف - Bedna NL3B</title>
+  <title>الدخول كضيف - Bedna NL3B</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Changa:wght@600;700;800&family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css?v=20260222a">
 </head>
 <body>
+  <div class="top-controls">
+    <label for="langSelect" id="langLabel">اللغة</label>
+    <select id="langSelect">
+      <option value="ar">العربية</option>
+      <option value="en">English</option>
+    </select>
+  </div>
+
   <main class="guest-page-wrap">
     <section class="panel auth-panel guest-panel">
       <h2 id="guestTitle">الدخول كضيف</h2>
@@ -26,6 +34,6 @@
   </main>
 
   <div id="guestToastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
-  <script src="guest.js?v=20260222a"></script>
+  <script src="guest.js?v=20260222b"></script>
 </body>
 </html>

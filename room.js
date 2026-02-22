@@ -19,6 +19,7 @@ const playersDrawerCountBadge = document.getElementById("playersDrawerCountBadge
 const playersDrawerClose = document.getElementById("playersDrawerClose");
 const playersDrawerOverlay = document.getElementById("playersDrawerOverlay");
 const backToLobbyLink = document.getElementById("backToLobby");
+const quickLeaveBtn = document.getElementById("quickLeaveBtn");
 const joinRequestModal = document.getElementById("joinRequestModal");
 const joinModalTitle = document.getElementById("joinModalTitle");
 const joinModalText = document.getElementById("joinModalText");
@@ -121,6 +122,13 @@ const query = new URLSearchParams(window.location.search);
 const code = String(query.get("code") || "").trim().toUpperCase();
 const encodedCode = encodeURIComponent(code);
 const roomMobileLayoutQuery = window.matchMedia("(max-width: 980px)");
+const videoToolsOriginalParent = videoLeaderTools ? videoLeaderTools.parentNode : null;
+const videoToolsOriginalNextSibling = videoLeaderTools ? videoLeaderTools.nextSibling : null;
+const videoToolsOverlayOriginalParent = videoToolsOverlay ? videoToolsOverlay.parentNode : null;
+const videoToolsOverlayOriginalNextSibling = videoToolsOverlay ? videoToolsOverlay.nextSibling : null;
+
+document.body.classList.add("room-page");
+document.documentElement.classList.add("room-page");
 
 let me = "";
 let host = "";
@@ -186,6 +194,7 @@ let youTubeState = -1;
 let youTubeTickTimer = null;
 let activeYouTubeVideoId = "";
 let suppressYouTubeStateBroadcast = false;
+let videoToolsModalHideTimer = null;
 
 const I18N = {
   ar: {
@@ -195,6 +204,7 @@ const I18N = {
     leaderLabel: "القائد",
     youLabel: "أنت",
     backToLobby: "العودة إلى اللوبي",
+    quickLeave: "خروج",
     chatTitle: "دردشة الغرفة",
     chatPlaceholder: "اكتب رسالتك...",
     sendBtn: "إرسال",
@@ -330,6 +340,7 @@ const I18N = {
     leaderLabel: "Leader",
     youLabel: "You",
     backToLobby: "Back to Lobby",
+    quickLeave: "Leave",
     chatTitle: "Room Chat",
     chatPlaceholder: "Type your message...",
     sendBtn: "Send",
@@ -1032,18 +1043,131 @@ function setPlayersDrawerOpen(open) {
   syncRoomBodyLock();
 }
 
+function placeVideoToolsInBody(mobile) {
+  if (mobile) {
+    if (videoLeaderTools && videoLeaderTools.parentNode !== document.body) {
+      document.body.appendChild(videoLeaderTools);
+    }
+    if (videoToolsOverlay && videoToolsOverlay.parentNode !== document.body) {
+      document.body.appendChild(videoToolsOverlay);
+    }
+    return;
+  }
+  if (videoLeaderTools && videoToolsOriginalParent && videoLeaderTools.parentNode !== videoToolsOriginalParent) {
+    videoToolsOriginalParent.insertBefore(videoLeaderTools, videoToolsOriginalNextSibling);
+  }
+  if (videoToolsOverlay && videoToolsOverlayOriginalParent && videoToolsOverlay.parentNode !== videoToolsOverlayOriginalParent) {
+    videoToolsOverlayOriginalParent.insertBefore(videoToolsOverlay, videoToolsOverlayOriginalNextSibling);
+  }
+}
+
+function clearVideoToolsModalHideTimer() {
+  if (!videoToolsModalHideTimer) {
+    return;
+  }
+  clearTimeout(videoToolsModalHideTimer);
+  videoToolsModalHideTimer = null;
+}
+
+function setVideoToolsModalStyle(open) {
+  if (!videoLeaderTools) {
+    return;
+  }
+  clearVideoToolsModalHideTimer();
+  if (!open) {
+    videoLeaderTools.style.setProperty("opacity", "0", "important");
+    videoLeaderTools.style.setProperty("transform", "translate(-50%, -47%) scale(0.96)", "important");
+    videoLeaderTools.style.setProperty("pointer-events", "none", "important");
+    videoToolsModalHideTimer = setTimeout(() => {
+      if (!videoToolsOpen) {
+        videoLeaderTools.style.setProperty("display", "none", "important");
+      }
+    }, 180);
+    return;
+  }
+  videoLeaderTools.style.setProperty("display", "grid", "important");
+  videoLeaderTools.style.setProperty("position", "fixed", "important");
+  videoLeaderTools.style.setProperty("left", "50%", "important");
+  videoLeaderTools.style.setProperty("top", "50%", "important");
+  videoLeaderTools.style.setProperty("right", "auto", "important");
+  videoLeaderTools.style.setProperty("bottom", "auto", "important");
+  videoLeaderTools.style.setProperty("transform", "translate(-50%, -50%)", "important");
+  videoLeaderTools.style.setProperty("width", "min(92vw, 460px)", "important");
+  videoLeaderTools.style.setProperty("max-height", "min(72dvh, 560px)", "important");
+  videoLeaderTools.style.setProperty("overflow", "auto", "important");
+  videoLeaderTools.style.setProperty("z-index", "160", "important");
+  videoLeaderTools.style.setProperty("padding", "0.95rem", "important");
+  videoLeaderTools.style.setProperty("border-radius", "16px", "important");
+  videoLeaderTools.style.setProperty("border", "1px solid rgba(132, 183, 255, 0.34)", "important");
+  videoLeaderTools.style.setProperty("transition", "opacity 0.18s ease, transform 0.22s ease", "important");
+  videoLeaderTools.style.setProperty(
+    "background",
+    "linear-gradient(165deg, rgba(8, 18, 38, 0.97), rgba(10, 24, 49, 0.98))",
+    "important"
+  );
+  videoLeaderTools.style.setProperty("box-shadow", "0 26px 52px rgba(1, 8, 21, 0.68)", "important");
+  videoLeaderTools.style.setProperty("opacity", "0", "important");
+  videoLeaderTools.style.setProperty("transform", "translate(-50%, -47%) scale(0.96)", "important");
+  videoLeaderTools.style.setProperty("pointer-events", "none", "important");
+  requestAnimationFrame(() => {
+    if (!videoToolsOpen) {
+      return;
+    }
+    videoLeaderTools.style.setProperty("opacity", "1", "important");
+    videoLeaderTools.style.setProperty("transform", "translate(-50%, -50%) scale(1)", "important");
+    videoLeaderTools.style.setProperty("pointer-events", "auto", "important");
+  });
+}
+
+function triggerAutoPlayForNewRoomVideo() {
+  if (!isRoomLeader()) {
+    return;
+  }
+  const run = () => {
+    if (!isRoomLeader() || !roomVideoState) {
+      return;
+    }
+    if (isYouTubeRoomVideo(roomVideoState)) {
+      if (youTubePlayerReady && youTubePlayer && typeof youTubePlayer.playVideo === "function") {
+        try {
+          youTubePlayer.playVideo();
+        } catch (_error) {
+          // Ignore and continue sync request.
+        }
+      }
+      sendRoomVideoSync("play");
+      return;
+    }
+    if (roomVideoPlayer) {
+      roomVideoPlayer.play().catch(() => {});
+      sendRoomVideoSync("play");
+    }
+  };
+  run();
+  setTimeout(run, 350);
+  setTimeout(run, 900);
+}
+
 function setVideoToolsDrawerOpen(open) {
   const mobile = isRoomMobileLayout();
+  placeVideoToolsInBody(mobile);
   const canOpen = mobile && isRoomLeader();
   const nextOpen = Boolean(open && canOpen);
   videoToolsOpen = nextOpen;
   if (videoLeaderTools) {
     if (mobile) {
       videoLeaderTools.classList.toggle("is-open", nextOpen);
-      videoLeaderTools.classList.toggle("hidden", !canOpen);
+      if (canOpen) {
+        videoLeaderTools.classList.remove("hidden");
+      } else {
+        videoLeaderTools.classList.add("hidden");
+      }
+      setVideoToolsModalStyle(nextOpen);
       videoLeaderTools.setAttribute("aria-hidden", canOpen ? (nextOpen ? "false" : "true") : "true");
     } else {
       videoLeaderTools.classList.remove("is-open");
+      videoLeaderTools.classList.remove("hidden");
+      videoLeaderTools.removeAttribute("style");
       videoLeaderTools.setAttribute("aria-hidden", "false");
     }
   }
@@ -1074,6 +1198,7 @@ function syncPlayersDrawerMode() {
     return;
   }
   const mobile = isRoomMobileLayout();
+  placeVideoToolsInBody(mobile);
   playersDrawerToggle.classList.toggle("hidden", !mobile);
   if (!mobile) {
     playersDrawerOpen = false;
@@ -1089,6 +1214,7 @@ function syncPlayersDrawerMode() {
     }
     if (videoLeaderTools) {
       videoLeaderTools.classList.remove("is-open");
+      videoLeaderTools.removeAttribute("style");
       videoLeaderTools.setAttribute("aria-hidden", "false");
     }
     if (videoToolsOverlay) {
@@ -1533,6 +1659,7 @@ function updateRoomVideoControls({ previewTime = null } = {}) {
   const hasVideo = Boolean(roomVideoState && roomVideoState.src);
   const isYoutube = hasVideo && isYouTubeRoomVideo(roomVideoState);
   const canUseCustomControls = hasVideo && (!isYoutube || youTubePlayerReady);
+  const canControlTimeline = canUseCustomControls && isRoomLeader();
   const duration = canUseCustomControls ? getRoomVideoDuration() : 0;
   let currentTime = 0;
   if (canUseCustomControls) {
@@ -1555,7 +1682,7 @@ function updateRoomVideoControls({ previewTime = null } = {}) {
     }
     const progressPercent = duration > 0 ? Math.max(0, Math.min(100, (currentTime / duration) * 100)) : 0;
     videoSeekRange.style.setProperty("--video-progress", `${progressPercent}%`);
-    videoSeekRange.disabled = !canUseCustomControls || duration <= 0;
+    videoSeekRange.disabled = !canControlTimeline || duration <= 0;
   }
 
   if (videoTimeText) {
@@ -1673,12 +1800,7 @@ function setVideoUploadBusy(busy) {
 }
 
 function showVideoControlLockedToast() {
-  const now = Date.now();
-  if (now < roomVideoSyncToastUntil) {
-    return;
-  }
-  roomVideoSyncToastUntil = now + ROOM_VIDEO_SYNC_LOCK_TOAST_MS;
-  showToast(t("videoControlLocked"));
+  // Hidden by request: members should not see lock toast.
 }
 
 function clearRoomVideoPlayer() {
@@ -1947,6 +2069,7 @@ async function uploadRoomVideo() {
     showToast(t("videoUploadSuccess"), "success");
     if (result?.room) {
       renderRoomInfo(result.room);
+      triggerAutoPlayForNewRoomVideo();
     }
     await refreshMessages();
   } catch (error) {
@@ -1991,6 +2114,7 @@ async function setRoomYouTubeVideo() {
     showToast(t("videoYoutubeSuccess"), "success");
     if (result?.room) {
       renderRoomInfo(result.room);
+      triggerAutoPlayForNewRoomVideo();
     }
     await refreshMessages();
   } catch (error) {
@@ -3068,6 +3192,11 @@ function applyTranslations() {
   document.getElementById("leaderLabel").textContent = t("leaderLabel");
   document.getElementById("youLabel").textContent = t("youLabel");
   document.getElementById("backToLobby").textContent = t("backToLobby");
+  if (quickLeaveBtn) {
+    quickLeaveBtn.textContent = t("quickLeave");
+    quickLeaveBtn.title = t("quickLeave");
+    quickLeaveBtn.setAttribute("aria-label", t("quickLeave"));
+  }
   document.getElementById("chatTitle").textContent = t("chatTitle");
   document.getElementById("chatInput").placeholder = t("chatPlaceholder");
   sendBtn.textContent = t("sendBtn");
@@ -3547,6 +3676,11 @@ if (videoPlayPauseBtn) {
 
 if (videoSeekRange) {
   videoSeekRange.addEventListener("input", () => {
+    if (!isRoomLeader()) {
+      roomVideoSeekDragging = false;
+      updateRoomVideoControls();
+      return;
+    }
     roomVideoSeekDragging = true;
     revealRoomVideoControls();
     const duration = getRoomVideoDuration();
@@ -3556,6 +3690,12 @@ if (videoSeekRange) {
   });
 
   videoSeekRange.addEventListener("change", () => {
+    if (!isRoomLeader()) {
+      roomVideoSeekDragging = false;
+      applyRoomVideoSyncToPlayer({ forceSeek: true });
+      updateRoomVideoControls();
+      return;
+    }
     if (!roomVideoState) {
       roomVideoSeekDragging = false;
       updateRoomVideoControls();
@@ -3743,12 +3883,23 @@ if (roomMobileLayoutQuery && typeof roomMobileLayoutQuery.addEventListener === "
   });
 }
 
+function leaveRoomToLobby() {
+  sfx("leave");
+  leaveCurrentRoom({ keepalive: true }).catch(() => {});
+  window.location.href = "/";
+}
+
 backToLobbyLink.addEventListener("click", async (event) => {
   event.preventDefault();
-  sfx("leave");
-  await leaveCurrentRoom();
-  window.location.href = "/";
+  leaveRoomToLobby();
 });
+
+if (quickLeaveBtn) {
+  quickLeaveBtn.addEventListener("click", (event) => {
+    event.preventDefault();
+    leaveRoomToLobby();
+  });
+}
 
 if (chatReplyCancelBtn) {
   chatReplyCancelBtn.addEventListener("click", () => {
@@ -3833,6 +3984,8 @@ async function bootRoom() {
 }
 
 window.addEventListener("beforeunload", () => {
+  document.body.classList.remove("room-page");
+  document.documentElement.classList.remove("room-page");
   leaveCurrentRoom({ keepalive: true });
   if (pollTimer) {
     clearInterval(pollTimer);

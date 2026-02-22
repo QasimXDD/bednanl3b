@@ -1,4 +1,4 @@
-const LANG_KEY = "bedna_lang";
+﻿const LANG_KEY = "bedna_lang";
 const TOKEN_KEY = "bedna_token";
 const USER_KEY = "bedna_user";
 
@@ -6,22 +6,26 @@ const guestForm = document.getElementById("guestForm");
 const guestNameInput = document.getElementById("guestName");
 const guestSubmitBtn = document.getElementById("guestSubmitBtn");
 const backToLoginBtn = document.getElementById("backToLoginBtn");
+const langSelect = document.getElementById("langSelect");
 const toastContainer = document.getElementById("guestToastContainer");
 
 const I18N = {
   ar: {
     pageTitle: "الدخول كضيف - Bedna NL3B",
+    langLabel: "اللغة",
     guestTitle: "الدخول كضيف",
     guestDesc: "اكتب اسمك فقط وسيتم إدخالك للموقع مباشرة بدون حساب.",
     guestNameLabel: "الاسم",
     guestSubmitBtn: "دخول كضيف",
     backToLoginBtn: "العودة لتسجيل الدخول",
-    toastNameInvalid: "الاسم يجب أن يكون بين 2 و 30 حرفًا.",
+    toastNameInvalid: "الاسم يجب أن يكون بين 2 و30 حرفًا.",
     toastGuestEnter: "تم الدخول كضيف.",
-    toastFailed: "فشل الطلب."
+    toastFailed: "فشل الطلب.",
+    toastNetworkError: "تعذر الاتصال بالخادم. تأكد من الإنترنت وحاول مرة أخرى."
   },
   en: {
     pageTitle: "Guest Login - Bedna NL3B",
+    langLabel: "Language",
     guestTitle: "Continue as Guest",
     guestDesc: "Enter your name only, and you will join the site without creating an account.",
     guestNameLabel: "Name",
@@ -29,13 +33,23 @@ const I18N = {
     backToLoginBtn: "Back to Login",
     toastNameInvalid: "Name must be 2-30 characters.",
     toastGuestEnter: "Entered as guest.",
-    toastFailed: "Request failed."
+    toastFailed: "Request failed.",
+    toastNetworkError: "Could not reach server. Check your connection and try again."
   }
 };
 
 function getLang() {
   const saved = localStorage.getItem(LANG_KEY);
   return saved === "en" ? "en" : "ar";
+}
+
+function setLang(lang) {
+  const next = lang === "en" ? "en" : "ar";
+  localStorage.setItem(LANG_KEY, next);
+  document.documentElement.lang = next;
+  document.documentElement.dir = next === "ar" ? "rtl" : "ltr";
+  langSelect.value = next;
+  applyTranslations();
 }
 
 function t(key) {
@@ -59,14 +73,22 @@ function showToast(message) {
 }
 
 async function api(pathname, options = {}) {
-  const response = await fetch(pathname, {
-    method: options.method || "GET",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Lang": getLang()
-    },
-    body: options.body ? JSON.stringify(options.body) : undefined
-  });
+  let response;
+  try {
+    response = await fetch(pathname, {
+      method: options.method || "GET",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Lang": getLang()
+      },
+      body: options.body ? JSON.stringify(options.body) : undefined
+    });
+  } catch (_error) {
+    const error = new Error(t("toastNetworkError"));
+    error.code = "NETWORK_ERROR";
+    throw error;
+  }
+
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(data.error || t("toastFailed"));
@@ -77,9 +99,8 @@ async function api(pathname, options = {}) {
 }
 
 function applyTranslations() {
-  document.documentElement.lang = getLang();
-  document.documentElement.dir = getLang() === "ar" ? "rtl" : "ltr";
   document.title = t("pageTitle");
+  document.getElementById("langLabel").textContent = t("langLabel");
   document.getElementById("guestTitle").textContent = t("guestTitle");
   document.getElementById("guestDesc").textContent = t("guestDesc");
   document.getElementById("guestNameLabel").textContent = t("guestNameLabel");
@@ -115,4 +136,8 @@ backToLoginBtn.addEventListener("click", () => {
   window.location.href = "/";
 });
 
-applyTranslations();
+langSelect.addEventListener("change", (event) => {
+  setLang(event.target.value);
+});
+
+setLang(getLang());

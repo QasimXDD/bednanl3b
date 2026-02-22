@@ -1,10 +1,9 @@
-{
-  "bannedUsers": [],
-  "unbanRequests": [],
-  "siteAnnouncement": {
-    "id": "1771595799157-499a2dfc",
-    "text": "5",
-    "createdBy": "qasim",
-    "createdAt": 1771595799157
-  }
+﻿{
+    "bannedUsers":  [
+
+                    ],
+    "unbanRequests":  [
+
+                      ],
+    "siteAnnouncement":  null
 }

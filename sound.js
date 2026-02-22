@@ -2,7 +2,7 @@ const BednaSound = (() => {
   const STORAGE_KEY = "bedna_sound_enabled";
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
   let context = null;
-  let enabled = localStorage.getItem(STORAGE_KEY) !== "0";
+  let enabled = true;
   let unlockBound = false;
 
   const patterns = {
@@ -84,7 +84,11 @@ const BednaSound = (() => {
 
   function setEnabled(next) {
     enabled = Boolean(next);
-    localStorage.setItem(STORAGE_KEY, enabled ? "1" : "0");
+    try {
+      localStorage.setItem(STORAGE_KEY, enabled ? "1" : "0");
+    } catch (_error) {
+      // Ignore storage failures (private mode, blocked storage, etc.).
+    }
     if (enabled) {
       ensureContext();
       bindUnlock();
@@ -100,8 +104,15 @@ const BednaSound = (() => {
     return enabled;
   }
 
-  ensureContext();
-  bindUnlock();
+  try {
+    enabled = localStorage.getItem(STORAGE_KEY) !== "0";
+  } catch (_error) {
+    enabled = true;
+  }
+  if (enabled) {
+    ensureContext();
+    bindUnlock();
+  }
 
   return {
     play,

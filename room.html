@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="ar" dir="rtl">
 <head>
   <meta charset="UTF-8">
@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Changa:wght@600;700;800&family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=20260222f">
+  <link rel="stylesheet" href="styles.css?v=20260222p">
 </head>
 <body>
   <div class="top-controls">
@@ -16,9 +16,10 @@
       <option value="ar">العربية</option>
       <option value="en">English</option>
     </select>
-    <button id="soundToggle" class="sound-toggle" type="button">SFX: ON</button>
+    <button id="soundToggle" class="sound-toggle" type="button">Sound: On</button>
+    <button id="quickLeaveBtn" class="top-leave-btn" type="button">خروج</button>
   </div>
-  <button id="roomSupervisorToggle" class="btn btn-ghost supervisor-global-toggle hidden" type="button" aria-controls="roomSupervisorPanel" aria-expanded="false">لوحة المشرف</button>
+  <button id="roomSupervisorToggle" class="btn btn-ghost supervisor-global-toggle hidden" type="button" aria-controls="roomSupervisorPanel" aria-expanded="false">ظ„ظˆط­ط© ط§ظ„ظ…ط´ط±ظپ</button>
 
   <main class="app">
     <section class="panel room-layout">
@@ -84,15 +85,25 @@
         <section class="chat-box box">
           <h3 id="chatTitle">Room Chat</h3>
           <div id="chatMessages" class="chat-messages"></div>
-          <form id="chatForm" class="chat-form" novalidate>
+          <form id="chatForm" class="chat-form" novalidate autocomplete="off">
             <div id="chatReplyDraft" class="chat-reply-draft hidden">
               <div class="chat-reply-draft-body">
                 <div id="chatReplyDraftLabel" class="chat-reply-draft-label"></div>
                 <div id="chatReplyDraftText" class="chat-reply-draft-text"></div>
               </div>
-              <button id="chatReplyCancelBtn" class="chat-reply-cancel-btn" type="button" aria-label="Cancel reply">×</button>
+              <button id="chatReplyCancelBtn" class="chat-reply-cancel-btn" type="button" aria-label="Cancel reply">X</button>
             </div>
-            <input id="chatInput" type="text" maxlength="300" placeholder="Type your message...">
+            <input
+              id="chatInput"
+              type="text"
+              maxlength="300"
+              placeholder="Type your message..."
+              autocomplete="off"
+              autocorrect="off"
+              autocapitalize="off"
+              spellcheck="false"
+              data-lpignore="true"
+            >
             <button class="btn" type="submit" id="sendBtn">Send</button>
           </form>
         </section>
@@ -117,7 +128,7 @@
 
   <div id="joinRequestModal" class="modal-overlay hidden">
     <div class="modal-card">
-      <button id="joinModalTopClose" class="modal-close-x" type="button" aria-label="Close">×</button>
+      <button id="joinModalTopClose" class="modal-close-x" type="button" aria-label="Close">X</button>
       <h3 id="joinModalTitle">Join Request</h3>
       <p id="joinModalText" class="muted"></p>
       <p id="joinModalTimer" class="muted"></p>
@@ -131,29 +142,29 @@
 
   <div id="selfKickJokeModal" class="modal-overlay hidden">
     <div class="modal-card">
-      <button id="selfKickJokeCloseBtn" class="modal-close-x" type="button" aria-label="Close">×</button>
-      <h3 id="selfKickJokeTitle">تنبيه</h3>
-      <p id="selfKickJokeText" class="muted">لا يمكنك طرد نفسك.</p>
+      <button id="selfKickJokeCloseBtn" class="modal-close-x" type="button" aria-label="Close">X</button>
+      <h3 id="selfKickJokeTitle">طھظ†ط¨ظٹظ‡</h3>
+      <p id="selfKickJokeText" class="muted">ظ„ط§ ظٹظ…ظƒظ†ظƒ ط·ط±ط¯ ظ†ظپط³ظƒ.</p>
       <div class="room-actions">
-        <button id="selfKickJokeLobbyBtn" class="btn" type="button">العودة إلى اللوبي</button>
+        <button id="selfKickJokeLobbyBtn" class="btn" type="button">ط§ظ„ط¹ظˆط¯ط© ط¥ظ„ظ‰ ط§ظ„ظ„ظˆط¨ظٹ</button>
       </div>
     </div>
   </div>
 
   <div id="kickSupervisorDeniedModal" class="modal-overlay hidden">
     <div class="modal-card">
-      <button id="kickSupervisorDeniedCloseBtn" class="modal-close-x" type="button" aria-label="Close">×</button>
-      <h3 id="kickSupervisorDeniedTitle">مرفوض</h3>
-      <p id="kickSupervisorDeniedText" class="muted">لا يمكن طرد المشرف من الغرفة.</p>
+      <button id="kickSupervisorDeniedCloseBtn" class="modal-close-x" type="button" aria-label="Close">X</button>
+      <h3 id="kickSupervisorDeniedTitle">ظ…ط±ظپظˆط¶</h3>
+      <p id="kickSupervisorDeniedText" class="muted">ظ„ط§ ظٹظ…ظƒظ† ط·ط±ط¯ ط§ظ„ظ…ط´ط±ظپ ظ…ظ† ط§ظ„ط؛ط±ظپط©.</p>
       <div class="room-actions">
-        <button id="kickSupervisorDeniedOkBtn" class="btn btn-ghost" type="button">إغلاق</button>
+        <button id="kickSupervisorDeniedOkBtn" class="btn btn-ghost" type="button">ط¥ط؛ظ„ط§ظ‚</button>
       </div>
     </div>
   </div>
 
   <div id="profileModal" class="modal-overlay hidden">
     <div class="modal-card profile-modal-card">
-      <button id="profileModalTopClose" class="modal-close-x" type="button" aria-label="Close">×</button>
+      <button id="profileModalTopClose" class="modal-close-x" type="button" aria-label="Close">X</button>
       <h3 id="profileModalTitle">Profile</h3>
       <div class="profile-top">
         <img id="profileAvatar" class="profile-avatar" alt="avatar">
@@ -192,7 +203,7 @@
     <div class="supervisor-sidebar-head">
       <h3 id="roomSupervisorTitle">Supervisor Panel</h3>
       <div class="supervisor-head-actions">
-        <button id="roomSupervisorClose" class="btn btn-ghost supervisor-menu-close-btn" type="button">×</button>
+        <button id="roomSupervisorClose" class="btn btn-ghost supervisor-menu-close-btn" type="button">X</button>
       </div>
     </div>
     <div class="supervisor-tabs-wrap">
@@ -231,9 +242,10 @@
   </section>
 
   <div id="toastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
-  <script src="sound.js"></script>
-  <script src="room.js?v=20260222i"></script>
+  <script src="sound.js?v=20260222b"></script>
+  <script src="room.js?v=20260222s"></script>
 </body>
 </html>
+
 
 
