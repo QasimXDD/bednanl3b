@@ -95,6 +95,10 @@ let siteAnnouncement = null;
 let activeRoomVideoUploadDir = ROOM_VIDEO_UPLOAD_DIR_DEFAULT;
 let ytDlpCommandOverride = null;
 
+function parseJsonWithOptionalBom(raw) {
+  return JSON.parse(String(raw || "").replace(/^\uFEFF/, ""));
+}
+
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -136,7 +140,7 @@ function loadUsers() {
       return;
     }
     const raw = fs.readFileSync(USERS_FILE, "utf8");
-    const list = JSON.parse(raw);
+    const list = parseJsonWithOptionalBom(raw);
     if (!Array.isArray(list)) {
       return;
     }
@@ -190,7 +194,7 @@ function loadModeration() {
       return;
     }
     const raw = fs.readFileSync(MODERATION_FILE, "utf8");
-    const parsed = JSON.parse(raw);
+    const parsed = parseJsonWithOptionalBom(raw);
     const bannedList = Array.isArray(parsed?.bannedUsers) ? parsed.bannedUsers : [];
     const requestList = Array.isArray(parsed?.unbanRequests) ? parsed.unbanRequests : [];
     const savedAnnouncement = parsed?.siteAnnouncement;
@@ -359,7 +363,7 @@ function loadYouTubeCache() {
       return;
     }
     const raw = fs.readFileSync(YOUTUBE_CACHE_FILE, "utf8");
-    const list = JSON.parse(raw);
+    const list = parseJsonWithOptionalBom(raw);
     if (!Array.isArray(list)) {
       return;
     }
@@ -625,8 +629,9 @@ function looksLikeMojibake(text) {
   if (typeof text !== "string" || text.length < 8) {
     return false;
   }
-  const suspicious = text.match(/[أ¯طںآ½أ¯طںآ½]/g);
-  return Boolean(suspicious && suspicious.length >= 3 && suspicious.length / text.length >= 0.2);
+  // Detect common mojibake by spotting Arabic letters mixed with Latin-1 bytes.
+  const suspicious = text.match(/[\u0600-\u06FF][\u00A0-\u00FF]|[\u00A0-\u00FF][\u0600-\u06FF]/g);
+  return Boolean(suspicious && suspicious.length >= 3 && suspicious.length / text.length >= 0.12);
 }
 
 function normalizeDisplayName(value, fallbackUsername = "") {
@@ -638,9 +643,77 @@ function normalizeDisplayName(value, fallbackUsername = "") {
   return clean;
 }
 
+const I18N_AR_BY_EN = Object.freeze({
+  "A supervisor cannot be kicked from this room.": "لا يمكن طرد المشرف من هذه الغرفة.",
+  "Account not found.": "الحساب غير موجود.",
+  "Announcement is too long (max 500 chars).": "الرسالة العامة طويلة جدًا (الحد الأقصى 500 حرف).",
+  "Announcement text is required.": "نص الرسالة العامة مطلوب.",
+  "Appeal reason must be 8-500 characters.": "سبب طلب رفع الحظر يجب أن يكون بين 8 و500 حرف.",
+  "Avatar is invalid or too large.": "الصورة الشخصية غير صالحة أو حجمها كبير جدًا.",
+  "Ban reason must be 3-300 characters.": "سبب الحظر يجب أن يكون بين 3 و300 حرف.",
+  "Could not download this YouTube video right now. Try another one.": "تعذر تنزيل فيديو يوتيوب الآن. جرّب فيديو آخر.",
+  "Could not find a compatible playable format.": "تعذر العثور على صيغة تشغيل متوافقة.",
+  "Could not proxy YouTube video right now.": "تعذر تشغيل فيديو يوتيوب عبر الخادم الآن.",
+  "Could not reach YouTube right now. Try again.": "تعذر الاتصال بيوتيوب الآن. حاول مرة أخرى.",
+  "Display name must be 2 to 30 characters.": "الاسم الظاهر يجب أن يكون من 2 إلى 30 حرفًا.",
+  "Endpoint not found.": "نقطة الوصول غير موجودة.",
+  "Enter a YouTube URL or search text.": "أدخل رابط يوتيوب أو نص بحث.",
+  "Internal server error.": "حدث خطأ داخلي في الخادم.",
+  "Invalid JSON body.": "بيانات JSON غير صالحة.",
+  "Invalid action.": "الإجراء غير صالح.",
+  "Invalid login credentials.": "بيانات تسجيل الدخول غير صحيحة.",
+  "Invalid message identifier.": "معرّف الرسالة غير صالح.",
+  "Invalid reply identifier.": "معرّف الرد غير صالح.",
+  "Invalid user identifier.": "معرّف المستخدم غير صالح.",
+  "Invalid video stream link.": "رابط بث الفيديو غير صالح.",
+  "Invalid video sync action.": "إجراء مزامنة الفيديو غير صالح.",
+  "Invalid video upload payload.": "بيانات رفع الفيديو غير صالحة.",
+  "Join this room first.": "انضم إلى هذه الغرفة أولًا.",
+  "Leader cannot kick themselves.": "لا يمكن للقائد طرد نفسه.",
+  "Message is empty.": "الرسالة فارغة.",
+  "Message is too long.": "الرسالة طويلة جدًا.",
+  "Name must be 2-30 characters.": "الاسم يجب أن يكون بين 2 و30 حرفًا.",
+  "New Room": "غرفة جديدة",
+  "No join request found for this player.": "لا يوجد طلب انضمام لهذا اللاعب.",
+  "No matching YouTube video was found.": "لم يتم العثور على فيديو يوتيوب مطابق.",
+  "No room video is available.": "لا يوجد فيديو متاح في الغرفة.",
+  "No supported downloadable video format was found.": "لم يتم العثور على صيغة فيديو قابلة للتنزيل ومدعومة.",
+  "Only the room leader can kick players.": "فقط قائد الغرفة يمكنه طرد اللاعبين.",
+  "Only the room leader can manage requests.": "فقط قائد الغرفة يمكنه إدارة الطلبات.",
+  "Only the room leader can set video source.": "فقط قائد الغرفة يمكنه تحديد مصدر الفيديو.",
+  "Only the room leader can sync the video.": "فقط قائد الغرفة يمكنه مزامنة الفيديو.",
+  "Only the room leader can upload videos.": "فقط قائد الغرفة يمكنه رفع الفيديو.",
+  "Only the room leader can view requests.": "فقط قائد الغرفة يمكنه عرض الطلبات.",
+  "Payload is too large.": "حجم البيانات المرسلة كبير جدًا.",
+  "Player is not in this room.": "اللاعب ليس في هذه الغرفة.",
+  "Please choose a valid video file.": "يرجى اختيار ملف فيديو صالح.",
+  "Request not found.": "الطلب غير موجود.",
+  "Room endpoint not found.": "نقطة وصول الغرفة غير موجودة.",
+  "Room not found.": "الغرفة غير موجودة.",
+  "Server storage is unavailable right now.": "مساحة تخزين الخادم غير متاحة حاليًا.",
+  "Supervisor account cannot be banned.": "لا يمكن حظر حساب المشرف.",
+  "Supervisor account cannot be deleted.": "لا يمكن حذف حساب المشرف.",
+  "Target username is required.": "اسم المستخدم المستهدف مطلوب.",
+  "This account is not banned.": "هذا الحساب غير محظور.",
+  "This action is supervisor-only.": "هذا الإجراء مخصص للمشرف فقط.",
+  "This video version is outdated. Refresh room data.": "إصدار الفيديو هذا قديم. حدّث بيانات الغرفة.",
+  "Unauthorized.": "غير مصرح.",
+  "Unsupported video type. Use MP4, WebM or OGG.": "نوع الفيديو غير مدعوم. استخدم MP4 أو WebM أو OGG.",
+  "User not found.": "المستخدم غير موجود.",
+  "Username is already in use.": "اسم المستخدم مستخدم بالفعل.",
+  "Video file is too large (max 80MB).": "ملف الفيديو كبير جدًا (الحد الأقصى 80MB).",
+  "Video stream link expired. Please set the video again.": "انتهت صلاحية رابط بث الفيديو. يرجى تعيين الفيديو مرة أخرى.",
+  "You cannot join until the leader approves your request.": "لا يمكنك الانضمام حتى يوافق القائد على طلبك.",
+  "YouTube video is too large (max 80MB).": "فيديو يوتيوب كبير جدًا (الحد الأقصى 80MB).",
+  "Your join request is still pending.": "طلب انضمامك ما يزال قيد الانتظار."
+});
+
 function i18n(req, ar, en) {
   if (getLang(req) === "en") {
     return en;
+  }
+  if (Object.prototype.hasOwnProperty.call(I18N_AR_BY_EN, en)) {
+    return I18N_AR_BY_EN[en];
   }
   return looksLikeMojibake(ar) ? en : ar;
 }
