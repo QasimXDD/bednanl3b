@@ -2463,7 +2463,7 @@ async function handleApi(req, res) {
       }
 
       removeRoomVideoAsset(room);
-      const embedSrc = `https://www.youtube.com/embed/${resolved.videoId}?autoplay=1&rel=0&modestbranding=1&playsinline=1`;
+      const embedSrc = `https://www.youtube.com/embed/${resolved.videoId}?autoplay=1&rel=0&modestbranding=1&playsinline=1&controls=0&disablekb=1&fs=0&iv_load_policy=3&enablejsapi=1`;
       room.video = {
         id: randomToken(),
         sourceType: "youtube",
