@@ -97,6 +97,7 @@ const videoStatusText = document.getElementById("videoStatusText");
 const videoHintText = document.getElementById("videoHintText");
 const videoPlayerFrame = document.getElementById("videoPlayerFrame");
 const roomVideoPlayer = document.getElementById("roomVideoPlayer");
+const roomVideoEmbed = document.getElementById("roomVideoEmbed");
 const videoControlsBar = document.getElementById("videoControlsBar");
 const videoPlayPauseBtn = document.getElementById("videoPlayPauseBtn");
 const videoSeekRange = document.getElementById("videoSeekRange");
@@ -111,6 +112,9 @@ const videoToolsTitle = document.getElementById("videoToolsTitle");
 const videoFileLabel = document.getElementById("videoFileLabel");
 const videoFileInput = document.getElementById("videoFileInput");
 const videoUploadBtn = document.getElementById("videoUploadBtn");
+const videoYoutubeLabel = document.getElementById("videoYoutubeLabel");
+const videoYoutubeInput = document.getElementById("videoYoutubeInput");
+const videoYoutubeBtn = document.getElementById("videoYoutubeBtn");
 
 const query = new URLSearchParams(window.location.search);
 const code = String(query.get("code") || "").trim().toUpperCase();
@@ -194,9 +198,17 @@ const I18N = {
     videoToolsOpenLabel: "فتح أدوات الفيديو",
     videoToolsCloseLabel: "إغلاق أدوات الفيديو",
     videoFileLabel: "اختيار فيديو من الجهاز",
+    videoYoutubeLabel: "رابط يوتيوب أو بحث",
+    videoYoutubePlaceholder: "الصق رابط يوتيوب أو اكتب اسم الأغنية",
     videoUploadBtn: "رفع الفيديو",
+    videoYoutubeBtn: "تشغيل من يوتيوب",
     videoUploadBusy: "جارٍ رفع الفيديو...",
+    videoYoutubeBusy: "جارٍ جلب الفيديو...",
     videoUploadNeedFile: "اختر ملف فيديو أولًا.",
+    videoYoutubeNeedInput: "أدخل رابط يوتيوب أو نص بحث أولًا.",
+    videoYoutubeSuccess: "تم تشغيل فيديو يوتيوب.",
+    videoYoutubeNotFound: "لم يتم العثور على نتيجة مناسبة في يوتيوب.",
+    videoYoutubeResolveFail: "تعذر جلب نتائج يوتيوب الآن.",
     videoUploadSuccess: "تم رفع الفيديو وتحديث المزامنة.",
     videoUploadTooLarge: "حجم الفيديو كبير جدًا (الحد 80MB).",
     videoUploadType: "نوع الفيديو غير مدعوم. استخدم MP4 أو WebM أو OGG.",
@@ -321,9 +333,17 @@ const I18N = {
     videoToolsOpenLabel: "Open video tools",
     videoToolsCloseLabel: "Close video tools",
     videoFileLabel: "Choose video from device",
+    videoYoutubeLabel: "YouTube link or search",
+    videoYoutubePlaceholder: "Paste a YouTube URL or type a song name",
     videoUploadBtn: "Upload Video",
+    videoYoutubeBtn: "Play from YouTube",
     videoUploadBusy: "Uploading...",
+    videoYoutubeBusy: "Resolving video...",
     videoUploadNeedFile: "Choose a video file first.",
+    videoYoutubeNeedInput: "Enter a YouTube URL or search text first.",
+    videoYoutubeSuccess: "YouTube video started.",
+    videoYoutubeNotFound: "No suitable YouTube result was found.",
+    videoYoutubeResolveFail: "Could not resolve YouTube right now.",
     videoUploadSuccess: "Video uploaded and sync updated.",
     videoUploadTooLarge: "Video is too large (max 80MB).",
     videoUploadType: "Unsupported video type. Use MP4, WebM, or OGG.",
@@ -1250,14 +1270,16 @@ function revealRoomVideoControls() {
 
 function updateRoomVideoControls({ previewTime = null } = {}) {
   const hasVideo = Boolean(roomVideoState && roomVideoState.src);
-  const duration = hasVideo ? getRoomVideoDuration() : 0;
-  let currentTime = hasVideo ? clampVideoTime(roomVideoPlayer?.currentTime, duration) : 0;
+  const isYoutube = hasVideo && isYouTubeRoomVideo(roomVideoState);
+  const canUseNativeControls = hasVideo && !isYoutube;
+  const duration = canUseNativeControls ? getRoomVideoDuration() : 0;
+  let currentTime = canUseNativeControls ? clampVideoTime(roomVideoPlayer?.currentTime, duration) : 0;
   if (previewTime !== null && Number.isFinite(previewTime)) {
     currentTime = clampVideoTime(previewTime, duration);
   }
 
   if (videoControlsBar) {
-    videoControlsBar.classList.toggle("is-disabled", !hasVideo);
+    videoControlsBar.classList.toggle("is-disabled", !canUseNativeControls);
   }
 
   if (videoSeekRange) {
@@ -1267,7 +1289,7 @@ function updateRoomVideoControls({ previewTime = null } = {}) {
     }
     const progressPercent = duration > 0 ? Math.max(0, Math.min(100, (currentTime / duration) * 100)) : 0;
     videoSeekRange.style.setProperty("--video-progress", `${progressPercent}%`);
-    videoSeekRange.disabled = !hasVideo || duration <= 0;
+    videoSeekRange.disabled = !canUseNativeControls || duration <= 0;
   }
 
   if (videoTimeText) {
@@ -1275,8 +1297,8 @@ function updateRoomVideoControls({ previewTime = null } = {}) {
   }
 
   if (videoPlayPauseBtn) {
-    const isPlaying = hasVideo && roomVideoPlayer && !roomVideoPlayer.paused && !roomVideoPlayer.ended;
-    videoPlayPauseBtn.disabled = !hasVideo;
+    const isPlaying = canUseNativeControls && roomVideoPlayer && !roomVideoPlayer.paused && !roomVideoPlayer.ended;
+    videoPlayPauseBtn.disabled = !canUseNativeControls;
     videoPlayPauseBtn.textContent = isPlaying ? "❚❚" : "▶";
     videoPlayPauseBtn.setAttribute("aria-label", isPlaying ? t("videoPauseBtn") : t("videoPlayBtn"));
     videoPlayPauseBtn.title = isPlaying ? t("videoPauseBtn") : t("videoPlayBtn");
@@ -1290,7 +1312,7 @@ function updateRoomVideoControls({ previewTime = null } = {}) {
     videoFullscreenBtn.title = isFullscreen ? t("videoExitFullscreenBtn") : t("videoFullscreenBtn");
   }
 
-  if (!hasVideo || !shouldAutoHideRoomVideoControls()) {
+  if (!canUseNativeControls || !shouldAutoHideRoomVideoControls()) {
     clearRoomVideoControlsHideTimer();
     setRoomVideoControlsVisible(true);
   }
@@ -1361,6 +1383,10 @@ function withSuppressedRoomVideoEvents(callback) {
   }
 }
 
+function isYouTubeRoomVideo(video = roomVideoState) {
+  return Boolean(video && String(video.sourceType || "").toLowerCase() === "youtube");
+}
+
 function setVideoUploadBusy(busy) {
   isUploadingRoomVideo = Boolean(busy);
   if (videoUploadBtn) {
@@ -1369,6 +1395,13 @@ function setVideoUploadBusy(busy) {
   }
   if (videoFileInput) {
     videoFileInput.disabled = isUploadingRoomVideo;
+  }
+  if (videoYoutubeBtn) {
+    videoYoutubeBtn.disabled = isUploadingRoomVideo;
+    videoYoutubeBtn.textContent = isUploadingRoomVideo ? t("videoYoutubeBusy") : t("videoYoutubeBtn");
+  }
+  if (videoYoutubeInput) {
+    videoYoutubeInput.disabled = isUploadingRoomVideo;
   }
 }
 
@@ -1392,6 +1425,11 @@ function clearRoomVideoPlayer() {
     roomVideoPlayer.removeAttribute("src");
     roomVideoPlayer.load();
   });
+  if (roomVideoEmbed) {
+    roomVideoEmbed.removeAttribute("src");
+    roomVideoEmbed.classList.add("hidden");
+  }
+  roomVideoPlayer.classList.remove("hidden");
   activeRoomVideoId = "";
   roomVideoMetadataReady = false;
   roomVideoState = null;
@@ -1478,10 +1516,34 @@ function renderRoomVideo(room) {
   const incomingDuration = Number(nextVideo.duration || 0);
   roomVideoSyncState = normalizeIncomingRoomVideoSync(nextVideo.sync, incomingDuration);
   const nextVideoId = String(nextVideo.id || "");
-  const sourceChanged = activeRoomVideoId !== nextVideoId || roomVideoPlayer.getAttribute("src") !== nextVideo.src;
+  const isYoutube = isYouTubeRoomVideo(nextVideo);
+  const currentSource = isYoutube
+    ? String(roomVideoEmbed?.getAttribute("src") || "")
+    : String(roomVideoPlayer.getAttribute("src") || "");
+  const sourceChanged = activeRoomVideoId !== nextVideoId || currentSource !== String(nextVideo.src || "");
   activeRoomVideoId = nextVideoId;
 
-  if (sourceChanged) {
+  if (isYoutube) {
+    roomVideoMetadataReady = false;
+    withSuppressedRoomVideoEvents(() => {
+      roomVideoPlayer.pause();
+      roomVideoPlayer.removeAttribute("src");
+      roomVideoPlayer.load();
+    });
+    roomVideoPlayer.classList.add("hidden");
+    if (roomVideoEmbed) {
+      roomVideoEmbed.classList.remove("hidden");
+      if (sourceChanged || roomVideoEmbed.getAttribute("src") !== nextVideo.src) {
+        roomVideoEmbed.setAttribute("src", nextVideo.src);
+      }
+    }
+    roomVideoSyncState = null;
+  } else if (sourceChanged) {
+    roomVideoPlayer.classList.remove("hidden");
+    if (roomVideoEmbed) {
+      roomVideoEmbed.classList.add("hidden");
+      roomVideoEmbed.removeAttribute("src");
+    }
     roomVideoMetadataReady = false;
     withSuppressedRoomVideoEvents(() => {
       roomVideoPlayer.pause();
@@ -1496,7 +1558,7 @@ function renderRoomVideo(room) {
   const fileLabel = String(nextVideo.filename || "video");
   videoStatusText.textContent = fmt(t("videoNowPlaying"), { name: fileLabel });
   updateRoomVideoControls();
-  if (!roomVideoSyncState) {
+  if (!roomVideoSyncState || isYoutube) {
     return;
   }
   if (roomVideoMetadataReady || roomVideoPlayer.readyState >= 1) {
@@ -1574,6 +1636,46 @@ async function uploadRoomVideo() {
     }
     if (error.code === "VIDEO_INVALID_TYPE") {
       showToast(t("videoUploadType"));
+      return;
+    }
+    showToast(error.message || t("videoSyncFailed"));
+  } finally {
+    setVideoUploadBusy(false);
+  }
+}
+
+async function setRoomYouTubeVideo() {
+  if (!isRoomLeader()) {
+    showToast(t("videoHostOnly"));
+    return;
+  }
+  const input = String(videoYoutubeInput?.value || "").trim();
+  if (input.length < 2) {
+    showToast(t("videoYoutubeNeedInput"));
+    return;
+  }
+
+  setVideoUploadBusy(true);
+  try {
+    const result = await api(`/api/rooms/${encodedCode}/video-source`, {
+      method: "POST",
+      body: { input }
+    });
+    if (videoYoutubeInput) {
+      videoYoutubeInput.value = "";
+    }
+    showToast(t("videoYoutubeSuccess"), "success");
+    if (result?.room) {
+      renderRoomInfo(result.room);
+    }
+    await refreshMessages();
+  } catch (error) {
+    if (error.code === "YOUTUBE_NOT_FOUND") {
+      showToast(t("videoYoutubeNotFound"));
+      return;
+    }
+    if (error.code === "YOUTUBE_RESOLVE_FAILED") {
+      showToast(t("videoYoutubeResolveFail"));
       return;
     }
     showToast(error.message || t("videoSyncFailed"));
@@ -2651,6 +2753,12 @@ function applyTranslations() {
     videoToolsTitle.textContent = t("videoToolsTitle");
   }
   videoFileLabel.textContent = t("videoFileLabel");
+  if (videoYoutubeLabel) {
+    videoYoutubeLabel.textContent = t("videoYoutubeLabel");
+  }
+  if (videoYoutubeInput) {
+    videoYoutubeInput.placeholder = t("videoYoutubePlaceholder");
+  }
   if (roomVideoState && roomVideoState.filename) {
     videoStatusText.textContent = fmt(t("videoNowPlaying"), { name: roomVideoState.filename });
   } else {
@@ -3046,6 +3154,23 @@ if (videoUploadBtn) {
   videoUploadBtn.addEventListener("click", () => {
     sfx("click");
     uploadRoomVideo();
+  });
+}
+
+if (videoYoutubeBtn) {
+  videoYoutubeBtn.addEventListener("click", () => {
+    sfx("click");
+    setRoomYouTubeVideo();
+  });
+}
+
+if (videoYoutubeInput) {
+  videoYoutubeInput.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") {
+      return;
+    }
+    event.preventDefault();
+    setRoomYouTubeVideo();
   });
 }
 

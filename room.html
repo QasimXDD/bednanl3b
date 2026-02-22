@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Changa:wght@600;700;800&family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=20260221i">
+  <link rel="stylesheet" href="styles.css?v=20260222b">
 </head>
 <body>
   <div class="top-controls">
@@ -55,6 +55,7 @@
           </button>
           <div class="video-player-frame controls-visible" id="videoPlayerFrame">
             <video id="roomVideoPlayer" class="room-video-player" playsinline preload="metadata" disablepictureinpicture disableremoteplayback></video>
+            <iframe id="roomVideoEmbed" class="room-video-player hidden" title="YouTube player" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
             <div id="videoControlsBar" class="video-controls-bar">
               <button id="videoPlayPauseBtn" class="btn btn-ghost video-control-btn" type="button">Play</button>
               <input id="videoSeekRange" class="video-seek-range" type="range" min="0" max="1000" step="1" value="0" aria-label="Video progress">
@@ -70,8 +71,11 @@
             </div>
             <label for="videoFileInput" id="videoFileLabel">Choose video from device</label>
             <input id="videoFileInput" type="file" accept="video/mp4,video/webm,video/ogg">
+            <label for="videoYoutubeInput" id="videoYoutubeLabel">YouTube link or search</label>
+            <input id="videoYoutubeInput" type="text" maxlength="300" placeholder="Paste URL or type song name">
             <div class="room-actions">
               <button id="videoUploadBtn" class="btn" type="button">Upload Video</button>
+              <button id="videoYoutubeBtn" class="btn btn-ghost" type="button">Play from YouTube</button>
             </div>
           </div>
         </section>
@@ -227,7 +231,7 @@
 
   <div id="toastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
   <script src="sound.js"></script>
-  <script src="room.js?v=20260221i"></script>
+  <script src="room.js?v=20260222b"></script>
 </body>
 </html>
 

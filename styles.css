@@ -3254,3 +3254,7 @@ ul {
 .guest-panel {
   width: min(100%, 500px);
 }
+
+#roomVideoEmbed {
+  border: 0;
+}
