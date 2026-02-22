@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: bednanl3b
+    runtime: node
+    plan: starter
+    autoDeploy: true
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: YTDL_NO_DEBUG_FILE
+        value: "1"
+      - key: YTDL_NO_UPDATE
+        value: "1"
+      - key: DATA_DIR
+        value: /var/data/data
+      - key: UPLOADS_DIR
+        value: /var/data/uploads
+    disk:
+      name: bednanl3b-disk
+      mountPath: /var/data
+      sizeGB: 1

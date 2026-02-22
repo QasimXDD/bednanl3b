@@ -15,8 +15,8 @@ const ytdl = require("@distube/ytdl-core");
 
 const PORT = process.env.PORT || 3000;
 const ROOT = __dirname;
-const DATA_DIR = path.join(ROOT, "data");
-const UPLOADS_DIR = path.join(ROOT, "uploads");
+const DATA_DIR = path.resolve(String(process.env.DATA_DIR || path.join(ROOT, "data")));
+const UPLOADS_DIR = path.resolve(String(process.env.UPLOADS_DIR || path.join(ROOT, "uploads")));
 const ROOM_VIDEO_PUBLIC_PREFIX = "/uploads/room-videos/";
 const ROOM_VIDEO_UPLOAD_DIR_DEFAULT = path.join(UPLOADS_DIR, "room-videos");
 const ROOM_VIDEO_UPLOAD_DIR_FALLBACK = path.join(os.tmpdir(), "bednanl3b-room-videos");
@@ -32,6 +32,7 @@ const USERNAME_MAX_LENGTH = 30;
 const PASSWORD_MIN_LENGTH = 4;
 const PASSWORD_MAX_LENGTH = 128;
 const ROOM_NAME_MAX_LENGTH = 40;
+const ROOM_EMPTY_DELETE_DELAY_MS = 10000;
 const USERNAME_ALLOWED_REGEX = /^[\p{L}\p{N}_-]+$/u;
 const CLIENT_MESSAGE_ID_MAX_LENGTH = 80;
 const CLIENT_MESSAGE_ID_REGEX = /^[A-Za-z0-9_-]+$/;
@@ -86,6 +87,7 @@ const users = new Map();
 const guestUsers = new Map();
 const sessions = new Map();
 const rooms = new Map();
+const roomEmptyDeletionTimers = new Map();
 const userLastSeen = new Map();
 const bannedUsers = new Map();
 const unbanRequests = new Map();
@@ -1411,7 +1413,42 @@ function pushUserMessage(room, username, text, replyTo = null) {
   return id;
 }
 
+function cancelRoomDeletionTimer(roomCode) {
+  const code = String(roomCode || "").trim().toUpperCase();
+  if (!code) {
+    return;
+  }
+  const timer = roomEmptyDeletionTimers.get(code);
+  if (timer) {
+    clearTimeout(timer);
+    roomEmptyDeletionTimers.delete(code);
+  }
+}
+
+function scheduleRoomDeletionIfEmpty(room) {
+  if (!room || !room.code) {
+    return;
+  }
+  cancelRoomDeletionTimer(room.code);
+  const code = String(room.code).trim().toUpperCase();
+  const timer = setTimeout(() => {
+    roomEmptyDeletionTimers.delete(code);
+    const currentRoom = rooms.get(code);
+    if (!currentRoom) {
+      return;
+    }
+    ensureRoomRuntimeState(currentRoom);
+    if (currentRoom.members.size > 0) {
+      return;
+    }
+    removeRoomVideoAsset(currentRoom);
+    rooms.delete(code);
+  }, ROOM_EMPTY_DELETE_DELAY_MS);
+  roomEmptyDeletionTimers.set(code, timer);
+}
+
 function joinUserToRoom(room, username) {
+  cancelRoomDeletionTimer(room.code);
   const hadHistoryFloor = room.messageFloorByUser.has(username);
   room.members.add(username);
   room.approvedUsers.add(username);
@@ -1450,9 +1487,8 @@ function removeMemberFromRoom(room, username) {
   room.joinRequests.delete(username);
 
   if (room.members.size === 0) {
-    removeRoomVideoAsset(room);
-    rooms.delete(room.code);
-    return { deleted: true, room: null };
+    scheduleRoomDeletionIfEmpty(room);
+    return { deleted: false, room };
   }
 
   if (room.host === username) {
@@ -2254,6 +2290,20 @@ function isBlockedStaticPath(relativePath) {
 }
 
 function serveStatic(pathname, req, res) {
+  const method = req.method === "HEAD" ? "HEAD" : req.method;
+  if (method !== "GET" && method !== "HEAD") {
+    res.writeHead(
+      405,
+      securityHeaders({
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-store",
+        Allow: "GET, HEAD"
+      })
+    );
+    res.end("405 - Method not allowed");
+    return;
+  }
+
   const urlPath = pathname === "/" ? "/index.html" : pathname;
   const decodedPath = safeDecodeURIComponent(urlPath);
   if (decodedPath === null) {
@@ -2368,6 +2418,10 @@ function serveStatic(pathname, req, res) {
           "Content-Length": chunkSize
         })
       );
+      if (method === "HEAD") {
+        res.end();
+        return;
+      }
       const stream = fs.createReadStream(filePath, { start, end: safeEnd });
       stream.on("error", () => {
         if (!res.headersSent) {
@@ -2388,6 +2442,10 @@ function serveStatic(pathname, req, res) {
         ...(isVideo ? { "Accept-Ranges": "bytes" } : {})
       })
     );
+    if (method === "HEAD") {
+      res.end();
+      return;
+    }
     const stream = fs.createReadStream(filePath);
     stream.on("error", () => {
       if (!res.headersSent) {
@@ -2402,6 +2460,15 @@ function serveStatic(pathname, req, res) {
 async function handleApi(req, res) {
   const fullUrl = new URL(req.url, "http://localhost");
   const pathname = fullUrl.pathname;
+  if (req.method === "GET" && pathname === "/api/health") {
+    sendJson(res, 200, {
+      ok: true,
+      status: "healthy",
+      uptimeSec: Math.floor(process.uptime()),
+      nowIso: new Date().toISOString()
+    });
+    return;
+  }
   if ((req.method === "GET" || req.method === "HEAD") && pathname.startsWith("/api/youtube-proxy/")) {
     const streamId = pathname.slice("/api/youtube-proxy/".length).split("/")[0];
     if (!/^[A-Za-z0-9]+$/.test(streamId)) {
@@ -3422,7 +3489,22 @@ async function handleApi(req, res) {
         return;
       }
 
+      const tryProxyFallback = async () => {
+        try {
+          const direct = await getYouTubeDirectPlayableSource(resolved.videoId);
+          setRoomVideoFromYouTubeProxy(room, resolved.videoId, direct, username);
+          sendJson(res, 201, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });
+          return true;
+        } catch (proxyError) {
+          console.warn("YouTube direct proxy fallback failed:", proxyError?.message || proxyError);
+          return false;
+        }
+      };
+
       if (!ensureUploadsDir()) {
+        if (await tryProxyFallback()) {
+          return;
+        }
         sendJson(res, 503, {
           code: "VIDEO_STORAGE_UNAVAILABLE",
           error: i18n(req, "طھط¹ط°ط± ط­ظپط¸ ط§ظ„ظپظٹط¯ظٹظˆ ط¹ظ„ظ‰ ط§ظ„ط®ط§ط¯ظ… ط­ط§ظ„ظٹظ‹ط§.", "Server storage is unavailable right now.")
@@ -3446,6 +3528,9 @@ async function handleApi(req, res) {
             return;
           }
           if (code === "YOUTUBE_FORMAT_UNSUPPORTED") {
+            if (await tryProxyFallback()) {
+              return;
+            }
             sendJson(res, 415, {
               code: "YOUTUBE_FORMAT_UNSUPPORTED",
               error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "No supported downloadable video format was found.")
@@ -3462,6 +3547,9 @@ async function handleApi(req, res) {
             return;
           }
           console.warn("YouTube local download failed:", message || error);
+          if (await tryProxyFallback()) {
+            return;
+          }
           sendJson(res, 502, {
             code: "YOUTUBE_DOWNLOAD_FAILED",
             error: i18n(req, "تعذر تنزيل فيديو يوتيوب الآن. حاول فيديو آخر.", "Could not download this YouTube video right now. Try another one.")
