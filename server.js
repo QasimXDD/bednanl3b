@@ -1,6 +1,7 @@
-﻿const http = require("http");
+const http = require("http");
 const fs = require("fs");
 const https = require("https");
+const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 if (!process.env.YTDL_NO_DEBUG_FILE) {
@@ -15,7 +16,9 @@ const PORT = process.env.PORT || 3000;
 const ROOT = __dirname;
 const DATA_DIR = path.join(ROOT, "data");
 const UPLOADS_DIR = path.join(ROOT, "uploads");
-const ROOM_VIDEO_UPLOAD_DIR = path.join(UPLOADS_DIR, "room-videos");
+const ROOM_VIDEO_PUBLIC_PREFIX = "/uploads/room-videos/";
+const ROOM_VIDEO_UPLOAD_DIR_DEFAULT = path.join(UPLOADS_DIR, "room-videos");
+const ROOM_VIDEO_UPLOAD_DIR_FALLBACK = path.join(os.tmpdir(), "bednanl3b-room-videos");
 const USERS_FILE = path.join(DATA_DIR, "users.json");
 const MODERATION_FILE = path.join(DATA_DIR, "moderation.json");
 const YOUTUBE_CACHE_FILE = path.join(DATA_DIR, "youtube-cache.json");
@@ -87,6 +90,7 @@ const unbanRequests = new Map();
 const youtubeVideoCache = new Map();
 const youtubeProxyStreams = new Map();
 let siteAnnouncement = null;
+let activeRoomVideoUploadDir = ROOM_VIDEO_UPLOAD_DIR_DEFAULT;
 
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) {
@@ -95,15 +99,30 @@ function ensureDataDir() {
 }
 
 function ensureUploadsDir() {
+  const ensureWritableDir = (directoryPath) => {
+    fs.mkdirSync(directoryPath, { recursive: true });
+    fs.accessSync(directoryPath, fs.constants.R_OK | fs.constants.W_OK);
+  };
   try {
-    if (!fs.existsSync(ROOM_VIDEO_UPLOAD_DIR)) {
-      fs.mkdirSync(ROOM_VIDEO_UPLOAD_DIR, { recursive: true });
-    }
+    ensureWritableDir(ROOM_VIDEO_UPLOAD_DIR_DEFAULT);
+    activeRoomVideoUploadDir = ROOM_VIDEO_UPLOAD_DIR_DEFAULT;
     return true;
   } catch (error) {
-    console.warn("Uploads directory is not writable:", error.message);
+    console.warn("Default uploads directory is not writable:", error.message);
+  }
+  try {
+    ensureWritableDir(ROOM_VIDEO_UPLOAD_DIR_FALLBACK);
+    activeRoomVideoUploadDir = ROOM_VIDEO_UPLOAD_DIR_FALLBACK;
+    console.warn("Using fallback runtime uploads directory:", ROOM_VIDEO_UPLOAD_DIR_FALLBACK);
+    return true;
+  } catch (fallbackError) {
+    console.warn("Fallback uploads directory is not writable:", fallbackError.message);
     return false;
   }
+}
+
+function getRoomVideoUploadDir() {
+  return activeRoomVideoUploadDir;
 }
 
 function loadUsers() {
@@ -259,7 +278,7 @@ function isStoredVideoFileUsedInAnyRoom(storedFileName) {
   if (!normalized) {
     return false;
   }
-  const publicSrc = `/uploads/room-videos/${normalized}`;
+  const publicSrc = `${ROOM_VIDEO_PUBLIC_PREFIX}${normalized}`;
   for (const room of rooms.values()) {
     if (String(room?.video?.src || "") === publicSrc) {
       return true;
@@ -272,7 +291,7 @@ function removeCachedVideoFileIfSafe(storedFileName) {
   if (!storedFileName || isStoredVideoFileUsedInAnyRoom(storedFileName)) {
     return;
   }
-  const absolutePath = path.join(ROOM_VIDEO_UPLOAD_DIR, storedFileName);
+  const absolutePath = path.join(getRoomVideoUploadDir(), storedFileName);
   if (!fs.existsSync(absolutePath)) {
     return;
   }
@@ -298,7 +317,7 @@ function pruneYouTubeCache() {
   const entries = Array.from(youtubeVideoCache.values());
 
   for (const entry of entries) {
-    const absolutePath = path.join(ROOM_VIDEO_UPLOAD_DIR, entry.storedFileName);
+    const absolutePath = path.join(getRoomVideoUploadDir(), entry.storedFileName);
     if (!fs.existsSync(absolutePath)) {
       youtubeVideoCache.delete(entry.videoId);
       continue;
@@ -358,10 +377,10 @@ function loadYouTubeCache() {
 
 function getStoredFileNameFromPublicSrc(src) {
   const clean = String(src || "").trim();
-  if (!clean.startsWith("/uploads/room-videos/")) {
+  if (!clean.startsWith(ROOM_VIDEO_PUBLIC_PREFIX)) {
     return "";
   }
-  const value = path.basename(clean.slice("/uploads/room-videos/".length));
+  const value = path.basename(clean.slice(ROOM_VIDEO_PUBLIC_PREFIX.length));
   return value || "";
 }
 
@@ -388,7 +407,7 @@ function getCachedYouTubeVideo(videoId) {
   if (!entry) {
     return null;
   }
-  const absolutePath = path.join(ROOM_VIDEO_UPLOAD_DIR, entry.storedFileName);
+  const absolutePath = path.join(getRoomVideoUploadDir(), entry.storedFileName);
   if (!fs.existsSync(absolutePath)) {
     youtubeVideoCache.delete(cleanVideoId);
     saveYouTubeCache();
@@ -482,7 +501,7 @@ function getYouTubeProxyStream(streamId) {
 async function serveYouTubeProxyStream(req, res, streamId) {
   const item = getYouTubeProxyStream(streamId);
   if (!item) {
-    sendJson(res, 404, { error: i18n(req, "انتهت صلاحية رابط الفيديو. أعد اختيار الفيديو.", "Video stream link expired. Please set the video again.") });
+    sendJson(res, 404, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½. أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Video stream link expired. Please set the video again.") });
     return;
   }
 
@@ -494,7 +513,7 @@ async function serveYouTubeProxyStream(req, res, streamId) {
     info = await getYouTubeInfoRobust(item.videoId);
   } catch (error) {
     sendJson(res, 502, {
-      error: i18n(req, "تعذر تمرير فيديو يوتيوب الآن.", "Could not proxy YouTube video right now.")
+      error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Could not proxy YouTube video right now.")
     });
     return;
   }
@@ -509,7 +528,7 @@ async function serveYouTubeProxyStream(req, res, streamId) {
   }
   if (!format) {
     sendJson(res, 415, {
-      error: i18n(req, "تعذر العثور على صيغة تشغيل مناسبة للفيديو.", "Could not find a compatible playable format.")
+      error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Could not find a compatible playable format.")
     });
     return;
   }
@@ -603,7 +622,7 @@ function looksLikeMojibake(text) {
   if (typeof text !== "string" || text.length < 8) {
     return false;
   }
-  const suspicious = text.match(/[طظ]/g);
+  const suspicious = text.match(/[أ¯طںآ½أ¯طںآ½]/g);
   return Boolean(suspicious && suspicious.length >= 3 && suspicious.length / text.length >= 0.2);
 }
 
@@ -852,7 +871,7 @@ function sendBannedResponse(req, res, username) {
     code: "ACCOUNT_BANNED",
     error: i18n(
       req,
-      "تم حظر هذا الحساب من الموقع. يمكنك إرسال طلب رفع حظر للمشرف.",
+      "أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½. أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.",
       "This account is banned from the site. You can send an unban request to the supervisor."
     ),
     ban,
@@ -867,7 +886,7 @@ function assertSupervisor(req, res, username) {
   }
   sendJson(res, 403, {
     code: "SUPERVISOR_ONLY",
-    error: i18n(req, "هذه الخاصية للمشرف فقط.", "This action is supervisor-only.")
+    error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "This action is supervisor-only.")
   });
   return false;
 }
@@ -1069,13 +1088,12 @@ function clampRoomVideoTime(room, value) {
 }
 
 function roomVideoPublicToAbsolutePath(publicPath) {
-  const clean = String(publicPath || "").trim();
-  if (!clean || !clean.startsWith("/uploads/room-videos/")) {
+  const storedFileName = getStoredFileNameFromPublicSrc(publicPath);
+  if (!storedFileName) {
     return null;
   }
-  const relative = clean.replace(/^\/+/, "");
-  const absolute = path.join(ROOT, relative);
-  const normalizedRoot = path.resolve(ROOM_VIDEO_UPLOAD_DIR);
+  const absolute = path.join(getRoomVideoUploadDir(), storedFileName);
+  const normalizedRoot = path.resolve(getRoomVideoUploadDir());
   const normalizedAbs = path.resolve(absolute);
   if (!normalizedAbs.startsWith(normalizedRoot + path.sep) && normalizedAbs !== normalizedRoot) {
     return null;
@@ -1138,7 +1156,7 @@ function ensureRoomVideoRuntimeState(room) {
   const sourceType = String(room?.video?.sourceType || "").toLowerCase();
   const src = String(room?.video?.src || "");
   const isAllowedFileSrc =
-    src.startsWith("/uploads/room-videos/") ||
+    src.startsWith(ROOM_VIDEO_PUBLIC_PREFIX) ||
     src.startsWith("/api/youtube-proxy/");
   if (room?.video && (sourceType === "youtube" || (sourceType === "file" && src && !isAllowedFileSrc))) {
     room.video = null;
@@ -1840,7 +1858,7 @@ async function downloadYouTubeVideoToLocalFile(videoId) {
     const container = String(format?.container || "mp4").toLowerCase();
     const extension = container === "webm" ? ".webm" : container === "ogg" ? ".ogg" : ".mp4";
     const storedFileName = `yt-${videoId}-${Date.now()}-${crypto.randomBytes(4).toString("hex")}${extension}`;
-    const absolutePath = path.join(ROOM_VIDEO_UPLOAD_DIR, storedFileName);
+    const absolutePath = path.join(getRoomVideoUploadDir(), storedFileName);
     let downloadedBytes = 0;
     try {
       await new Promise((resolve, reject) => {
@@ -1987,15 +2005,36 @@ function serveStatic(pathname, req, res) {
     return;
   }
 
-  const safePath = path.normalize(decodedPath).replace(/^([/\\])+/, "");
-  const filePath = path.join(ROOT, safePath);
-  const relativePath = path.relative(ROOT, filePath);
+  let filePath = "";
+  let relativePath = "";
+  let skipBlockedPathCheck = false;
+  if (decodedPath.startsWith(ROOM_VIDEO_PUBLIC_PREFIX)) {
+    const storedFileName = path.basename(decodedPath.slice(ROOM_VIDEO_PUBLIC_PREFIX.length));
+    if (!storedFileName) {
+      res.writeHead(
+        403,
+        securityHeaders({
+          "Content-Type": "text/plain; charset=utf-8",
+          "Cache-Control": "no-store"
+        })
+      );
+      res.end("403 - Forbidden");
+      return;
+    }
+    filePath = path.join(getRoomVideoUploadDir(), storedFileName);
+    relativePath = path.relative(getRoomVideoUploadDir(), filePath);
+    skipBlockedPathCheck = true;
+  } else {
+    const safePath = path.normalize(decodedPath).replace(/^([/\\])+/, "");
+    filePath = path.join(ROOT, safePath);
+    relativePath = path.relative(ROOT, filePath);
+  }
 
   if (
     !relativePath ||
     relativePath.startsWith("..") ||
     path.isAbsolute(relativePath) ||
-    isBlockedStaticPath(relativePath)
+    (!skipBlockedPathCheck && isBlockedStaticPath(relativePath))
   ) {
     res.writeHead(
       403,
@@ -2103,7 +2142,7 @@ async function handleApi(req, res) {
   if ((req.method === "GET" || req.method === "HEAD") && pathname.startsWith("/api/youtube-proxy/")) {
     const streamId = pathname.slice("/api/youtube-proxy/".length).split("/")[0];
     if (!/^[A-Za-z0-9]+$/.test(streamId)) {
-      sendJson(res, 404, { error: i18n(req, "رابط الفيديو غير صالح.", "Invalid video stream link.") });
+      sendJson(res, 404, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid video stream link.") });
       return;
     }
     await serveYouTubeProxyStream(req, res, streamId);
@@ -2119,7 +2158,7 @@ async function handleApi(req, res) {
       sendJson(res, 400, {
         error: i18n(
           req,
-          "اسم المستخدم يجب أن يكون بين 3 و 30 حرفًا ويحتوي على أحرف/أرقام فقط.",
+          "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ 3 أ¯طںآ½ 30 أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½/أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½.",
           "Username must be 3-30 characters and use only letters, numbers, _ or -."
         )
       });
@@ -2129,7 +2168,7 @@ async function handleApi(req, res) {
       sendJson(res, 400, {
         error: i18n(
           req,
-          "كلمة المرور يجب أن تكون بين 4 و 128 حرفًا.",
+          "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ 4 أ¯طںآ½ 128 أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.",
           "Password must be 4-128 characters."
         )
       });
@@ -2137,7 +2176,7 @@ async function handleApi(req, res) {
     }
     if (users.has(cleanUser)) {
       sendJson(res, 409, {
-        error: i18n(req, "اسم المستخدم مستخدم بالفعل.", "Username is already in use.")
+        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Username is already in use.")
       });
       return;
     }
@@ -2163,21 +2202,21 @@ async function handleApi(req, res) {
 
     if (!cleanUser || !cleanPass || cleanPass.length > PASSWORD_MAX_LENGTH) {
       sendJson(res, 401, {
-        error: i18n(req, "بيانات الدخول غير صحيحة.", "Invalid login credentials.")
+        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid login credentials.")
       });
       return;
     }
 
     if (!users.has(cleanUser)) {
       sendJson(res, 401, {
-        error: i18n(req, "بيانات الدخول غير صحيحة.", "Invalid login credentials.")
+        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid login credentials.")
       });
       return;
     }
     const user = users.get(cleanUser);
     if (!verifyPassword(cleanUser, user, cleanPass)) {
       sendJson(res, 401, {
-        error: i18n(req, "بيانات الدخول غير صحيحة.", "Invalid login credentials.")
+        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid login credentials.")
       });
       return;
     }
@@ -2196,7 +2235,7 @@ async function handleApi(req, res) {
     const cleanName = sanitizeGuestDisplayName(name);
     if (cleanName.length < 2 || cleanName.length > 30) {
       sendJson(res, 400, {
-        error: i18n(req, "الاسم يجب أن يكون بين 2 و 30 حرفًا.", "Name must be 2-30 characters.")
+        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ 2 أ¯طںآ½ 30 أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Name must be 2-30 characters.")
       });
       return;
     }
@@ -2237,19 +2276,19 @@ async function handleApi(req, res) {
     const cleanReason = String(reason || "").trim();
     if (!isValidUsername(username) || !users.has(username)) {
       sendJson(res, 404, {
-        error: i18n(req, "الحساب غير موجود.", "Account not found.")
+        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Account not found.")
       });
       return;
     }
     if (!isBanned(username)) {
       sendJson(res, 400, {
-        error: i18n(req, "هذا الحساب ليس محظورًا.", "This account is not banned.")
+        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "This account is not banned.")
       });
       return;
     }
     if (cleanReason.length < 8 || cleanReason.length > 500) {
       sendJson(res, 400, {
-        error: i18n(req, "سبب الطلب يجب أن يكون بين 8 و 500 حرف.", "Appeal reason must be 8-500 characters.")
+        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ 8 أ¯طںآ½ 500 أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Appeal reason must be 8-500 characters.")
       });
       return;
     }
@@ -2274,14 +2313,14 @@ async function handleApi(req, res) {
     const decodedUsername = safeDecodeURIComponent(pathname.slice(appealPrefix.length));
     if (decodedUsername === null) {
       sendJson(res, 400, {
-        error: i18n(req, "معرف المستخدم غير صالح.", "Invalid user identifier.")
+        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid user identifier.")
       });
       return;
     }
     const username = normalizeUsername(decodedUsername);
     if (!isValidUsername(username) || !users.has(username)) {
       sendJson(res, 404, {
-        error: i18n(req, "الحساب غير موجود.", "Account not found.")
+        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Account not found.")
       });
       return;
     }
@@ -2298,7 +2337,7 @@ async function handleApi(req, res) {
     const username = getUserFromRequest(req);
     if (!username) {
       sendJson(res, 401, {
-        error: i18n(req, "غير مصرح.", "Unauthorized.")
+        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.")
       });
       return;
     }
@@ -2317,7 +2356,7 @@ async function handleApi(req, res) {
   if (req.method === "GET" && pathname === "/api/admin/ban-appeals") {
     const username = getUserFromRequest(req);
     if (!username) {
-      sendJson(res, 401, { error: i18n(req, "غير مصرح.", "Unauthorized.") });
+      sendJson(res, 401, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.") });
       return;
     }
     if (!assertSupervisor(req, res, username)) {
@@ -2337,7 +2376,7 @@ async function handleApi(req, res) {
   if (req.method === "GET" && pathname === "/api/admin/users") {
     const username = getUserFromRequest(req);
     if (!username) {
-      sendJson(res, 401, { error: i18n(req, "غير مصرح.", "Unauthorized.") });
+      sendJson(res, 401, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.") });
       return;
     }
     if (!assertSupervisor(req, res, username)) {
@@ -2365,7 +2404,7 @@ async function handleApi(req, res) {
   if (req.method === "POST" && pathname === "/api/admin/site-announcement") {
     const username = getUserFromRequest(req);
     if (!username) {
-      sendJson(res, 401, { error: i18n(req, "غير مصرح.", "Unauthorized.") });
+      sendJson(res, 401, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.") });
       return;
     }
     if (!assertSupervisor(req, res, username)) {
@@ -2375,13 +2414,13 @@ async function handleApi(req, res) {
     const cleanText = String(text || "").trim();
     if (!cleanText) {
       sendJson(res, 400, {
-        error: i18n(req, "الرسالة العامة مطلوبة.", "Announcement text is required.")
+        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Announcement text is required.")
       });
       return;
     }
     if (cleanText.length > 500) {
       sendJson(res, 400, {
-        error: i18n(req, "الرسالة العامة طويلة جدًا (الحد 500 حرف).", "Announcement is too long (max 500 chars).")
+        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ (أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ 500 أ¯طںآ½أ¯طںآ½أ¯طںآ½).", "Announcement is too long (max 500 chars).")
       });
       return;
     }
@@ -2400,7 +2439,7 @@ async function handleApi(req, res) {
   if (req.method === "POST" && pathname === "/api/admin/ban-user") {
     const username = getUserFromRequest(req);
     if (!username) {
-      sendJson(res, 401, { error: i18n(req, "غير مصرح.", "Unauthorized.") });
+      sendJson(res, 401, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.") });
       return;
     }
     if (!assertSupervisor(req, res, username)) {
@@ -2410,15 +2449,15 @@ async function handleApi(req, res) {
     const target = normalizeUsername(rawTarget);
     const cleanReason = String(reason || "").trim();
     if (!isValidUsername(target) || !users.has(target)) {
-      sendJson(res, 404, { error: i18n(req, "الحساب غير موجود.", "Account not found.") });
+      sendJson(res, 404, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Account not found.") });
       return;
     }
     if (isSupervisor(target)) {
-      sendJson(res, 400, { error: i18n(req, "لا يمكن حظر حساب المشرف.", "Supervisor account cannot be banned.") });
+      sendJson(res, 400, { error: i18n(req, "أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Supervisor account cannot be banned.") });
       return;
     }
     if (cleanReason.length < 3 || cleanReason.length > 300) {
-      sendJson(res, 400, { error: i18n(req, "سبب الحظر يجب أن يكون بين 3 و 300 حرف.", "Ban reason must be 3-300 characters.") });
+      sendJson(res, 400, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ 3 أ¯طںآ½ 300 أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Ban reason must be 3-300 characters.") });
       return;
     }
     bannedUsers.set(target, {
@@ -2436,7 +2475,7 @@ async function handleApi(req, res) {
   if (req.method === "POST" && pathname === "/api/admin/unban-user") {
     const username = getUserFromRequest(req);
     if (!username) {
-      sendJson(res, 401, { error: i18n(req, "غير مصرح.", "Unauthorized.") });
+      sendJson(res, 401, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.") });
       return;
     }
     if (!assertSupervisor(req, res, username)) {
@@ -2446,7 +2485,7 @@ async function handleApi(req, res) {
     const target = normalizeUsername(rawTarget);
     const cleanNote = String(note || "").trim();
     if (!isValidUsername(target) || !users.has(target)) {
-      sendJson(res, 404, { error: i18n(req, "الحساب غير موجود.", "Account not found.") });
+      sendJson(res, 404, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Account not found.") });
       return;
     }
     bannedUsers.delete(target);
@@ -2466,7 +2505,7 @@ async function handleApi(req, res) {
   if (req.method === "POST" && pathname === "/api/admin/delete-user") {
     const username = getUserFromRequest(req);
     if (!username) {
-      sendJson(res, 401, { error: i18n(req, "غير مصرح.", "Unauthorized.") });
+      sendJson(res, 401, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.") });
       return;
     }
     if (!assertSupervisor(req, res, username)) {
@@ -2475,11 +2514,11 @@ async function handleApi(req, res) {
     const { username: rawTarget } = await parseBody(req);
     const target = normalizeUsername(rawTarget);
     if (!isValidUsername(target) || !users.has(target)) {
-      sendJson(res, 404, { error: i18n(req, "الحساب غير موجود.", "Account not found.") });
+      sendJson(res, 404, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Account not found.") });
       return;
     }
     if (isSupervisor(target)) {
-      sendJson(res, 400, { error: i18n(req, "لا يمكن حذف حساب المشرف.", "Supervisor account cannot be deleted.") });
+      sendJson(res, 400, { error: i18n(req, "أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Supervisor account cannot be deleted.") });
       return;
     }
 
@@ -2498,7 +2537,7 @@ async function handleApi(req, res) {
   if (req.method === "POST" && pathname === "/api/admin/ban-appeals/decision") {
     const username = getUserFromRequest(req);
     if (!username) {
-      sendJson(res, 401, { error: i18n(req, "غير مصرح.", "Unauthorized.") });
+      sendJson(res, 401, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.") });
       return;
     }
     if (!assertSupervisor(req, res, username)) {
@@ -2509,11 +2548,11 @@ async function handleApi(req, res) {
     const cleanAction = String(action || "").trim().toLowerCase();
     const cleanNote = String(note || "").trim();
     if (!isValidUsername(target) || !unbanRequests.has(target)) {
-      sendJson(res, 404, { error: i18n(req, "طلب غير موجود.", "Request not found.") });
+      sendJson(res, 404, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Request not found.") });
       return;
     }
     if (cleanAction !== "approve" && cleanAction !== "reject") {
-      sendJson(res, 400, { error: i18n(req, "إجراء غير صالح.", "Invalid action.") });
+      sendJson(res, 400, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid action.") });
       return;
     }
     const request = unbanRequests.get(target);
@@ -2533,7 +2572,7 @@ async function handleApi(req, res) {
   if (req.method === "GET" && pathname === "/api/profile") {
     const username = getUserFromRequest(req);
     if (!username) {
-      sendJson(res, 401, { error: i18n(req, "غير مصرح.", "Unauthorized.") });
+      sendJson(res, 401, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.") });
       return;
     }
     if (!assertNotBanned(req, res, username)) {
@@ -2556,7 +2595,7 @@ async function handleApi(req, res) {
   if (req.method === "PATCH" && pathname === "/api/profile") {
     const username = getUserFromRequest(req);
     if (!username) {
-      sendJson(res, 401, { error: i18n(req, "غير مصرح.", "Unauthorized.") });
+      sendJson(res, 401, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.") });
       return;
     }
     if (!assertNotBanned(req, res, username)) {
@@ -2565,7 +2604,7 @@ async function handleApi(req, res) {
     const isRegistered = users.has(username);
     const isGuest = guestUsers.has(username);
     if (!isRegistered && !isGuest) {
-      sendJson(res, 404, { error: i18n(req, "الحساب غير موجود.", "Account not found.") });
+      sendJson(res, 404, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Account not found.") });
       return;
     }
     const { displayName, avatarDataUrl } = await parseBody(req);
@@ -2575,7 +2614,7 @@ async function handleApi(req, res) {
       const cleanName = String(displayName || "").trim();
       if (cleanName.length < 2 || cleanName.length > 30) {
         sendJson(res, 400, {
-          error: i18n(req, "الاسم الظاهر يجب أن يكون بين 2 و 30 حرفًا.", "Display name must be 2 to 30 characters.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ 2 أ¯طںآ½ 30 أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Display name must be 2 to 30 characters.")
         });
         return;
       }
@@ -2590,7 +2629,7 @@ async function handleApi(req, res) {
         const isAllowed = /^data:image\/(png|jpe?g|webp);base64,/i.test(rawAvatar);
         if (!isAllowed || rawAvatar.length > 300000) {
           sendJson(res, 400, {
-            error: i18n(req, "الصورة غير صالحة أو كبيرة جدًا.", "Avatar is invalid or too large.")
+            error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Avatar is invalid or too large.")
           });
           return;
         }
@@ -2617,7 +2656,7 @@ async function handleApi(req, res) {
   ) {
     const viewer = getUserFromRequest(req);
     if (!viewer) {
-      sendJson(res, 401, { error: i18n(req, "غير مصرح.", "Unauthorized.") });
+      sendJson(res, 401, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.") });
       return;
     }
     if (!assertNotBanned(req, res, viewer)) {
@@ -2626,16 +2665,16 @@ async function handleApi(req, res) {
     const rawTarget = pathname.slice(userProfilePrefix.length, pathname.length - userProfileSuffix.length);
     const decodedTarget = safeDecodeURIComponent(String(rawTarget || ""));
     if (decodedTarget === null) {
-      sendJson(res, 400, { error: i18n(req, "معرف المستخدم غير صالح.", "Invalid user identifier.") });
+      sendJson(res, 400, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid user identifier.") });
       return;
     }
     const target = normalizeUsername(decodedTarget);
     if (!isValidUsername(target)) {
-      sendJson(res, 400, { error: i18n(req, "معرف المستخدم غير صالح.", "Invalid user identifier.") });
+      sendJson(res, 400, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid user identifier.") });
       return;
     }
     if (!users.has(target) && !guestUsers.has(target)) {
-      sendJson(res, 404, { error: i18n(req, "المستخدم غير موجود.", "User not found.") });
+      sendJson(res, 404, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "User not found.") });
       return;
     }
     const allowModerationInfo = isSupervisor(viewer) || viewer === target;
@@ -2655,7 +2694,7 @@ async function handleApi(req, res) {
     const username = getUserFromRequest(req);
     if (!username) {
       sendJson(res, 401, {
-        error: i18n(req, "غير مصرح.", "Unauthorized.")
+        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.")
       });
       return;
     }
@@ -2669,7 +2708,7 @@ async function handleApi(req, res) {
       sendJson(res, 400, {
         error: i18n(
           req,
-          "اسم الغرفة طويل جدًا (الحد 40 حرفًا).",
+          "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ (أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ 40 أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½).",
           "Room name is too long (max 40 characters)."
         )
       });
@@ -2682,7 +2721,7 @@ async function handleApi(req, res) {
 
     const room = {
       code,
-      name: cleanRoomName || i18n(req, "غرفة جديدة", "New Room"),
+      name: cleanRoomName || i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½", "New Room"),
       host: username,
       pendingHostRestore: null,
       members: new Set([username]),
@@ -2706,7 +2745,7 @@ async function handleApi(req, res) {
     const username = getUserFromRequest(req);
     if (!username) {
       sendJson(res, 401, {
-        error: i18n(req, "غير مصرح.", "Unauthorized.")
+        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.")
       });
       return;
     }
@@ -2731,7 +2770,7 @@ async function handleApi(req, res) {
     const username = getUserFromRequest(req);
     if (!username) {
       sendJson(res, 401, {
-        error: i18n(req, "غير مصرح.", "Unauthorized.")
+        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.")
       });
       return;
     }
@@ -2743,7 +2782,7 @@ async function handleApi(req, res) {
     const roomCode = String(code || "").trim().toUpperCase();
     if (!roomCode || !rooms.has(roomCode)) {
       sendJson(res, 404, {
-        error: i18n(req, "الغرفة غير موجودة.", "Room not found.")
+        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Room not found.")
       });
       return;
     }
@@ -2756,12 +2795,12 @@ async function handleApi(req, res) {
         joinUserToRoom(room, username);
       } else if (room.joinRequests.has(username)) {
         sendJson(res, 403, {
-          error: i18n(req, "طلب الانضمام لا يزال قيد الانتظار.", "Your join request is still pending.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Your join request is still pending.")
         });
         return;
       } else {
         sendJson(res, 403, {
-          error: i18n(req, "لا يمكنك الانضمام حتى يوافق القائد على طلبك.", "You cannot join until the leader approves your request.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "You cannot join until the leader approves your request.")
         });
         return;
       }
@@ -2775,7 +2814,7 @@ async function handleApi(req, res) {
     const username = getUserFromRequest(req);
     if (!username) {
       sendJson(res, 401, {
-        error: i18n(req, "غير مصرح.", "Unauthorized.")
+        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.")
       });
       return;
     }
@@ -2785,7 +2824,7 @@ async function handleApi(req, res) {
 
     if (!rooms.has(roomPath.code)) {
       sendJson(res, 404, {
-        error: i18n(req, "الغرفة غير موجودة.", "Room not found.")
+        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Room not found.")
       });
       return;
     }
@@ -2841,7 +2880,7 @@ async function handleApi(req, res) {
 
     if (!room.members.has(username)) {
       sendJson(res, 403, {
-        error: i18n(req, "انضم إلى هذه الغرفة أولًا.", "Join this room first.")
+        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Join this room first.")
       });
       return;
     }
@@ -2874,7 +2913,7 @@ async function handleApi(req, res) {
     if (req.method === "GET" && roomPath.action === "requests") {
       if (room.host !== username) {
         sendJson(res, 403, {
-          error: i18n(req, "فقط قائد الغرفة يمكنه عرض الطلبات.", "Only the room leader can view requests.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Only the room leader can view requests.")
         });
         return;
       }
@@ -2885,7 +2924,7 @@ async function handleApi(req, res) {
     if (req.method === "POST" && roomPath.action === "requests") {
       if (room.host !== username) {
         sendJson(res, 403, {
-          error: i18n(req, "فقط قائد الغرفة يمكنه إدارة الطلبات.", "Only the room leader can manage requests.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Only the room leader can manage requests.")
         });
         return;
       }
@@ -2894,19 +2933,19 @@ async function handleApi(req, res) {
       const cleanAction = String(action || "").trim().toLowerCase();
       if (!isValidUsername(target)) {
         sendJson(res, 400, {
-          error: i18n(req, "اسم اللاعب المستهدف مطلوب.", "Target username is required.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Target username is required.")
         });
         return;
       }
       if (!room.joinRequests.has(target)) {
         sendJson(res, 404, {
-          error: i18n(req, "لا يوجد طلب انضمام لهذا اللاعب.", "No join request found for this player.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "No join request found for this player.")
         });
         return;
       }
       if (cleanAction !== "approve" && cleanAction !== "reject") {
         sendJson(res, 400, {
-          error: i18n(req, "إجراء غير صالح.", "Invalid action.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid action.")
         });
         return;
       }
@@ -2936,13 +2975,13 @@ async function handleApi(req, res) {
       const messageText = String(text || "").trim();
       if (!messageText) {
         sendJson(res, 400, {
-          error: i18n(req, "الرسالة فارغة.", "Message is empty.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Message is empty.")
         });
         return;
       }
       if (messageText.length > 300) {
         sendJson(res, 400, {
-          error: i18n(req, "الرسالة طويلة جدًا.", "Message is too long.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Message is too long.")
         });
         return;
       }
@@ -2950,7 +2989,7 @@ async function handleApi(req, res) {
       const normalizedReplyToMessageId = normalizeReplyToMessageId(replyToMessageId);
       if (Number.isNaN(normalizedReplyToMessageId)) {
         sendJson(res, 400, {
-          error: i18n(req, "معرف الرد غير صالح.", "Invalid reply identifier.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid reply identifier.")
         });
         return;
       }
@@ -2961,7 +3000,7 @@ async function handleApi(req, res) {
           sendJson(res, 400, {
             error: i18n(
               req,
-              "لا يمكن الرد على هذه الرسالة.",
+              "أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.",
               "You can only reply to an existing player message."
             )
           });
@@ -2972,7 +3011,7 @@ async function handleApi(req, res) {
       const normalizedClientMessageId = normalizeClientMessageId(clientMessageId);
       if (clientMessageId !== undefined && !normalizedClientMessageId) {
         sendJson(res, 400, {
-          error: i18n(req, "معرف الرسالة غير صالح.", "Invalid message identifier.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid message identifier.")
         });
         return;
       }
@@ -3003,7 +3042,7 @@ async function handleApi(req, res) {
       if (room.host !== username) {
         sendJson(res, 403, {
           code: "VIDEO_HOST_ONLY",
-          error: i18n(req, "فقط قائد الغرفة يمكنه رفع الفيديو.", "Only the room leader can upload videos.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Only the room leader can upload videos.")
         });
         return;
       }
@@ -3013,14 +3052,14 @@ async function handleApi(req, res) {
       if (!uploaded || !uploaded.data || uploaded.data.length === 0) {
         sendJson(res, 400, {
           code: "VIDEO_FILE_REQUIRED",
-          error: i18n(req, "اختر ملف فيديو صالح.", "Please choose a valid video file.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Please choose a valid video file.")
         });
         return;
       }
       if (uploaded.data.length > ROOM_VIDEO_MAX_BYTES) {
         sendJson(res, 413, {
           code: "VIDEO_TOO_LARGE",
-          error: i18n(req, "حجم الفيديو كبير جدًا (الحد 80MB).", "Video file is too large (max 80MB).")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ (أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ 80MB).", "Video file is too large (max 80MB).")
         });
         return;
       }
@@ -3029,7 +3068,7 @@ async function handleApi(req, res) {
       if (!ROOM_VIDEO_ALLOWED_MIME_TYPES.has(mimeType)) {
         sendJson(res, 415, {
           code: "VIDEO_INVALID_TYPE",
-          error: i18n(req, "نوع الفيديو غير مدعوم. استخدم MP4 أو WebM أو OGG.", "Unsupported video type. Use MP4, WebM or OGG.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½. أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ MP4 أ¯طںآ½أ¯طںآ½ WebM أ¯طںآ½أ¯طںآ½ OGG.", "Unsupported video type. Use MP4, WebM or OGG.")
         });
         return;
       }
@@ -3037,20 +3076,20 @@ async function handleApi(req, res) {
       if (!ensureUploadsDir()) {
         sendJson(res, 503, {
           code: "VIDEO_STORAGE_UNAVAILABLE",
-          error: i18n(req, "تعذر حفظ الفيديو على الخادم حاليًا.", "Server storage is unavailable right now.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Server storage is unavailable right now.")
         });
         return;
       }
       const cleanFileName = sanitizeUploadedFilename(uploaded.filename || "room-video");
       const extension = normalizeVideoExtension(cleanFileName, mimeType);
       const storedFileName = `room-${room.code.toLowerCase()}-${Date.now()}-${crypto.randomBytes(6).toString("hex")}${extension}`;
-      const absolutePath = path.join(ROOM_VIDEO_UPLOAD_DIR, storedFileName);
+      const absolutePath = path.join(getRoomVideoUploadDir(), storedFileName);
       try {
         fs.writeFileSync(absolutePath, uploaded.data);
       } catch (_error) {
         sendJson(res, 503, {
           code: "VIDEO_STORAGE_UNAVAILABLE",
-          error: i18n(req, "تعذر حفظ الفيديو على الخادم حاليًا.", "Server storage is unavailable right now.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Server storage is unavailable right now.")
         });
         return;
       }
@@ -3061,7 +3100,7 @@ async function handleApi(req, res) {
         id: randomToken(),
         sourceType: "file",
         youtubeId: "",
-        src: `/uploads/room-videos/${storedFileName}`,
+        src: `${ROOM_VIDEO_PUBLIC_PREFIX}${storedFileName}`,
         filename: cleanFileName,
         mimeType,
         size: uploaded.data.length,
@@ -3086,7 +3125,7 @@ async function handleApi(req, res) {
       if (room.host !== username) {
         sendJson(res, 403, {
           code: "VIDEO_HOST_ONLY",
-          error: i18n(req, "فقط قائد الغرفة يمكنه ضبط مصدر الفيديو.", "Only the room leader can set video source.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Only the room leader can set video source.")
         });
         return;
       }
@@ -3096,7 +3135,7 @@ async function handleApi(req, res) {
       if (rawInput.length < 2) {
         sendJson(res, 400, {
           code: "YOUTUBE_INPUT_REQUIRED",
-          error: i18n(req, "أدخل رابط يوتيوب أو نص بحث.", "Enter a YouTube URL or search text.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Enter a YouTube URL or search text.")
         });
         return;
       }
@@ -3107,7 +3146,7 @@ async function handleApi(req, res) {
       } catch (_error) {
         sendJson(res, 502, {
           code: "YOUTUBE_RESOLVE_FAILED",
-          error: i18n(req, "تعذر الوصول إلى يوتيوب حاليًا. حاول مرة أخرى.", "Could not reach YouTube right now. Try again.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½. أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Could not reach YouTube right now. Try again.")
         });
         return;
       }
@@ -3115,39 +3154,16 @@ async function handleApi(req, res) {
       if (!resolved?.videoId) {
         sendJson(res, 404, {
           code: "YOUTUBE_NOT_FOUND",
-          error: i18n(req, "لم يتم العثور على فيديو مناسب.", "No matching YouTube video was found.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "No matching YouTube video was found.")
         });
         return;
       }
 
-      const canStoreRoomVideos = ensureUploadsDir();
-      const useYouTubeProxyFallback = async () => {
-        try {
-          const direct = await getYouTubeDirectPlayableSource(resolved.videoId);
-          setRoomVideoFromYouTubeProxy(room, resolved.videoId, direct, username);
-          sendJson(res, 201, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });
-          return true;
-        } catch (fallbackError) {
-          const fallbackCode = String(fallbackError?.code || "");
-          if (fallbackCode === "YOUTUBE_FORMAT_UNSUPPORTED") {
-            sendJson(res, 415, {
-              code: "YOUTUBE_FORMAT_UNSUPPORTED",
-              error: i18n(req, "تعذر العثور على صيغة فيديو مدعومة.", "No supported downloadable video format was found.")
-            });
-            return true;
-          }
-          console.warn("YouTube proxy fallback failed:", fallbackError?.message || fallbackError);
-          sendJson(res, 502, {
-            code: "YOUTUBE_DOWNLOAD_FAILED",
-            error: i18n(req, "تعذر تنزيل فيديو يوتيوب الآن. حاول فيديو آخر.", "Could not download this YouTube video right now. Try another one.")
-          });
-          return true;
-        }
-      };
-
-      if (!canStoreRoomVideos) {
-        console.warn("Uploads directory unavailable, using YouTube proxy fallback directly.");
-        await useYouTubeProxyFallback();
+      if (!ensureUploadsDir()) {
+        sendJson(res, 503, {
+          code: "VIDEO_STORAGE_UNAVAILABLE",
+          error: i18n(req, "طھط¹ط°ط± ط­ظپط¸ ط§ظ„ظپظٹط¯ظٹظˆ ط¹ظ„ظ‰ ط§ظ„ط®ط§ط¯ظ… ط­ط§ظ„ظٹظ‹ط§.", "Server storage is unavailable right now.")
+        });
         return;
       }
 
@@ -3162,14 +3178,14 @@ async function handleApi(req, res) {
           if (code === "YOUTUBE_VIDEO_TOO_LARGE") {
             sendJson(res, 413, {
               code: "YOUTUBE_VIDEO_TOO_LARGE",
-              error: i18n(req, "الفيديو كبير جدًا (الحد 80MB).", "YouTube video is too large (max 80MB).")
+              error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ (أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ 80MB).", "YouTube video is too large (max 80MB).")
             });
             return;
           }
           if (code === "YOUTUBE_FORMAT_UNSUPPORTED") {
             sendJson(res, 415, {
               code: "YOUTUBE_FORMAT_UNSUPPORTED",
-              error: i18n(req, "تعذر العثور على صيغة فيديو مدعومة.", "No supported downloadable video format was found.")
+              error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "No supported downloadable video format was found.")
             });
             return;
           }
@@ -3178,12 +3194,15 @@ async function handleApi(req, res) {
           if (upstreamStatus >= 400 && upstreamStatus < 500 && upstreamStatus !== 429) {
             sendJson(res, 404, {
               code: "YOUTUBE_NOT_FOUND",
-              error: i18n(req, "لم يتم العثور على فيديو مناسب.", "No matching YouTube video was found.")
+              error: i18n(req, "أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "No matching YouTube video was found.")
             });
             return;
           }
-          console.warn("YouTube local download failed, trying proxy stream fallback:", message || error);
-          await useYouTubeProxyFallback();
+          console.warn("YouTube local download failed:", message || error);
+          sendJson(res, 502, {
+            code: "YOUTUBE_DOWNLOAD_FAILED",
+            error: i18n(req, "تعذر تنزيل فيديو يوتيوب الآن. حاول فيديو آخر.", "Could not download this YouTube video right now. Try another one.")
+          });
           return;
         }
         selectedVideo = rememberYouTubeCache(resolved.videoId, downloaded) || {
@@ -3201,7 +3220,7 @@ async function handleApi(req, res) {
         id: randomToken(),
         sourceType: "file",
         youtubeId: resolved.videoId,
-        src: `/uploads/room-videos/${selectedVideo.storedFileName}`,
+        src: `${ROOM_VIDEO_PUBLIC_PREFIX}${selectedVideo.storedFileName}`,
         filename: selectedVideo.cleanFileName,
         mimeType: selectedVideo.mimeType,
         size: Number(selectedVideo.downloadedBytes || 0),
@@ -3226,14 +3245,14 @@ async function handleApi(req, res) {
       if (room.host !== username) {
         sendJson(res, 403, {
           code: "VIDEO_HOST_ONLY",
-          error: i18n(req, "فقط قائد الغرفة يمكنه مزامنة الفيديو.", "Only the room leader can sync the video.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Only the room leader can sync the video.")
         });
         return;
       }
       if (!room.video) {
         sendJson(res, 404, {
           code: "VIDEO_NOT_FOUND",
-          error: i18n(req, "لا يوجد فيديو في الغرفة.", "No room video is available.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "No room video is available.")
         });
         return;
       }
@@ -3252,7 +3271,7 @@ async function handleApi(req, res) {
       const cleanAction = String(action || "").trim().toLowerCase();
       if (!["play", "pause", "seek", "rate", "stop"].includes(cleanAction)) {
         sendJson(res, 400, {
-          error: i18n(req, "إجراء مزامنة فيديو غير صالح.", "Invalid video sync action.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid video sync action.")
         });
         return;
       }
@@ -3261,7 +3280,7 @@ async function handleApi(req, res) {
       if (clientVideoId && clientVideoId !== String(room.video.id || "")) {
         sendJson(res, 409, {
           code: "VIDEO_STALE",
-          error: i18n(req, "هذه النسخة من الفيديو قديمة. قم بتحديث الغرفة.", "This video version is outdated. Refresh room data.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½. أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "This video version is outdated. Refresh room data.")
         });
         return;
       }
@@ -3311,7 +3330,7 @@ async function handleApi(req, res) {
     if (req.method === "POST" && roomPath.action === "kick") {
       if (room.host !== username) {
         sendJson(res, 403, {
-          error: i18n(req, "فقط قائد الغرفة يمكنه طرد اللاعبين.", "Only the room leader can kick players.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Only the room leader can kick players.")
         });
         return;
       }
@@ -3320,26 +3339,26 @@ async function handleApi(req, res) {
       const target = normalizeUsername(targetRaw);
       if (!isValidUsername(target)) {
         sendJson(res, 400, {
-          error: i18n(req, "اسم اللاعب المستهدف مطلوب.", "Target username is required.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Target username is required.")
         });
         return;
       }
       if (target === room.host) {
         sendJson(res, 400, {
-          error: i18n(req, "لا يمكن للقائد طرد نفسه.", "Leader cannot kick themselves.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Leader cannot kick themselves.")
         });
         return;
       }
       if (isSupervisor(target)) {
         sendJson(res, 403, {
           code: "SUPERVISOR_KICK_FORBIDDEN",
-          error: i18n(req, "لا يمكن طرد مشرف من الغرفة.", "A supervisor cannot be kicked from this room.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "A supervisor cannot be kicked from this room.")
         });
         return;
       }
       if (!room.members.has(target)) {
         sendJson(res, 404, {
-          error: i18n(req, "اللاعب غير موجود في هذه الغرفة.", "Player is not in this room.")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Player is not in this room.")
         });
         return;
       }
@@ -3357,13 +3376,13 @@ async function handleApi(req, res) {
     }
 
     sendJson(res, 404, {
-      error: i18n(req, "مسار الغرفة غير موجود.", "Room endpoint not found.")
+      error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Room endpoint not found.")
     });
     return;
   }
 
   sendJson(res, 404, {
-    error: i18n(req, "المسار غير موجود.", "Endpoint not found.")
+    error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Endpoint not found.")
   });
 }
 
@@ -3379,24 +3398,24 @@ const server = http.createServer(async (req, res) => {
   } catch (error) {
     if (error.message === "Payload too large") {
       sendJson(res, 413, {
-        error: i18n(req, "حجم البيانات كبير جدًا.", "Payload is too large.")
+        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Payload is too large.")
       });
       return;
     }
     if (error.message === "Invalid JSON") {
       sendJson(res, 400, {
-        error: i18n(req, "صيغة JSON غير صحيحة.", "Invalid JSON body.")
+        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ JSON أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid JSON body.")
       });
       return;
     }
     if (error.message === "Invalid multipart form data") {
       sendJson(res, 400, {
-        error: i18n(req, "ملف الفيديو غير صالح.", "Invalid video upload payload.")
+        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid video upload payload.")
       });
       return;
     }
     sendJson(res, 500, {
-      error: i18n(req, "خطأ داخلي في الخادم.", "Internal server error.")
+      error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Internal server error.")
     });
   }
 });
