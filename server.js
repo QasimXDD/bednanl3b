@@ -11,6 +11,7 @@ const ROOM_VIDEO_UPLOAD_DIR = path.join(UPLOADS_DIR, "room-videos");
 const USERS_FILE = path.join(DATA_DIR, "users.json");
 const MODERATION_FILE = path.join(DATA_DIR, "moderation.json");
 const SUPERVISOR_USERNAME = "qasim";
+const GUEST_USERNAME_PREFIX = "guest_";
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7;
 const USERNAME_MIN_LENGTH = 3;
 const USERNAME_MAX_LENGTH = 30;
@@ -60,6 +61,7 @@ const MIME_TYPES = {
 };
 
 const users = new Map();
+const guestUsers = new Map();
 const sessions = new Map();
 const rooms = new Map();
 const userLastSeen = new Map();
@@ -280,6 +282,82 @@ function normalizeUsername(value) {
   return String(value || "").trim().toLowerCase();
 }
 
+function sanitizeGuestDisplayName(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, 30);
+}
+
+function createGuestUsername(name) {
+  const cleaned = String(name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_")
+    .replace(/[^\p{L}\p{N}_-]/gu, "")
+    .slice(0, 20);
+  const base = cleaned || "guest";
+  let username = `${GUEST_USERNAME_PREFIX}${base}`;
+  if (username.length < USERNAME_MIN_LENGTH) {
+    username = `${GUEST_USERNAME_PREFIX}user`;
+  }
+  if (!users.has(username) && !guestUsers.has(username)) {
+    return username.slice(0, USERNAME_MAX_LENGTH);
+  }
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    const suffix = crypto.randomBytes(2).toString("hex");
+    const withSuffix = `${username.slice(0, Math.max(1, USERNAME_MAX_LENGTH - suffix.length - 1))}_${suffix}`;
+    if (!users.has(withSuffix) && !guestUsers.has(withSuffix)) {
+      return withSuffix;
+    }
+  }
+  return `${GUEST_USERNAME_PREFIX}${crypto.randomBytes(5).toString("hex")}`.slice(0, USERNAME_MAX_LENGTH);
+}
+
+function getSessionMeta(entry) {
+  if (typeof entry === "string") {
+    return {
+      username: normalizeUsername(entry),
+      expiresAt: Date.now() + SESSION_TTL_MS,
+      isGuest: false
+    };
+  }
+  return {
+    username: normalizeUsername(entry?.username),
+    expiresAt: Number(entry?.expiresAt) || 0,
+    isGuest: Boolean(entry?.isGuest)
+  };
+}
+
+function hasActiveSessionForUser(username, exceptToken = "") {
+  const target = normalizeUsername(username);
+  if (!target) {
+    return false;
+  }
+  let found = false;
+  sessions.forEach((entry, token) => {
+    if (token === exceptToken || found) {
+      return;
+    }
+    const meta = getSessionMeta(entry);
+    if (meta.username !== target) {
+      return;
+    }
+    if (meta.expiresAt && meta.expiresAt < Date.now()) {
+      return;
+    }
+    found = true;
+  });
+  return found;
+}
+
+function cleanupGuestUser(username) {
+  const normalized = normalizeUsername(username);
+  if (!guestUsers.has(normalized)) {
+    return;
+  }
+  removeUserFromAllRooms(normalized);
+  guestUsers.delete(normalized);
+  userLastSeen.delete(normalized);
+}
+
 function isValidUsername(username) {
   return (
     typeof username === "string" &&
@@ -411,7 +489,7 @@ function touchUser(username) {
 }
 
 function publicProfile(username) {
-  const info = users.get(username);
+  const info = users.get(username) || guestUsers.get(username);
   if (!info) {
     return null;
   }
@@ -421,17 +499,21 @@ function publicProfile(username) {
     avatarDataUrl: info.avatarDataUrl || "",
     createdAt: info.createdAt,
     isOnline: isUserOnline(username),
-    isSupervisor: isSupervisor(username)
+    isSupervisor: isSupervisor(username),
+    isGuest: guestUsers.has(username)
   };
 }
 
-function createSession(username) {
+function createSession(username, options = {}) {
   const token = randomToken();
+  const normalizedUsername = normalizeUsername(username);
+  const isGuest = Boolean(options.isGuest);
   sessions.set(token, {
-    username,
-    expiresAt: Date.now() + SESSION_TTL_MS
+    username: normalizedUsername,
+    expiresAt: Date.now() + SESSION_TTL_MS,
+    isGuest
   });
-  touchUser(username);
+  touchUser(normalizedUsername);
   return token;
 }
 
@@ -439,21 +521,19 @@ function getSessionUsername(token) {
   if (!token || !sessions.has(token)) {
     return null;
   }
-  const entry = sessions.get(token);
-  const normalized =
-    typeof entry === "string"
-      ? { username: entry, expiresAt: Date.now() + SESSION_TTL_MS }
-      : {
-          username: normalizeUsername(entry?.username),
-          expiresAt: Number(entry?.expiresAt) || 0
-        };
-
-  if (!normalized.username || !users.has(normalized.username)) {
+  const normalized = getSessionMeta(sessions.get(token));
+  const exists = normalized.isGuest
+    ? guestUsers.has(normalized.username)
+    : users.has(normalized.username);
+  if (!normalized.username || !exists) {
     sessions.delete(token);
     return null;
   }
   if (normalized.expiresAt && normalized.expiresAt < Date.now()) {
     sessions.delete(token);
+    if (normalized.isGuest && !hasActiveSessionForUser(normalized.username, token)) {
+      cleanupGuestUser(normalized.username);
+    }
     return null;
   }
 
@@ -464,8 +544,7 @@ function getSessionUsername(token) {
 
 function removeUserSessions(username) {
   sessions.forEach((entry, token) => {
-    const sessionUser =
-      typeof entry === "string" ? entry : normalizeUsername(entry?.username);
+    const sessionUser = getSessionMeta(entry).username;
     if (sessionUser === username) {
       sessions.delete(token);
     }
@@ -501,6 +580,11 @@ function removeUserFromAllRooms(username) {
 function countOnlineUsers() {
   let count = 0;
   users.forEach((_, username) => {
+    if (isUserOnline(username)) {
+      count += 1;
+    }
+  });
+  guestUsers.forEach((_, username) => {
     if (isUserOnline(username)) {
       count += 1;
     }
@@ -1315,10 +1399,41 @@ async function handleApi(req, res) {
     return;
   }
 
+  if (req.method === "POST" && pathname === "/api/guest-login") {
+    const { name } = await parseBody(req);
+    const cleanName = sanitizeGuestDisplayName(name);
+    if (cleanName.length < 2 || cleanName.length > 30) {
+      sendJson(res, 400, {
+        error: i18n(req, "الاسم يجب أن يكون بين 2 و 30 حرفًا.", "Name must be 2-30 characters.")
+      });
+      return;
+    }
+    const username = createGuestUsername(cleanName);
+    guestUsers.set(username, {
+      createdAt: Date.now(),
+      displayName: cleanName,
+      avatarDataUrl: ""
+    });
+    const token = createSession(username, { isGuest: true });
+    sendJson(res, 200, {
+      token,
+      username,
+      displayName: cleanName,
+      isGuest: true,
+      announcement: formatSiteAnnouncement(siteAnnouncement)
+    });
+    return;
+  }
+
   if (req.method === "POST" && pathname === "/api/logout") {
     const token = getBearerToken(req);
     if (token) {
+      const sessionEntry = sessions.get(token);
+      const meta = getSessionMeta(sessionEntry);
       sessions.delete(token);
+      if (meta.isGuest && meta.username && !hasActiveSessionForUser(meta.username, token)) {
+        cleanupGuestUser(meta.username);
+      }
     }
     sendJson(res, 200, { ok: true });
     return;
@@ -1398,6 +1513,7 @@ async function handleApi(req, res) {
     sendJson(res, 200, {
       username,
       isSupervisor: isSupervisor(username),
+      isGuest: guestUsers.has(username),
       banned: isBanned(username),
       ban: formatBanRecord(getBanRecord(username)),
       unbanRequest: formatUnbanRequest(unbanRequests.get(username) || null),
@@ -1654,12 +1770,14 @@ async function handleApi(req, res) {
     if (!assertNotBanned(req, res, username)) {
       return;
     }
-    if (!users.has(username)) {
+    const isRegistered = users.has(username);
+    const isGuest = guestUsers.has(username);
+    if (!isRegistered && !isGuest) {
       sendJson(res, 404, { error: i18n(req, "الحساب غير موجود.", "Account not found.") });
       return;
     }
     const { displayName, avatarDataUrl } = await parseBody(req);
-    const user = users.get(username);
+    const user = isRegistered ? users.get(username) : guestUsers.get(username);
 
     if (displayName !== undefined) {
       const cleanName = String(displayName || "").trim();
@@ -1688,8 +1806,12 @@ async function handleApi(req, res) {
       }
     }
 
-    users.set(username, user);
-    saveUsers();
+    if (isRegistered) {
+      users.set(username, user);
+      saveUsers();
+    } else {
+      guestUsers.set(username, user);
+    }
     sendJson(res, 200, { profile: publicProfile(username), isSelf: true });
     return;
   }
@@ -1720,7 +1842,7 @@ async function handleApi(req, res) {
       sendJson(res, 400, { error: i18n(req, "معرف المستخدم غير صالح.", "Invalid user identifier.") });
       return;
     }
-    if (!users.has(target)) {
+    if (!users.has(target) && !guestUsers.has(target)) {
       sendJson(res, 404, { error: i18n(req, "المستخدم غير موجود.", "User not found.") });
       return;
     }

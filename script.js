@@ -7,6 +7,7 @@ const bannedSection = document.getElementById("bannedSection");
 const tabs = document.querySelectorAll(".tab");
 const authForm = document.getElementById("authForm");
 const authBtn = document.getElementById("authBtn");
+const guestLoginBtn = document.getElementById("guestLoginBtn");
 const logoutBtn = document.getElementById("logoutBtn");
 const currentUser = document.getElementById("currentUser");
 const siteStatsText = document.getElementById("siteStatsText");
@@ -102,6 +103,7 @@ const I18N = {
     passwordLabel: "كلمة المرور",
     authBtnRegister: "إنشاء حساب",
     authBtnLogin: "دخول",
+    guestLoginBtn: "الدخول كضيف",
     lobbyTitle: "اللوبي",
     welcomePrefix: "مرحبًا",
     siteStatsText: "المتواجدون الآن: {online} | داخل الغرف: {inRooms}",
@@ -184,6 +186,7 @@ const I18N = {
     toastInputShort: "اسم المستخدم 3 أحرف على الأقل وكلمة المرور 4 أحرف على الأقل.",
     toastRegisterOk: "تم إنشاء الحساب بنجاح.",
     toastLoginOk: "تم تسجيل الدخول بنجاح.",
+    toastGuestEnter: "تم الدخول كضيف.",
     toastLogoutOk: "تم تسجيل الخروج.",
     toastInvalidCode: "أدخل رمز غرفة صحيح.",
     toastJoinRequestSent: "تم إرسال طلب الانضمام.",
@@ -227,6 +230,7 @@ const I18N = {
     passwordLabel: "Password",
     authBtnRegister: "Create Account",
     authBtnLogin: "Login",
+    guestLoginBtn: "Continue as Guest",
     lobbyTitle: "Lobby",
     welcomePrefix: "Welcome",
     siteStatsText: "Online now: {online} | Inside rooms: {inRooms}",
@@ -309,6 +313,7 @@ const I18N = {
     toastInputShort: "Username must be at least 3 chars and password at least 4 chars.",
     toastRegisterOk: "Account created successfully.",
     toastLoginOk: "Logged in successfully.",
+    toastGuestEnter: "Entered as guest.",
     toastLogoutOk: "Logged out successfully.",
     toastInvalidCode: "Enter a valid room code.",
     toastJoinRequestSent: "Join request sent.",
@@ -1627,6 +1632,9 @@ function applyTranslations() {
   document.getElementById("tabLogin").textContent = t("tabLogin");
   document.getElementById("usernameLabel").textContent = t("usernameLabel");
   document.getElementById("passwordLabel").textContent = t("passwordLabel");
+  if (guestLoginBtn) {
+    guestLoginBtn.textContent = t("guestLoginBtn");
+  }
   document.getElementById("lobbyTitle").textContent = t("lobbyTitle");
   document.getElementById("welcomePrefix").textContent = t("welcomePrefix");
   renderSiteStats(cachedSiteStats);
@@ -1714,6 +1722,13 @@ tabs.forEach((tab) => {
     updateModeUI();
   });
 });
+
+if (guestLoginBtn) {
+  guestLoginBtn.addEventListener("click", () => {
+    sfx("click");
+    window.location.href = "guest.html";
+  });
+}
 
 authForm.addEventListener("submit", async (event) => {
   event.preventDefault();

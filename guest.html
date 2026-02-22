@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>دخول كضيف - Bedna NL3B</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Changa:wght@600;700;800&family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css?v=20260222a">
+</head>
+<body>
+  <main class="guest-page-wrap">
+    <section class="panel auth-panel guest-panel">
+      <h2 id="guestTitle">الدخول كضيف</h2>
+      <p class="muted" id="guestDesc">اكتب اسمك فقط وسيتم إدخالك للموقع مباشرة بدون حساب.</p>
+
+      <form id="guestForm" class="form">
+        <label for="guestName" id="guestNameLabel">الاسم</label>
+        <input id="guestName" name="guestName" type="text" minlength="2" maxlength="30" required>
+        <button id="guestSubmitBtn" class="btn" type="submit">دخول كضيف</button>
+      </form>
+
+      <button id="backToLoginBtn" class="btn btn-ghost auth-guest-btn" type="button">العودة لتسجيل الدخول</button>
+    </section>
+  </main>
+
+  <div id="guestToastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
+  <script src="guest.js?v=20260222a"></script>
+</body>
+</html>
