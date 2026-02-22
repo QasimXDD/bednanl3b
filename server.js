@@ -12,6 +12,7 @@ const USERS_FILE = path.join(DATA_DIR, "users.json");
 const MODERATION_FILE = path.join(DATA_DIR, "moderation.json");
 const SUPERVISOR_USERNAME = "qasim";
 const GUEST_USERNAME_PREFIX = "guest_";
+const SITE_ANNOUNCEMENT_LIVE_MS = 15000;
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7;
 const USERNAME_MIN_LENGTH = 3;
 const USERNAME_MAX_LENGTH = 30;
@@ -436,6 +437,18 @@ function formatSiteAnnouncement(entry) {
   };
 }
 
+function getLiveSiteAnnouncement() {
+  const announcement = formatSiteAnnouncement(siteAnnouncement);
+  if (!announcement) {
+    return null;
+  }
+  const age = Date.now() - Number(announcement.createdAt || 0);
+  if (age < 0 || age > SITE_ANNOUNCEMENT_LIVE_MS) {
+    return null;
+  }
+  return announcement;
+}
+
 function sendBannedResponse(req, res, username) {
   const ban = formatBanRecord(getBanRecord(username));
   sendJson(res, 403, {
@@ -447,7 +460,7 @@ function sendBannedResponse(req, res, username) {
     ),
     ban,
     unbanRequest: formatUnbanRequest(unbanRequests.get(String(username || "").toLowerCase()) || null),
-    announcement: formatSiteAnnouncement(siteAnnouncement)
+    announcement: getLiveSiteAnnouncement()
   });
 }
 
@@ -1360,7 +1373,7 @@ async function handleApi(req, res) {
     });
     saveUsers();
     const token = createSession(cleanUser);
-    sendJson(res, 201, { token, username: cleanUser, announcement: formatSiteAnnouncement(siteAnnouncement) });
+    sendJson(res, 201, { token, username: cleanUser, announcement: getLiveSiteAnnouncement() });
     return;
   }
 
@@ -1395,7 +1408,7 @@ async function handleApi(req, res) {
     }
 
     const token = createSession(cleanUser);
-    sendJson(res, 200, { token, username: cleanUser, announcement: formatSiteAnnouncement(siteAnnouncement) });
+    sendJson(res, 200, { token, username: cleanUser, announcement: getLiveSiteAnnouncement() });
     return;
   }
 
@@ -1420,7 +1433,7 @@ async function handleApi(req, res) {
       username,
       displayName: cleanName,
       isGuest: true,
-      announcement: formatSiteAnnouncement(siteAnnouncement)
+      announcement: getLiveSiteAnnouncement()
     });
     return;
   }
@@ -1497,7 +1510,7 @@ async function handleApi(req, res) {
       isBanned: isBanned(username),
       ban: formatBanRecord(getBanRecord(username)),
       request: formatUnbanRequest(unbanRequests.get(username) || null),
-      announcement: formatSiteAnnouncement(siteAnnouncement)
+      announcement: getLiveSiteAnnouncement()
     });
     return;
   }
@@ -1517,7 +1530,7 @@ async function handleApi(req, res) {
       banned: isBanned(username),
       ban: formatBanRecord(getBanRecord(username)),
       unbanRequest: formatUnbanRequest(unbanRequests.get(username) || null),
-      announcement: formatSiteAnnouncement(siteAnnouncement)
+      announcement: getLiveSiteAnnouncement()
     });
     return;
   }
@@ -1601,7 +1614,7 @@ async function handleApi(req, res) {
       createdAt: now
     };
     saveModeration();
-    sendJson(res, 201, { ok: true, announcement: formatSiteAnnouncement(siteAnnouncement) });
+    sendJson(res, 201, { ok: true, announcement: getLiveSiteAnnouncement() });
     return;
   }
 
@@ -1930,7 +1943,7 @@ async function handleApi(req, res) {
         onlineUsers: countOnlineUsers(),
         usersInRooms: countUsersInsideRooms()
       },
-      announcement: formatSiteAnnouncement(siteAnnouncement)
+      announcement: getLiveSiteAnnouncement()
     });
     return;
   }
@@ -2075,7 +2088,7 @@ async function handleApi(req, res) {
       const floor = room.messageFloorByUser.get(username) || 0;
       const fromId = Math.max(since, floor);
       const messages = room.messages.filter((msg) => msg.id > fromId);
-      sendJson(res, 200, { room: formatRoom(room, username), messages, announcement: formatSiteAnnouncement(siteAnnouncement) });
+      sendJson(res, 200, { room: formatRoom(room, username), messages, announcement: getLiveSiteAnnouncement() });
       return;
     }
 
