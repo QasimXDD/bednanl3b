@@ -1227,7 +1227,9 @@ function setRoomVideoFromYouTubeProxy(room, videoId, direct, uploadedBy) {
     playing: false,
     baseTime: 0,
     playbackRate: 1,
-    updatedAt: Date.now()
+    updatedAt: Date.now(),
+    clientNow: 0,
+    clientSeq: 0
   };
 }
 
@@ -1253,7 +1255,9 @@ function setRoomVideoFromYouTubeEmbed(room, videoId, uploadedBy, label = "", dur
     playing: false,
     baseTime: 0,
     playbackRate: 1,
-    updatedAt: Date.now()
+    updatedAt: Date.now(),
+    clientNow: 0,
+    clientSeq: 0
   };
 }
 
@@ -3500,7 +3504,9 @@ async function handleApi(req, res) {
         playing: false,
         baseTime: 0,
         playbackRate: 1,
-        updatedAt: Date.now()
+        updatedAt: Date.now(),
+        clientNow: 0,
+        clientSeq: 0
       };
 
       sendJson(res, 201, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });
@@ -3571,11 +3577,13 @@ async function handleApi(req, res) {
           playing: false,
           baseTime: 0,
           playbackRate: 1,
-          updatedAt: Date.now()
+          updatedAt: Date.now(),
+          clientNow: 0,
+          clientSeq: 0
         };
       }
 
-      const { action, currentTime, playbackRate, duration, videoId, playing } = await parseBody(req);
+      const { action, currentTime, playbackRate, duration, videoId, playing, clientNow, clientSeq } = await parseBody(req);
       const cleanAction = String(action || "").trim().toLowerCase();
       if (!["play", "pause", "seek", "rate", "stop"].includes(cleanAction)) {
         sendJson(res, 400, {
@@ -3590,6 +3598,30 @@ async function handleApi(req, res) {
           code: "VIDEO_STALE",
           error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½. أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "This video version is outdated. Refresh room data.")
         });
+        return;
+      }
+
+      const incomingClientNow = Number(clientNow);
+      const incomingClientSeq = Number(clientSeq);
+      const normalizedClientNow = Number.isFinite(incomingClientNow) && incomingClientNow > 0
+        ? Math.floor(incomingClientNow)
+        : 0;
+      const normalizedClientSeq = Number.isFinite(incomingClientSeq) && incomingClientSeq > 0
+        ? Math.floor(incomingClientSeq)
+        : 0;
+      const lastClientNow = Number(room.videoSync.clientNow || 0);
+      const lastClientSeq = Number(room.videoSync.clientSeq || 0);
+      const staleByClientOrder =
+        (normalizedClientNow > 0 && lastClientNow > 0 && normalizedClientNow < lastClientNow) ||
+        (
+          normalizedClientNow > 0 &&
+          lastClientNow > 0 &&
+          normalizedClientNow === lastClientNow &&
+          normalizedClientSeq > 0 &&
+          normalizedClientSeq <= lastClientSeq
+        );
+      if (staleByClientOrder) {
+        sendJson(res, 200, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });
         return;
       }
 
@@ -3637,6 +3669,18 @@ async function handleApi(req, res) {
         room.videoSync.baseTime = 0;
         room.videoSync.playbackRate = 1;
         room.videoSync.updatedAt = now;
+      }
+
+      if (normalizedClientNow > 0) {
+        room.videoSync.clientNow = normalizedClientNow;
+        room.videoSync.clientSeq = normalizedClientSeq > 0
+          ? normalizedClientSeq
+          : lastClientSeq;
+      } else {
+        room.videoSync.clientNow = Math.max(lastClientNow, now);
+        room.videoSync.clientSeq = normalizedClientSeq > 0
+          ? Math.max(lastClientSeq, normalizedClientSeq)
+          : lastClientSeq;
       }
 
       sendJson(res, 200, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });

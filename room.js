@@ -208,6 +208,7 @@ let roomVideoUserInteracted = false;
 let videoToolsModalHideTimer = null;
 let roomVideoSyncHeartbeatTimer = null;
 let roomVideoLeaderIgnoreSyncUntil = 0;
+let roomVideoSyncClientSeq = 0;
 
 const I18N = {
   ar: {
@@ -2486,7 +2487,9 @@ async function sendRoomVideoSync(
       currentTime,
       playing,
       playbackRate: normalizeVideoRate(rawRate),
-      duration
+      duration,
+      clientNow: Date.now(),
+      clientSeq: ++roomVideoSyncClientSeq
     };
     const result = await api(`/api/rooms/${encodedCode}/video-sync`, {
       method: "POST",
