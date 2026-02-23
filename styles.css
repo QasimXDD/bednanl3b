@@ -3462,3 +3462,29 @@ ul {
   backdrop-filter: blur(2px);
   pointer-events: auto;
 }
+
+@media (max-width: 980px) {
+  .video-player-frame {
+    aspect-ratio: 16 / 9;
+    background: #000;
+  }
+
+  .video-player-frame .room-video-player {
+    width: 100%;
+    height: 100%;
+    aspect-ratio: auto;
+    object-fit: contain;
+    background: #000;
+  }
+
+  #roomVideoEmbed {
+    width: 100%;
+    height: 100%;
+  }
+
+  #roomVideoEmbed iframe {
+    width: 100% !important;
+    height: 100% !important;
+    margin: 0 !important;
+  }
+}
