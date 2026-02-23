@@ -1315,6 +1315,14 @@ ul {
   margin-bottom: 0.55rem;
 }
 
+.video-clear-desktop-btn {
+  margin-inline-start: auto;
+}
+
+.video-clear-mobile-btn {
+  display: none;
+}
+
 .video-player-frame {
   position: relative;
   border: 1px solid rgba(127, 171, 247, 0.3);
@@ -3000,6 +3008,10 @@ ul {
     display: none;
   }
 
+  .video-clear-mobile-btn {
+    display: inline-flex;
+  }
+
   .video-player-frame {
     border-radius: 16px;
     box-shadow: 0 18px 36px rgba(2, 10, 24, 0.55);
@@ -3440,6 +3452,13 @@ ul {
   position: absolute;
   inset: 0;
   z-index: 3;
-  background: linear-gradient(180deg, rgba(5, 11, 28, 0.12), rgba(5, 11, 28, 0.7));
+  background: linear-gradient(
+    180deg,
+    rgba(5, 11, 28, 0.18) 0%,
+    rgba(5, 11, 28, 0.35) 30%,
+    rgba(5, 11, 28, 0.9) 58%,
+    rgba(5, 11, 28, 0.97) 100%
+  );
+  backdrop-filter: blur(2px);
   pointer-events: auto;
 }

@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Changa:wght@600;700;800&family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=20260222p">
+  <link rel="stylesheet" href="styles.css?v=20260223d">
 </head>
 <body>
   <div class="top-controls">
@@ -39,6 +39,7 @@
           <div class="video-box-head">
             <h3 id="videoTitle">Room Video</h3>
             <p id="videoStatusText" class="muted">No video uploaded yet.</p>
+            <button id="videoClearTopBtn" class="btn btn-danger video-clear-desktop-btn hidden" type="button">Remove Video</button>
           </div>
           <button id="playersDrawerToggle" class="players-drawer-toggle" type="button" aria-controls="playersDrawer" aria-expanded="false">
             <span class="players-drawer-toggle-icon players-drawer-toggle-icon-open" aria-hidden="true">
@@ -78,6 +79,7 @@
             <div class="room-actions">
               <button id="videoUploadBtn" class="btn" type="button">Upload Video</button>
               <button id="videoYoutubeBtn" class="btn btn-ghost" type="button">Play from YouTube</button>
+              <button id="videoClearBtn" class="btn btn-danger video-clear-mobile-btn" type="button">Remove Video</button>
             </div>
           </div>
         </section>
@@ -243,9 +245,10 @@
 
   <div id="toastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
   <script src="sound.js?v=20260222b"></script>
-  <script src="room.js?v=20260222s"></script>
+  <script src="room.js?v=20260223l"></script>
 </body>
 </html>
+
 
 
 

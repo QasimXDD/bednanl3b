@@ -504,6 +504,7 @@ function getYouTubeProxyStream(streamId) {
     youtubeProxyStreams.delete(key);
     return null;
   }
+  entry.expiresAt = Date.now() + YOUTUBE_PROXY_TTL_MS;
   return entry;
 }
 
@@ -1230,13 +1231,39 @@ function setRoomVideoFromYouTubeProxy(room, videoId, direct, uploadedBy) {
   };
 }
 
+function setRoomVideoFromYouTubeEmbed(room, videoId, uploadedBy, label = "", duration = 0) {
+  const cleanVideoId = String(videoId || "").trim();
+  removeRoomVideoAsset(room);
+  room.video = {
+    id: randomToken(),
+    sourceType: "youtube",
+    youtubeId: cleanVideoId,
+    src: `https://www.youtube.com/watch?v=${cleanVideoId}`,
+    filename: sanitizeUploadedFilename(label || `youtube-${cleanVideoId}`),
+    mimeType: "video/youtube",
+    size: 0,
+    uploadedBy,
+    uploadedAt: Date.now(),
+    duration: normalizeRoomVideoDuration(duration),
+    isYouTubeCached: false,
+    isYouTubeProxy: false
+  };
+  room.videoSync = {
+    videoId: room.video.id,
+    playing: false,
+    baseTime: 0,
+    playbackRate: 1,
+    updatedAt: Date.now()
+  };
+}
+
 function ensureRoomVideoRuntimeState(room) {
   const sourceType = String(room?.video?.sourceType || "").toLowerCase();
   const src = String(room?.video?.src || "");
   const isAllowedFileSrc =
     src.startsWith(ROOM_VIDEO_PUBLIC_PREFIX) ||
     src.startsWith("/api/youtube-proxy/");
-  if (room?.video && (sourceType === "youtube" || (sourceType === "file" && src && !isAllowedFileSrc))) {
+  if (room?.video && sourceType === "file" && src && !isAllowedFileSrc) {
     room.video = null;
     room.videoSync = null;
   }
@@ -3368,11 +3395,40 @@ async function handleApi(req, res) {
       return;
     }
 
+    if (req.method === "DELETE" && roomPath.action === "video") {
+      if (room.host !== username) {
+        sendJson(res, 403, {
+          code: "VIDEO_HOST_ONLY",
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Only the room leader can remove videos.")
+        });
+        return;
+      }
+      removeRoomVideoAsset(room);
+      sendJson(res, 200, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });
+      return;
+    }
+
     if (req.method === "POST" && roomPath.action === "video") {
       if (room.host !== username) {
         sendJson(res, 403, {
           code: "VIDEO_HOST_ONLY",
           error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Only the room leader can upload videos.")
+        });
+        return;
+      }
+
+      const contentType = String(req.headers["content-type"] || "").toLowerCase();
+      if (contentType.includes("application/json")) {
+        const { action } = await parseBody(req);
+        const clearAction = String(action || "").trim().toLowerCase();
+        if (clearAction === "clear" || clearAction === "remove" || clearAction === "delete") {
+          removeRoomVideoAsset(room);
+          sendJson(res, 200, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });
+          return;
+        }
+        sendJson(res, 400, {
+          code: "VIDEO_INVALID_ACTION",
+          error: i18n(req, "Invalid video action.", "Invalid video action.")
         });
         return;
       }
@@ -3488,106 +3544,7 @@ async function handleApi(req, res) {
         });
         return;
       }
-
-      const tryProxyFallback = async () => {
-        try {
-          const direct = await getYouTubeDirectPlayableSource(resolved.videoId);
-          setRoomVideoFromYouTubeProxy(room, resolved.videoId, direct, username);
-          sendJson(res, 201, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });
-          return true;
-        } catch (proxyError) {
-          console.warn("YouTube direct proxy fallback failed:", proxyError?.message || proxyError);
-          return false;
-        }
-      };
-
-      if (!ensureUploadsDir()) {
-        if (await tryProxyFallback()) {
-          return;
-        }
-        sendJson(res, 503, {
-          code: "VIDEO_STORAGE_UNAVAILABLE",
-          error: i18n(req, "طھط¹ط°ط± ط­ظپط¸ ط§ظ„ظپظٹط¯ظٹظˆ ط¹ظ„ظ‰ ط§ظ„ط®ط§ط¯ظ… ط­ط§ظ„ظٹظ‹ط§.", "Server storage is unavailable right now.")
-        });
-        return;
-      }
-
-      let selectedVideo = getCachedYouTubeVideo(resolved.videoId);
-      if (!selectedVideo) {
-        let downloaded = null;
-        try {
-          downloaded = await downloadYouTubeVideoToLocalFile(resolved.videoId);
-        } catch (error) {
-          const code = String(error?.code || "");
-          const message = String(error?.message || "");
-          if (code === "YOUTUBE_VIDEO_TOO_LARGE") {
-            sendJson(res, 413, {
-              code: "YOUTUBE_VIDEO_TOO_LARGE",
-              error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ (أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ 80MB).", "YouTube video is too large (max 80MB).")
-            });
-            return;
-          }
-          if (code === "YOUTUBE_FORMAT_UNSUPPORTED") {
-            if (await tryProxyFallback()) {
-              return;
-            }
-            sendJson(res, 415, {
-              code: "YOUTUBE_FORMAT_UNSUPPORTED",
-              error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "No supported downloadable video format was found.")
-            });
-            return;
-          }
-          const statusMatch = message.match(/status\s+(\d{3})/i);
-          const upstreamStatus = statusMatch ? Number(statusMatch[1]) : 0;
-          if (upstreamStatus >= 400 && upstreamStatus < 500 && upstreamStatus !== 429) {
-            sendJson(res, 404, {
-              code: "YOUTUBE_NOT_FOUND",
-              error: i18n(req, "أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "No matching YouTube video was found.")
-            });
-            return;
-          }
-          console.warn("YouTube local download failed:", message || error);
-          if (await tryProxyFallback()) {
-            return;
-          }
-          sendJson(res, 502, {
-            code: "YOUTUBE_DOWNLOAD_FAILED",
-            error: i18n(req, "تعذر تنزيل فيديو يوتيوب الآن. حاول فيديو آخر.", "Could not download this YouTube video right now. Try another one.")
-          });
-          return;
-        }
-        selectedVideo = rememberYouTubeCache(resolved.videoId, downloaded) || {
-          videoId: resolved.videoId,
-          storedFileName: downloaded.storedFileName,
-          cleanFileName: downloaded.cleanFileName,
-          durationSec: downloaded.durationSec,
-          downloadedBytes: downloaded.downloadedBytes,
-          mimeType: downloaded.mimeType
-        };
-      }
-
-      removeRoomVideoAsset(room);
-      room.video = {
-        id: randomToken(),
-        sourceType: "file",
-        youtubeId: resolved.videoId,
-        src: `${ROOM_VIDEO_PUBLIC_PREFIX}${selectedVideo.storedFileName}`,
-        filename: selectedVideo.cleanFileName,
-        mimeType: selectedVideo.mimeType,
-        size: Number(selectedVideo.downloadedBytes || 0),
-        uploadedBy: username,
-        uploadedAt: Date.now(),
-        duration: selectedVideo.durationSec,
-        isYouTubeCached: true
-      };
-      room.videoSync = {
-        videoId: room.video.id,
-        playing: false,
-        baseTime: 0,
-        playbackRate: 1,
-        updatedAt: Date.now()
-      };
-
+      setRoomVideoFromYouTubeEmbed(room, resolved.videoId, username, resolved.label);
       sendJson(res, 201, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });
       return;
     }
@@ -3618,7 +3575,7 @@ async function handleApi(req, res) {
         };
       }
 
-      const { action, currentTime, playbackRate, duration, videoId } = await parseBody(req);
+      const { action, currentTime, playbackRate, duration, videoId, playing } = await parseBody(req);
       const cleanAction = String(action || "").trim().toLowerCase();
       if (!["play", "pause", "seek", "rate", "stop"].includes(cleanAction)) {
         sendJson(res, 400, {
@@ -3642,6 +3599,8 @@ async function handleApi(req, res) {
         playbackRate !== undefined ? playbackRate : room.videoSync.playbackRate
       );
       const nextTime = currentTime !== undefined ? clampRoomVideoTime(room, currentTime) : effective;
+      const hasPlaying = playing !== undefined;
+      const nextPlaying = Boolean(playing);
       const normalizedDuration = normalizeRoomVideoDuration(duration);
       if (normalizedDuration > 0) {
         room.video.duration = normalizedDuration;
@@ -3660,11 +3619,17 @@ async function handleApi(req, res) {
       } else if (cleanAction === "seek") {
         room.videoSync.baseTime = nextTime;
         room.videoSync.updatedAt = now;
+        if (hasPlaying) {
+          room.videoSync.playing = nextPlaying;
+        }
         if (playbackRate !== undefined) {
           room.videoSync.playbackRate = nextRate;
         }
       } else if (cleanAction === "rate") {
         room.videoSync.baseTime = effective;
+        if (hasPlaying) {
+          room.videoSync.playing = nextPlaying;
+        }
         room.videoSync.playbackRate = nextRate;
         room.videoSync.updatedAt = now;
       } else if (cleanAction === "stop") {

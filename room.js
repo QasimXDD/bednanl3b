@@ -117,6 +117,8 @@ const videoUploadBtn = document.getElementById("videoUploadBtn");
 const videoYoutubeLabel = document.getElementById("videoYoutubeLabel");
 const videoYoutubeInput = document.getElementById("videoYoutubeInput");
 const videoYoutubeBtn = document.getElementById("videoYoutubeBtn");
+const videoClearBtn = document.getElementById("videoClearBtn");
+const videoClearTopBtn = document.getElementById("videoClearTopBtn");
 
 const query = new URLSearchParams(window.location.search);
 const code = String(query.get("code") || "").trim().toUpperCase();
@@ -173,6 +175,8 @@ const ROOM_VIDEO_MEMBER_HARD_SEEK_DRIFT_SEC = 1.6;
 const ROOM_VIDEO_MEMBER_SOFT_DRIFT_SEC = 0.35;
 const ROOM_VIDEO_MEMBER_CATCHUP_FACTOR = 0.08;
 const ROOM_VIDEO_MEMBER_CATCHUP_LIMIT = 0.18;
+const ROOM_VIDEO_SYNC_HEARTBEAT_MS = 1200;
+const ROOM_VIDEO_LEADER_SYNC_SUPPRESS_MS = 1400;
 const ROOM_VIDEO_CONTROLS_HIDE_DELAY_MS = 2200;
 const ROOM_VIDEO_CONTROLS_AUTO_HIDE = true;
 const FULLSCREEN_CHAT_NOTICE_TIMEOUT_MS = 2600;
@@ -194,7 +198,12 @@ let youTubeState = -1;
 let youTubeTickTimer = null;
 let activeYouTubeVideoId = "";
 let suppressYouTubeStateBroadcast = false;
+let youTubeAudioUnlockNeeded = false;
+let youTubeInitialSyncPending = false;
+let roomVideoUserInteracted = false;
 let videoToolsModalHideTimer = null;
+let roomVideoSyncHeartbeatTimer = null;
+let roomVideoLeaderIgnoreSyncUntil = 0;
 
 const I18N = {
   ar: {
@@ -220,6 +229,7 @@ const I18N = {
     videoYoutubePlaceholder: "الصق رابط يوتيوب أو اكتب اسم الأغنية",
     videoUploadBtn: "رفع الفيديو",
     videoYoutubeBtn: "تشغيل من يوتيوب",
+    videoClearBtn: "حذف الفيديو الحالي",
     videoUploadBusy: "جارٍ رفع الفيديو...",
     videoYoutubeBusy: "جارٍ جلب الفيديو...",
     videoUploadNeedFile: "اختر ملف فيديو أولًا.",
@@ -228,6 +238,7 @@ const I18N = {
     videoYoutubeNotFound: "لم يتم العثور على نتيجة مناسبة في يوتيوب.",
     videoYoutubeResolveFail: "تعذر جلب نتائج يوتيوب الآن.",
     videoUploadSuccess: "تم رفع الفيديو وتحديث المزامنة.",
+    videoClearSuccess: "تم حذف الفيديو الحالي من الغرفة.",
     videoUploadTooLarge: "حجم الفيديو كبير جدًا (الحد 80MB).",
     videoUploadType: "نوع الفيديو غير مدعوم. استخدم MP4 أو WebM أو OGG.",
     videoUploadNetworkError: "تعذر رفع الفيديو بسبب مشكلة اتصال. تأكد من الإنترنت وحاول مرة أخرى.",
@@ -356,6 +367,7 @@ const I18N = {
     videoYoutubePlaceholder: "Paste a YouTube URL or type a song name",
     videoUploadBtn: "Upload Video",
     videoYoutubeBtn: "Play from YouTube",
+    videoClearBtn: "Remove Current Video",
     videoUploadBusy: "Uploading...",
     videoYoutubeBusy: "Resolving video...",
     videoUploadNeedFile: "Choose a video file first.",
@@ -364,6 +376,7 @@ const I18N = {
     videoYoutubeNotFound: "No suitable YouTube result was found.",
     videoYoutubeResolveFail: "Could not resolve YouTube right now.",
     videoUploadSuccess: "Video uploaded and sync updated.",
+    videoClearSuccess: "Current room video removed.",
     videoUploadTooLarge: "Video is too large (max 80MB).",
     videoUploadType: "Unsupported video type. Use MP4, WebM, or OGG.",
     videoUploadNetworkError: "Video upload failed due to a network issue. Check your connection and try again.",
@@ -1230,11 +1243,13 @@ function syncPlayersDrawerMode() {
     if (videoToolsToggleIcon) {
       videoToolsToggleIcon.textContent = "+";
     }
+    updateVideoClearButtonState();
     syncRoomBodyLock();
     return;
   }
   setPlayersDrawerOpen(playersDrawerOpen);
   setVideoToolsDrawerOpen(videoToolsOpen);
+  updateVideoClearButtonState();
 }
 
 function isRoomLeader() {
@@ -1305,6 +1320,18 @@ function startYouTubeTick() {
   }, 300);
 }
 
+function suppressYouTubeLeaderStateBroadcastTemporarily(durationMs = 900) {
+  if (!isRoomLeader()) {
+    return;
+  }
+  suppressYouTubeStateBroadcast = true;
+  setTimeout(() => {
+    if (!youTubeInitialSyncPending) {
+      suppressYouTubeStateBroadcast = false;
+    }
+  }, Math.max(120, Number(durationMs) || 0));
+}
+
 function loadYouTubeApi() {
   if (window.YT && typeof window.YT.Player === "function") {
     return Promise.resolve();
@@ -1355,6 +1382,8 @@ function destroyYouTubePlayer() {
   youTubePlayerReady = false;
   youTubeState = -1;
   activeYouTubeVideoId = "";
+  youTubeAudioUnlockNeeded = false;
+  youTubeInitialSyncPending = false;
   setYouTubeMaskVisible(false);
 }
 
@@ -1369,6 +1398,70 @@ function hardenYouTubeIframeUi() {
   iframe.setAttribute("tabindex", "-1");
   iframe.setAttribute("aria-hidden", "true");
   iframe.style.pointerEvents = "none";
+}
+
+function shouldUnlockYouTubeAudio() {
+  return Boolean(
+    youTubeAudioUnlockNeeded
+      && youTubePlayer
+      && youTubePlayerReady
+      && roomVideoUserInteracted
+      && isYouTubeRoomVideo(roomVideoState)
+  );
+}
+
+function ensureMutedAutoplayForYouTube(player = youTubePlayer) {
+  if (!player || roomVideoUserInteracted) {
+    return;
+  }
+  try {
+    if (typeof player.mute === "function") {
+      player.mute();
+    }
+  } catch (_) {
+    // Best effort; ignore mute failures.
+  }
+}
+
+function markRoomVideoUserInteracted() {
+  if (roomVideoUserInteracted) {
+    return;
+  }
+  roomVideoUserInteracted = true;
+  if (roomVideoPlayer && roomVideoPlayer.muted) {
+    roomVideoPlayer.muted = false;
+    if (roomVideoSyncState?.playing && !isYouTubeRoomVideo(roomVideoState)) {
+      roomVideoPlayer.play().catch(() => {});
+    }
+  }
+}
+
+function tryUnlockYouTubeAudioFromGesture() {
+  if (!shouldUnlockYouTubeAudio()) {
+    return false;
+  }
+  try {
+    if (typeof youTubePlayer.unMute === "function") {
+      youTubePlayer.unMute();
+    }
+    if (typeof youTubePlayer.setVolume === "function" && typeof youTubePlayer.getVolume === "function") {
+      const currentVolume = Number(youTubePlayer.getVolume());
+      if (!Number.isFinite(currentVolume) || currentVolume <= 0) {
+        youTubePlayer.setVolume(100);
+      }
+    }
+    if (roomVideoSyncState?.playing && typeof youTubePlayer.playVideo === "function") {
+      youTubePlayer.playVideo();
+    }
+    if (typeof youTubePlayer.isMuted === "function") {
+      youTubeAudioUnlockNeeded = Boolean(youTubePlayer.isMuted());
+    } else {
+      youTubeAudioUnlockNeeded = false;
+    }
+  } catch (_) {
+    return false;
+  }
+  return !youTubeAudioUnlockNeeded;
 }
 
 function getYouTubeDuration() {
@@ -1395,7 +1488,7 @@ function setYouTubeMaskVisible(visible) {
   if (!videoYouTubeMask) {
     return;
   }
-  const show = Boolean(isYouTubeRoomVideo(roomVideoState));
+  const show = Boolean(isYouTubeRoomVideo(roomVideoState) && visible);
   videoYouTubeMask.classList.toggle("hidden", !show);
 }
 
@@ -1407,7 +1500,6 @@ async function ensureYouTubePlayer(videoId, { autoplay = true } = {}) {
   if (!window.YT || typeof window.YT.Player !== "function") {
     throw new Error("YOUTUBE_API_LOAD_FAILED");
   }
-  const startMuted = !isRoomLeader();
   if (!youTubePlayer) {
     youTubePlayer = new window.YT.Player("roomVideoEmbed", {
       host: "https://www.youtube-nocookie.com",
@@ -1425,17 +1517,20 @@ async function ensureYouTubePlayer(videoId, { autoplay = true } = {}) {
       events: {
         onReady: (event) => {
           youTubePlayerReady = true;
+          youTubeAudioUnlockNeeded = true;
           hardenYouTubeIframeUi();
-          if (startMuted && event?.target?.mute) {
-            event.target.mute();
-          }
           youTubeState = Number(event?.target?.getPlayerState?.() ?? -1);
           setYouTubeMaskVisible(youTubeState !== 1);
           updateRoomVideoControls();
           startYouTubeTick();
           if (autoplay && event?.target?.playVideo) {
+            ensureMutedAutoplayForYouTube(event.target);
             event.target.playVideo();
           }
+          if (youTubeInitialSyncPending && roomVideoSyncState) {
+            applyRoomVideoSyncToPlayer({ forceSeek: true });
+          }
+          tryUnlockYouTubeAudioFromGesture();
         },
         onStateChange: (event) => {
           hardenYouTubeIframeUi();
@@ -1443,11 +1538,13 @@ async function ensureYouTubePlayer(videoId, { autoplay = true } = {}) {
           setYouTubeMaskVisible(youTubeState !== 1);
           updateRoomVideoControls();
           if (youTubeState === 1) {
+            youTubeAudioUnlockNeeded = true;
+            tryUnlockYouTubeAudioFromGesture();
             scheduleRoomVideoControlsAutoHide();
           } else {
             setRoomVideoControlsVisible(true);
           }
-          if (suppressRoomVideoEvents || suppressYouTubeStateBroadcast || !isRoomLeader()) {
+          if (suppressRoomVideoEvents || suppressYouTubeStateBroadcast || youTubeInitialSyncPending || !isRoomLeader()) {
             return;
           }
           if (youTubeState === 1) {
@@ -1473,10 +1570,15 @@ async function ensureYouTubePlayer(videoId, { autoplay = true } = {}) {
     }
   } else if (autoplay) {
     if (typeof youTubePlayer.playVideo === "function") {
+      ensureMutedAutoplayForYouTube(youTubePlayer);
       youTubePlayer.playVideo();
     }
   } else if (typeof youTubePlayer.pauseVideo === "function") {
     youTubePlayer.pauseVideo();
+  }
+  if (autoplay) {
+    youTubeAudioUnlockNeeded = true;
+    tryUnlockYouTubeAudioFromGesture();
   }
   hardenYouTubeIframeUi();
   startYouTubeTick();
@@ -1660,6 +1762,7 @@ function updateRoomVideoControls({ previewTime = null } = {}) {
   const isYoutube = hasVideo && isYouTubeRoomVideo(roomVideoState);
   const canUseCustomControls = hasVideo && (!isYoutube || youTubePlayerReady);
   const canControlTimeline = canUseCustomControls && isRoomLeader();
+  const canControlPlayback = canUseCustomControls && isRoomLeader();
   const duration = canUseCustomControls ? getRoomVideoDuration() : 0;
   let currentTime = 0;
   if (canUseCustomControls) {
@@ -1691,10 +1794,10 @@ function updateRoomVideoControls({ previewTime = null } = {}) {
 
   if (videoPlayPauseBtn) {
     const isPlaying = canUseCustomControls && (isYoutube ? isYouTubePlaying() : (roomVideoPlayer && !roomVideoPlayer.paused && !roomVideoPlayer.ended));
-    videoPlayPauseBtn.disabled = !canUseCustomControls;
+    videoPlayPauseBtn.disabled = !canControlPlayback;
     videoPlayPauseBtn.textContent = isPlaying ? "❚❚" : "▶";
-    videoPlayPauseBtn.setAttribute("aria-label", isPlaying ? t("videoPauseBtn") : t("videoPlayBtn"));
-    videoPlayPauseBtn.title = isPlaying ? t("videoPauseBtn") : t("videoPlayBtn");
+    videoPlayPauseBtn.setAttribute("aria-label", canControlPlayback ? (isPlaying ? t("videoPauseBtn") : t("videoPlayBtn")) : t("videoHostOnly"));
+    videoPlayPauseBtn.title = canControlPlayback ? (isPlaying ? t("videoPauseBtn") : t("videoPlayBtn")) : t("videoHostOnly");
   }
 
   if (videoFullscreenBtn) {
@@ -1777,8 +1880,51 @@ function withSuppressedRoomVideoEvents(callback) {
 }
 
 function isYouTubeRoomVideo(video = roomVideoState) {
-  void video;
-  return false;
+  const sourceType = String(video?.sourceType || "").trim().toLowerCase();
+  if (sourceType === "youtube") {
+    return true;
+  }
+  if (sourceType === "file") {
+    return false;
+  }
+  const src = String(video?.src || "");
+  return Boolean(parseYouTubeVideoId(src));
+}
+
+function shouldSendRoomVideoSyncHeartbeat() {
+  if (!isRoomLeader() || !roomVideoState || !activeRoomVideoId || !roomVideoPlayer) {
+    return false;
+  }
+  if (suppressRoomVideoEvents || roomVideoSeekDragging) {
+    return false;
+  }
+  if (isYouTubeRoomVideo(roomVideoState)) {
+    return Boolean(youTubePlayer && youTubePlayerReady && isYouTubePlaying());
+  }
+  if (roomVideoPlayer.ended || roomVideoPlayer.paused) {
+    return false;
+  }
+  return roomVideoPlayer.readyState >= 2;
+}
+
+function stopRoomVideoSyncHeartbeat() {
+  if (!roomVideoSyncHeartbeatTimer) {
+    return;
+  }
+  clearInterval(roomVideoSyncHeartbeatTimer);
+  roomVideoSyncHeartbeatTimer = null;
+}
+
+function ensureRoomVideoSyncHeartbeat() {
+  if (roomVideoSyncHeartbeatTimer) {
+    return;
+  }
+  roomVideoSyncHeartbeatTimer = setInterval(() => {
+    if (!shouldSendRoomVideoSyncHeartbeat()) {
+      return;
+    }
+    sendRoomVideoSync("seek", { silent: true, includeDuration: false, quietError: true });
+  }, ROOM_VIDEO_SYNC_HEARTBEAT_MS);
 }
 
 function setVideoUploadBusy(busy) {
@@ -1797,6 +1943,32 @@ function setVideoUploadBusy(busy) {
   if (videoYoutubeInput) {
     videoYoutubeInput.disabled = isUploadingRoomVideo;
   }
+  updateVideoClearButtonState();
+}
+
+function updateVideoClearButtonState() {
+  const hasVideo = Boolean(roomVideoState && roomVideoState.src);
+  const isLeader = isRoomLeader();
+  const mobile = isRoomMobileLayout();
+  const canClear = isLeader && hasVideo && !isUploadingRoomVideo;
+  let label = t("videoClearBtn");
+  if (!isLeader) {
+    label = t("videoHostOnly");
+  } else if (!hasVideo) {
+    label = t("videoNoVideo");
+  }
+  const updateButton = (button, visible) => {
+    if (!button) {
+      return;
+    }
+    button.classList.toggle("hidden", !visible);
+    button.disabled = !canClear;
+    button.textContent = t("videoClearBtn");
+    button.setAttribute("aria-label", label);
+    button.title = label;
+  };
+  updateButton(videoClearTopBtn, isLeader && !mobile);
+  updateButton(videoClearBtn, isLeader && mobile);
 }
 
 function showVideoControlLockedToast() {
@@ -1807,6 +1979,7 @@ function clearRoomVideoPlayer() {
   if (!roomVideoPlayer) {
     return;
   }
+  stopRoomVideoSyncHeartbeat();
   roomVideoSeekDragging = false;
   clearRoomVideoControlsHideTimer();
   destroyYouTubePlayer();
@@ -1832,6 +2005,10 @@ function clearRoomVideoPlayer() {
 
 async function applyRoomVideoSyncToPlayer({ forceSeek = false } = {}) {
   if (!roomVideoState || !roomVideoSyncState) {
+    return;
+  }
+  if (isRoomLeader() && !forceSeek && Date.now() < roomVideoLeaderIgnoreSyncUntil) {
+    updateRoomVideoControls();
     return;
   }
   if (isYouTubeRoomVideo(roomVideoState)) {
@@ -1862,6 +2039,9 @@ async function applyRoomVideoSyncToPlayer({ forceSeek = false } = {}) {
         }
       }
       if (roomVideoSyncState.playing) {
+        youTubeAudioUnlockNeeded = true;
+        ensureMutedAutoplayForYouTube(youTubePlayer);
+        tryUnlockYouTubeAudioFromGesture();
         if (typeof youTubePlayer.playVideo === "function") {
           youTubePlayer.playVideo();
         }
@@ -1873,6 +2053,7 @@ async function applyRoomVideoSyncToPlayer({ forceSeek = false } = {}) {
         suppressRoomVideoEvents = false;
         suppressYouTubeStateBroadcast = false;
       }, 0);
+      youTubeInitialSyncPending = false;
       setYouTubeMaskVisible(!roomVideoSyncState.playing);
       updateRoomVideoControls();
     }
@@ -1911,6 +2092,11 @@ async function applyRoomVideoSyncToPlayer({ forceSeek = false } = {}) {
     }
 
     if (roomVideoSyncState.playing) {
+      if (!roomVideoUserInteracted) {
+        roomVideoPlayer.muted = true;
+      } else if (roomVideoPlayer.muted) {
+        roomVideoPlayer.muted = false;
+      }
       try {
         await roomVideoPlayer.play();
       } catch (_error) {
@@ -1947,10 +2133,12 @@ function renderRoomVideo(room) {
   if (!nextVideo) {
     videoStatusText.textContent = t("videoNoVideo");
     clearRoomVideoPlayer();
+    updateVideoClearButtonState();
     return;
   }
 
   roomVideoState = nextVideo;
+  updateVideoClearButtonState();
   const incomingDuration = Number(nextVideo.duration || 0);
   roomVideoSyncState = normalizeIncomingRoomVideoSync(nextVideo.sync, incomingDuration);
   const nextVideoId = String(nextVideo.id || "");
@@ -1975,13 +2163,16 @@ function renderRoomVideo(room) {
 
   if (isYoutube) {
     roomVideoMetadataReady = false;
+    const shouldAutoplay = roomVideoSyncState ? Boolean(roomVideoSyncState.playing) : true;
+    youTubeAudioUnlockNeeded = shouldAutoplay;
+    youTubeInitialSyncPending = Boolean(roomVideoSyncState);
     withSuppressedRoomVideoEvents(() => {
       roomVideoPlayer.pause();
       roomVideoPlayer.removeAttribute("src");
       roomVideoPlayer.load();
     });
     const youtubeId = parseYouTubeVideoId(nextVideo.youtubeId) || parseYouTubeVideoId(nextVideo.src);
-    ensureYouTubePlayer(youtubeId, { autoplay: Boolean(roomVideoSyncState?.playing) }).catch(() => {
+    ensureYouTubePlayer(youtubeId, { autoplay: shouldAutoplay }).catch(() => {
       showToast(t("videoSyncFailed"));
     });
   } else if (sourceChanged) {
@@ -2132,6 +2323,49 @@ async function setRoomYouTubeVideo() {
   }
 }
 
+async function clearRoomVideo() {
+  if (!isRoomLeader()) {
+    showToast(t("videoHostOnly"));
+    return;
+  }
+  if (!roomVideoState || !roomVideoState.src) {
+    showToast(t("videoNoVideo"));
+    return;
+  }
+
+  setVideoUploadBusy(true);
+  try {
+    let result = null;
+    try {
+      result = await api(`/api/rooms/${encodedCode}/video`, {
+        method: "DELETE"
+      });
+    } catch (error) {
+      const message = String(error?.message || "");
+      const shouldFallback =
+        Number(error?.status || 0) === 404
+          || message.toLowerCase().includes("endpoint")
+          || message.includes("نقطة وصول");
+      if (!shouldFallback) {
+        throw error;
+      }
+      result = await api(`/api/rooms/${encodedCode}/video`, {
+        method: "POST",
+        body: { action: "clear" }
+      });
+    }
+    showToast(t("videoClearSuccess"), "success");
+    if (result?.room) {
+      renderRoomInfo(result.room);
+    }
+    await refreshMessages();
+  } catch (error) {
+    showToast(error.message || t("videoSyncFailed"));
+  } finally {
+    setVideoUploadBusy(false);
+  }
+}
+
 function uploadRoomVideoRequest(pathname, formData) {
   return new Promise((resolve, reject) => {
     const token = getToken();
@@ -2191,33 +2425,68 @@ function uploadRoomVideoRequest(pathname, formData) {
   });
 }
 
-async function sendRoomVideoSync(action) {
+async function sendRoomVideoSync(
+  action,
+  {
+    silent = false,
+    includeDuration = true,
+    quietError = false,
+    currentTimeOverride = null
+  } = {}
+) {
   if (!isRoomLeader() || !roomVideoState || !activeRoomVideoId || !roomVideoPlayer) {
     if (!isRoomLeader()) {
       showVideoControlLockedToast();
     }
     return;
   }
+  if (isRoomLeader()) {
+    roomVideoLeaderIgnoreSyncUntil = Math.max(
+      roomVideoLeaderIgnoreSyncUntil,
+      Date.now() + ROOM_VIDEO_LEADER_SYNC_SUPPRESS_MS
+    );
+  }
   try {
-    const duration = Number.isFinite(roomVideoPlayer.duration) && roomVideoPlayer.duration > 0
-      ? Number(roomVideoPlayer.duration)
+    const useYouTube = isYouTubeRoomVideo(roomVideoState);
+    const duration = includeDuration
+      ? (useYouTube
+          ? (getYouTubeDuration() > 0 ? getYouTubeDuration() : undefined)
+          : (Number.isFinite(roomVideoPlayer.duration) && roomVideoPlayer.duration > 0 ? Number(roomVideoPlayer.duration) : undefined))
       : undefined;
+    const overrideTime = Number(currentTimeOverride);
+    const hasOverrideTime = Number.isFinite(overrideTime) && overrideTime >= 0;
+    const currentTime = hasOverrideTime
+      ? overrideTime
+      : (useYouTube ? getYouTubeCurrentTime() : Number(roomVideoPlayer.currentTime || 0));
+    const rawRate = useYouTube
+      ? Number(
+          youTubePlayer && youTubePlayerReady && typeof youTubePlayer.getPlaybackRate === "function"
+            ? youTubePlayer.getPlaybackRate()
+            : 1
+        )
+      : Number(roomVideoPlayer.playbackRate || 1);
+    const playing = useYouTube
+      ? isYouTubePlaying()
+      : Boolean(roomVideoPlayer && !roomVideoPlayer.paused && !roomVideoPlayer.ended);
     const payload = {
       action,
       videoId: activeRoomVideoId,
-      currentTime: Number(roomVideoPlayer.currentTime || 0),
-      playbackRate: normalizeVideoRate(roomVideoPlayer.playbackRate),
+      currentTime,
+      playing,
+      playbackRate: normalizeVideoRate(rawRate),
       duration
     };
     const result = await api(`/api/rooms/${encodedCode}/video-sync`, {
       method: "POST",
       body: payload
     });
-    if (result?.room) {
+    if (!silent && result?.room) {
       renderRoomInfo(result.room);
     }
   } catch (error) {
-    showToast(error.message || t("videoSyncFailed"));
+    if (!quietError) {
+      showToast(error.message || t("videoSyncFailed"));
+    }
   }
 }
 
@@ -3546,6 +3815,8 @@ if (videoToolsOverlay) {
 }
 
 document.addEventListener("pointerdown", (event) => {
+  markRoomVideoUserInteracted();
+  tryUnlockYouTubeAudioFromGesture();
   if ((!playersDrawerOpen && !videoToolsOpen) || !isRoomMobileLayout()) {
     return;
   }
@@ -3617,6 +3888,20 @@ if (videoYoutubeBtn) {
   });
 }
 
+if (videoClearBtn) {
+  videoClearBtn.addEventListener("click", () => {
+    sfx("click");
+    clearRoomVideo();
+  });
+}
+
+if (videoClearTopBtn) {
+  videoClearTopBtn.addEventListener("click", () => {
+    sfx("click");
+    clearRoomVideo();
+  });
+}
+
 if (videoYoutubeInput) {
   videoYoutubeInput.addEventListener("keydown", (event) => {
     if (event.key !== "Enter") {
@@ -3628,12 +3913,17 @@ if (videoYoutubeInput) {
 }
 
 if (videoPlayerFrame) {
-  const onVideoFrameInteraction = () => {
+  const onVideoFrameHover = () => {
     revealRoomVideoControls();
   };
-  videoPlayerFrame.addEventListener("mousemove", onVideoFrameInteraction);
-  videoPlayerFrame.addEventListener("pointerdown", onVideoFrameInteraction);
-  videoPlayerFrame.addEventListener("touchstart", onVideoFrameInteraction, { passive: true });
+  const onVideoFrameGesture = () => {
+    markRoomVideoUserInteracted();
+    revealRoomVideoControls();
+    tryUnlockYouTubeAudioFromGesture();
+  };
+  videoPlayerFrame.addEventListener("mousemove", onVideoFrameHover);
+  videoPlayerFrame.addEventListener("pointerdown", onVideoFrameGesture);
+  videoPlayerFrame.addEventListener("touchstart", onVideoFrameGesture, { passive: true });
 }
 
 if (videoPlayPauseBtn) {
@@ -3641,25 +3931,27 @@ if (videoPlayPauseBtn) {
     if (!roomVideoState) {
       return;
     }
+    if (!isRoomLeader()) {
+      applyRoomVideoSyncToPlayer({ forceSeek: true });
+      return;
+    }
     sfx("click");
     revealRoomVideoControls();
     if (isYouTubeRoomVideo(roomVideoState)) {
-      if (!isRoomLeader()) {
-        showVideoControlLockedToast();
-        applyRoomVideoSyncToPlayer({ forceSeek: true });
-        return;
-      }
       if (!youTubePlayerReady || !youTubePlayer) {
         return;
       }
+      const current = clampVideoTime(getYouTubeCurrentTime(), getRoomVideoDuration());
       if (isYouTubePlaying()) {
+        suppressYouTubeLeaderStateBroadcastTemporarily();
         if (typeof youTubePlayer.pauseVideo === "function") {
           youTubePlayer.pauseVideo();
         }
-        sendRoomVideoSync("pause");
+        sendRoomVideoSync("pause", { currentTimeOverride: current });
       } else if (typeof youTubePlayer.playVideo === "function") {
+        suppressYouTubeLeaderStateBroadcastTemporarily();
         youTubePlayer.playVideo();
-        sendRoomVideoSync("play");
+        sendRoomVideoSync("play", { currentTimeOverride: current });
       }
       return;
     }
@@ -3719,9 +4011,10 @@ if (videoSeekRange) {
       if (youTubePlayerReady && youTubePlayer && typeof youTubePlayer.seekTo === "function") {
         youTubePlayer.seekTo(targetTime, true);
       }
-      sendRoomVideoSync("seek");
+      sendRoomVideoSync("seek", { currentTimeOverride: targetTime });
     } else if (roomVideoPlayer) {
       roomVideoPlayer.currentTime = targetTime;
+      sendRoomVideoSync("seek", { currentTimeOverride: targetTime });
     }
     roomVideoSeekDragging = false;
     scheduleRoomVideoControlsAutoHide();
@@ -3844,6 +4137,8 @@ if (roomVideoPlayer) {
 }
 
 document.addEventListener("keydown", (event) => {
+  markRoomVideoUserInteracted();
+  tryUnlockYouTubeAudioFromGesture();
   if (event.key === "Escape" && kickSupervisorDeniedModal && !kickSupervisorDeniedModal.classList.contains("hidden")) {
     closeKickSupervisorDeniedModal();
     return;
@@ -3978,6 +4273,7 @@ async function bootRoom() {
     renderRoomInfo(joinData.room);
     await refreshMessages();
     pollTimer = setInterval(refreshMessages, 1500);
+    ensureRoomVideoSyncHeartbeat();
   } catch (error) {
     redirectToHome(error.message);
   }
@@ -4004,5 +4300,6 @@ updateRoomVideoControls();
 setLang(getLang());
 syncPlayersDrawerMode();
 bootRoom();
+
 
 
