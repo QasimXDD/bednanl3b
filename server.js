@@ -2424,8 +2424,38 @@ function serveStatic(pathname, req, res) {
         res.end();
         return;
       }
-      const start = match[1] === "" ? 0 : Number(match[1]);
-      const end = match[2] === "" ? stats.size - 1 : Number(match[2]);
+      let start = 0;
+      let end = stats.size - 1;
+      if (match[1] === "" && match[2] === "") {
+        res.writeHead(
+          416,
+          securityHeaders({
+            "Content-Range": `bytes */${stats.size}`,
+            "Cache-Control": "no-store"
+          })
+        );
+        res.end();
+        return;
+      }
+      if (match[1] === "") {
+        const suffixLength = Number(match[2]);
+        if (!Number.isInteger(suffixLength) || suffixLength <= 0) {
+          res.writeHead(
+            416,
+            securityHeaders({
+              "Content-Range": `bytes */${stats.size}`,
+              "Cache-Control": "no-store"
+            })
+          );
+          res.end();
+          return;
+        }
+        start = Math.max(0, stats.size - suffixLength);
+        end = stats.size - 1;
+      } else {
+        start = Number(match[1]);
+        end = match[2] === "" ? stats.size - 1 : Number(match[2]);
+      }
       if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || start >= stats.size) {
         res.writeHead(
           416,
