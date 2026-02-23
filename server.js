@@ -1332,7 +1332,9 @@ function formatRoomVideo(room) {
       playing: Boolean(sync.playing),
       currentTime,
       playbackRate: normalizeRoomVideoPlaybackRate(sync.playbackRate),
-      updatedAt: Number(sync.updatedAt || Date.now())
+      updatedAt: Number(sync.updatedAt || Date.now()),
+      clientNow: Number(sync.clientNow || 0),
+      clientSeq: Number(sync.clientSeq || 0)
     } : null
   };
 }

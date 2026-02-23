@@ -180,6 +180,8 @@ const ROOM_VIDEO_MEMBER_CATCHUP_FACTOR = 0.08;
 const ROOM_VIDEO_MEMBER_CATCHUP_LIMIT = 0.18;
 const ROOM_VIDEO_SYNC_HEARTBEAT_MS = 1200;
 const ROOM_VIDEO_LEADER_SYNC_SUPPRESS_MS = 1400;
+const ROOM_VIDEO_SYNC_STALE_REWIND_SEC = 0.55;
+const ROOM_VIDEO_SYNC_STALE_PAUSE_REWIND_SEC = 0.2;
 const ROOM_VIDEO_CONTROLS_HIDE_DELAY_MS = 2200;
 const ROOM_VIDEO_CONTROLS_AUTO_HIDE = true;
 const ROOM_VIDEO_EVENT_SUPPRESS_MS = 160;
@@ -1916,12 +1918,67 @@ function normalizeIncomingRoomVideoSync(sync, duration = 0) {
   if (!sync) {
     return null;
   }
+  const normalizeOrderingValue = (value) => {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric <= 0) {
+      return 0;
+    }
+    return Math.floor(numeric);
+  };
+  const updatedAt = normalizeOrderingValue(sync.updatedAt);
   return {
     ...sync,
     currentTime: clampVideoTime(sync.currentTime, duration),
     playbackRate: normalizeVideoRate(sync.playbackRate),
+    updatedAt,
+    clientNow: normalizeOrderingValue(sync.clientNow),
+    clientSeq: normalizeOrderingValue(sync.clientSeq),
     snapshotAt: Date.now()
   };
+}
+
+function compareRoomVideoSyncOrder(incoming, current) {
+  const incomingClientNow = Number(incoming?.clientNow || 0);
+  const currentClientNow = Number(current?.clientNow || 0);
+  if (incomingClientNow > 0 || currentClientNow > 0) {
+    if (incomingClientNow !== currentClientNow) {
+      return incomingClientNow - currentClientNow;
+    }
+    const incomingClientSeq = Number(incoming?.clientSeq || 0);
+    const currentClientSeq = Number(current?.clientSeq || 0);
+    if (incomingClientSeq !== currentClientSeq) {
+      return incomingClientSeq - currentClientSeq;
+    }
+  }
+  const incomingUpdatedAt = Number(incoming?.updatedAt || 0);
+  const currentUpdatedAt = Number(current?.updatedAt || 0);
+  return incomingUpdatedAt - currentUpdatedAt;
+}
+
+function shouldAcceptIncomingRoomVideoSync(incoming, current, duration = 0) {
+  if (!incoming) {
+    return false;
+  }
+  if (!current) {
+    return true;
+  }
+
+  const order = compareRoomVideoSyncOrder(incoming, current);
+  if (order > 0) {
+    return true;
+  }
+  if (order < 0) {
+    return false;
+  }
+
+  // Same sync version: ignore stale snapshots that would rewind the timeline.
+  const incomingPlaying = Boolean(incoming.playing);
+  const currentProjected = computeRoomVideoTargetTime(current, duration);
+  if (incomingPlaying) {
+    return incoming.currentTime + ROOM_VIDEO_SYNC_STALE_REWIND_SEC >= currentProjected;
+  }
+  const currentPaused = clampVideoTime(current.currentTime, duration);
+  return incoming.currentTime + ROOM_VIDEO_SYNC_STALE_PAUSE_REWIND_SEC >= currentPaused;
 }
 
 function computeRoomVideoTargetTime(sync, duration = 0) {
@@ -2466,10 +2523,15 @@ function renderRoomVideo(room) {
   updateVideoEmptyNoticeState();
   updateVideoClearButtonState();
   const incomingDuration = Number(nextVideo.duration || 0);
-  roomVideoSyncState = normalizeIncomingRoomVideoSync(nextVideo.sync, incomingDuration);
+  const incomingSyncState = normalizeIncomingRoomVideoSync(nextVideo.sync, incomingDuration);
   const nextVideoId = String(nextVideo.id || "");
   const isYoutube = isYouTubeRoomVideo(nextVideo);
   const sourceChanged = activeRoomVideoId !== nextVideoId;
+  if (sourceChanged || !incomingSyncState) {
+    roomVideoSyncState = incomingSyncState;
+  } else if (shouldAcceptIncomingRoomVideoSync(incomingSyncState, roomVideoSyncState, incomingDuration)) {
+    roomVideoSyncState = incomingSyncState;
+  }
   activeRoomVideoId = nextVideoId;
 
   // Always enforce a single visible renderer to avoid stacked video views.
@@ -4527,14 +4589,11 @@ if (roomVideoPlayer) {
     updateRoomVideoControls();
   });
 
-  roomVideoPlayer.addEventListener("loadedmetadata", () => {
+  roomVideoPlayer.addEventListener("loadedmetadata", async () => {
     roomVideoMetadataReady = true;
     revealRoomVideoControls();
     updateRoomVideoControls();
-    applyRoomVideoSyncToPlayer({ forceSeek: true });
-    if (isRoomLeader() && roomVideoState) {
-      sendRoomVideoSync("seek");
-    }
+    await applyRoomVideoSyncToPlayer({ forceSeek: true });
   });
 
   roomVideoPlayer.addEventListener("play", () => {
