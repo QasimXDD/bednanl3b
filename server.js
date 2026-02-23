@@ -12,6 +12,7 @@ if (!process.env.YTDL_NO_UPDATE) {
   process.env.YTDL_NO_UPDATE = "1";
 }
 const ytdl = require("@distube/ytdl-core");
+const Busboy = require("busboy");
 
 const PORT = process.env.PORT || 3000;
 const ROOT = __dirname;
@@ -132,6 +133,20 @@ function ensureUploadsDir() {
 
 function getRoomVideoUploadDir() {
   return activeRoomVideoUploadDir;
+}
+
+function removeFileIfExists(filePath) {
+  const target = String(filePath || "").trim();
+  if (!target) {
+    return;
+  }
+  try {
+    if (fs.existsSync(target)) {
+      fs.unlinkSync(target);
+    }
+  } catch (_error) {
+    // Ignore cleanup errors.
+  }
 }
 
 function loadUsers() {
@@ -1587,14 +1602,8 @@ function parseBody(req) {
 
 function parseMultipartFormData(req, maxBytes = ROOM_VIDEO_MAX_BYTES) {
   return new Promise((resolve, reject) => {
-    const contentType = String(req.headers["content-type"] || "");
-    const boundaryMatch = contentType.match(/^multipart\/form-data;\s*boundary=(?:"([^"]+)"|([^;]+))/i);
-    if (!boundaryMatch) {
-      reject(new Error("Invalid multipart form data"));
-      return;
-    }
-    const boundary = String(boundaryMatch[1] || boundaryMatch[2] || "").trim();
-    if (!boundary) {
+    const contentType = String(req.headers["content-type"] || "").toLowerCase();
+    if (!contentType.includes("multipart/form-data")) {
       reject(new Error("Invalid multipart form data"));
       return;
     }
@@ -1607,14 +1616,37 @@ function parseMultipartFormData(req, maxBytes = ROOM_VIDEO_MAX_BYTES) {
       return;
     }
 
-    const chunks = [];
-    let totalBytes = 0;
+    let parser = null;
+    try {
+      parser = Busboy({
+        headers: req.headers,
+        limits: {
+          files: 1,
+          fileSize: maxBytes + 1,
+          fields: 12,
+          fieldSize: 128 * 1024,
+          parts: 16
+        }
+      });
+    } catch (_error) {
+      reject(new Error("Invalid multipart form data"));
+      return;
+    }
+
+    const fields = {};
+    let uploadedFile = null;
+    let extraFileDetected = false;
+    const writeTasks = [];
+    const tempPaths = [];
     let settled = false;
     const fail = (error) => {
       if (settled) {
         return;
       }
       settled = true;
+      for (const tempPath of tempPaths) {
+        removeFileIfExists(tempPath);
+      }
       reject(error);
     };
     const done = (value) => {
@@ -1625,101 +1657,95 @@ function parseMultipartFormData(req, maxBytes = ROOM_VIDEO_MAX_BYTES) {
       resolve(value);
     };
 
-    req.on("data", (chunk) => {
+    parser.on("field", (fieldName, value) => {
       if (settled) {
         return;
       }
-      totalBytes += chunk.length;
-      if (totalBytes > maxPayloadBytes) {
-        fail(new Error("Payload too large"));
-        req.resume();
+      const cleanFieldName = String(fieldName || "").trim();
+      if (!cleanFieldName || Object.prototype.hasOwnProperty.call(fields, cleanFieldName)) {
         return;
       }
-      chunks.push(chunk);
+      fields[cleanFieldName] = String(value || "");
     });
 
-    req.on("end", () => {
+    parser.on("file", (fieldName, stream, info) => {
       if (settled) {
+        stream.resume();
         return;
       }
-      try {
-        const buffer = Buffer.concat(chunks);
-        const delimiter = Buffer.from(`--${boundary}`);
-        let cursor = buffer.indexOf(delimiter);
-        if (cursor !== 0) {
-          throw new Error("Invalid multipart form data");
-        }
-
-        const fields = {};
-        const files = [];
-        while (cursor !== -1) {
-          cursor += delimiter.length;
-          if (buffer[cursor] === 45 && buffer[cursor + 1] === 45) {
-            break;
-          }
-          if (buffer[cursor] === 13 && buffer[cursor + 1] === 10) {
-            cursor += 2;
-          }
-
-          const headerEnd = buffer.indexOf(Buffer.from("\r\n\r\n"), cursor);
-          if (headerEnd === -1) {
-            throw new Error("Invalid multipart form data");
-          }
-
-          const rawHeaders = buffer.slice(cursor, headerEnd).toString("utf8");
-          const headers = {};
-          rawHeaders.split("\r\n").forEach((line) => {
-            const colon = line.indexOf(":");
-            if (colon <= 0) {
-              return;
-            }
-            const key = line.slice(0, colon).trim().toLowerCase();
-            const value = line.slice(colon + 1).trim();
-            headers[key] = value;
-          });
-
-          const disposition = String(headers["content-disposition"] || "");
-          const fieldNameMatch = disposition.match(/name="([^"]+)"/i);
-          if (!fieldNameMatch) {
-            throw new Error("Invalid multipart form data");
-          }
-          const fieldName = String(fieldNameMatch[1] || "").trim();
-          const fileNameMatch = disposition.match(/filename="([^"]*)"/i);
-
-          const dataStart = headerEnd + 4;
-          const nextBoundaryIndex = buffer.indexOf(Buffer.from(`\r\n--${boundary}`), dataStart);
-          if (nextBoundaryIndex === -1) {
-            throw new Error("Invalid multipart form data");
-          }
-          const data = buffer.slice(dataStart, nextBoundaryIndex);
-
-          if (fileNameMatch && fileNameMatch[1] !== "") {
-            files.push({
-              fieldName,
-              filename: String(fileNameMatch[1] || ""),
-              contentType: String(headers["content-type"] || "application/octet-stream"),
-              data
-            });
-          } else if (!Object.prototype.hasOwnProperty.call(fields, fieldName)) {
-            fields[fieldName] = data.toString("utf8");
-          }
-
-          cursor = nextBoundaryIndex + 2;
-          if (buffer.indexOf(Buffer.from(`--${boundary}--`), cursor) === cursor) {
-            break;
-          }
-          if (buffer.indexOf(delimiter, cursor) !== cursor) {
-            throw new Error("Invalid multipart form data");
-          }
-        }
-
-        done({ fields, files });
-      } catch (error) {
-        fail(error);
+      if (uploadedFile) {
+        extraFileDetected = true;
+        stream.resume();
+        return;
       }
+      const filename = String(info?.filename || "");
+      const contentTypeValue = String(info?.mimeType || info?.mimetype || "application/octet-stream");
+      const tempFileName = `upload-${Date.now()}-${crypto.randomBytes(6).toString("hex")}.tmp`;
+      const tempPath = path.join(getRoomVideoUploadDir(), tempFileName);
+      tempPaths.push(tempPath);
+      uploadedFile = {
+        fieldName: String(fieldName || "").trim(),
+        filename,
+        contentType: contentTypeValue,
+        tempPath,
+        size: 0,
+        truncated: false
+      };
+
+      const task = new Promise((resolveTask, rejectTask) => {
+        let writer = null;
+        try {
+          writer = fs.createWriteStream(tempPath, { flags: "wx" });
+        } catch (error) {
+          rejectTask(error);
+          stream.resume();
+          return;
+        }
+        stream.on("limit", () => {
+          uploadedFile.truncated = true;
+        });
+        stream.on("data", (chunk) => {
+          uploadedFile.size += chunk.length;
+        });
+        stream.on("error", rejectTask);
+        writer.on("error", rejectTask);
+        writer.on("finish", resolveTask);
+        stream.pipe(writer);
+      });
+      writeTasks.push(task);
     });
 
+    parser.on("filesLimit", () => {
+      extraFileDetected = true;
+    });
+
+    parser.on("finish", () => {
+      Promise.all(writeTasks)
+        .then(() => {
+          if (extraFileDetected) {
+            fail(new Error("Invalid multipart form data"));
+            return;
+          }
+          if (uploadedFile && (uploadedFile.truncated || uploadedFile.size > maxBytes)) {
+            fail(new Error("Payload too large"));
+            return;
+          }
+          done({ fields, files: uploadedFile ? [uploadedFile] : [] });
+        })
+        .catch((error) => {
+          fail(error?.message === "Unexpected end of form" ? new Error("Invalid multipart form data") : error);
+        });
+    });
+
+    parser.on("error", () => {
+      fail(new Error("Invalid multipart form data"));
+    });
+
+    req.on("aborted", () => {
+      fail(new Error("Invalid multipart form data"));
+    });
     req.on("error", fail);
+    req.pipe(parser);
   });
 }
 
@@ -3467,16 +3493,35 @@ async function handleApi(req, res) {
         return;
       }
 
+      if (!ensureUploadsDir()) {
+        sendJson(res, 503, {
+          code: "VIDEO_STORAGE_UNAVAILABLE",
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Server storage is unavailable right now.")
+        });
+        req.resume();
+        return;
+      }
+      if (typeof req.setTimeout === "function") {
+        req.setTimeout(0);
+      }
+
       const multipart = await parseMultipartFormData(req, ROOM_VIDEO_MAX_BYTES);
       const uploaded = multipart.files.find((file) => file.fieldName === "video") || multipart.files[0] || null;
-      if (!uploaded || !uploaded.data || uploaded.data.length === 0) {
+      const cleanupUploadedTemp = () => {
+        if (uploaded?.tempPath) {
+          removeFileIfExists(uploaded.tempPath);
+        }
+      };
+      if (!uploaded || !uploaded.tempPath || Number(uploaded.size || 0) <= 0) {
+        cleanupUploadedTemp();
         sendJson(res, 400, {
           code: "VIDEO_FILE_REQUIRED",
           error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Please choose a valid video file.")
         });
         return;
       }
-      if (uploaded.data.length > ROOM_VIDEO_MAX_BYTES) {
+      if (uploaded.truncated || Number(uploaded.size || 0) > ROOM_VIDEO_MAX_BYTES) {
+        cleanupUploadedTemp();
         sendJson(res, 413, {
           code: "VIDEO_TOO_LARGE",
           error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ (أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ 1GB).", "Video file is too large (max 1GB).")
@@ -3486,17 +3531,10 @@ async function handleApi(req, res) {
 
       const mimeType = normalizeVideoMimeType(uploaded.contentType);
       if (!ROOM_VIDEO_ALLOWED_MIME_TYPES.has(mimeType)) {
+        cleanupUploadedTemp();
         sendJson(res, 415, {
           code: "VIDEO_INVALID_TYPE",
           error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½. أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ MP4 أ¯طںآ½أ¯طںآ½ WebM أ¯طںآ½أ¯طںآ½ OGG.", "Unsupported video type. Use MP4, WebM or OGG.")
-        });
-        return;
-      }
-
-      if (!ensureUploadsDir()) {
-        sendJson(res, 503, {
-          code: "VIDEO_STORAGE_UNAVAILABLE",
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Server storage is unavailable right now.")
         });
         return;
       }
@@ -3505,8 +3543,9 @@ async function handleApi(req, res) {
       const storedFileName = `room-${room.code.toLowerCase()}-${Date.now()}-${crypto.randomBytes(6).toString("hex")}${extension}`;
       const absolutePath = path.join(getRoomVideoUploadDir(), storedFileName);
       try {
-        fs.writeFileSync(absolutePath, uploaded.data);
+        fs.renameSync(uploaded.tempPath, absolutePath);
       } catch (_error) {
+        cleanupUploadedTemp();
         sendJson(res, 503, {
           code: "VIDEO_STORAGE_UNAVAILABLE",
           error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Server storage is unavailable right now.")
@@ -3523,7 +3562,7 @@ async function handleApi(req, res) {
         src: `${ROOM_VIDEO_PUBLIC_PREFIX}${storedFileName}`,
         filename: cleanFileName,
         mimeType,
-        size: uploaded.data.length,
+        size: Number(uploaded.size || 0),
         uploadedBy: username,
         uploadedAt: Date.now(),
         duration: normalizedDuration,
@@ -3822,6 +3861,10 @@ const server = http.createServer(async (req, res) => {
     });
   }
 });
+
+// Large room-video uploads can exceed default Node request timeout.
+server.requestTimeout = 0;
+server.headersTimeout = 120000;
 
 loadUsers();
 loadModeration();

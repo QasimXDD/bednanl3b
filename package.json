@@ -8,6 +8,7 @@
     "smoke": "node scripts/smoke-test.js"
   },
   "dependencies": {
-    "@distube/ytdl-core": "^4.16.12"
+    "@distube/ytdl-core": "^4.16.12",
+    "busboy": "^1.6.0"
   }
 }

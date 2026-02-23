@@ -2755,7 +2755,7 @@ function uploadRoomVideoRequest(
     };
     xhr.open("POST", pathname, true);
     xhr.responseType = "json";
-    xhr.timeout = 180000;
+    xhr.timeout = 0;
     xhr.setRequestHeader("X-Lang", getLang());
     if (token) {
       xhr.setRequestHeader("Authorization", `Bearer ${token}`);
