@@ -39,6 +39,8 @@ const CLIENT_MESSAGE_ID_MAX_LENGTH = 80;
 const CLIENT_MESSAGE_ID_REGEX = /^[A-Za-z0-9_-]+$/;
 const MESSAGE_DEDUP_TTL_MS = 1000 * 60 * 5;
 const REPLY_PREVIEW_MAX_LENGTH = 160;
+const CHAT_REACTION_ALLOWED = new Set(["👍", "❤️", "😂", "🔥", "😮", "😢"]);
+const CHAT_REACTION_MAX_TYPES_PER_MESSAGE = 6;
 const ROOM_VIDEO_MAX_BYTES = 1024 * 1024 * 1024;
 const ROOM_VIDEO_MULTIPART_OVERHEAD_BYTES = 8 * 1024 * 1024;
 const ROOM_VIDEO_MAX_DURATION_SEC = 60 * 60 * 8;
@@ -681,6 +683,7 @@ const I18N_AR_BY_EN = Object.freeze({
   "Invalid action.": "الإجراء غير صالح.",
   "Invalid login credentials.": "بيانات تسجيل الدخول غير صحيحة.",
   "Invalid message identifier.": "معرّف الرسالة غير صالح.",
+  "Invalid reaction payload.": "بيانات التفاعل غير صالحة.",
   "Invalid reply identifier.": "معرّف الرد غير صالح.",
   "Invalid user identifier.": "معرّف المستخدم غير صالح.",
   "Invalid video stream link.": "رابط بث الفيديو غير صالح.",
@@ -692,6 +695,7 @@ const I18N_AR_BY_EN = Object.freeze({
   "Message is too long.": "الرسالة طويلة جدًا.",
   "Name must be 2-30 characters.": "الاسم يجب أن يكون بين 2 و30 حرفًا.",
   "New Room": "غرفة جديدة",
+  "No eligible message was found for reaction.": "لم يتم العثور على رسالة مناسبة للتفاعل.",
   "No join request found for this player.": "لا يوجد طلب انضمام لهذا اللاعب.",
   "No matching YouTube video was found.": "لم يتم العثور على فيديو يوتيوب مطابق.",
   "No room video is available.": "لا يوجد فيديو متاح في الغرفة.",
@@ -1394,6 +1398,49 @@ function normalizeReplyToMessageId(value) {
   return numberValue;
 }
 
+function normalizeReactionEmoji(value) {
+  const clean = String(value || "").trim();
+  if (!clean || clean.length > 8) {
+    return "";
+  }
+  return CHAT_REACTION_ALLOWED.has(clean) ? clean : "";
+}
+
+function normalizeMessageReactions(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  const normalized = {};
+  Object.entries(value).forEach(([emojiRaw, usersRaw]) => {
+    const emoji = normalizeReactionEmoji(emojiRaw);
+    if (!emoji || !Array.isArray(usersRaw)) {
+      return;
+    }
+    const uniqueUsers = new Set();
+    usersRaw.forEach((item) => {
+      const username = normalizeUsername(item);
+      if (isValidUsername(username)) {
+        uniqueUsers.add(username);
+      }
+    });
+    if (uniqueUsers.size > 0) {
+      normalized[emoji] = Array.from(uniqueUsers).sort((a, b) => a.localeCompare(b));
+    }
+  });
+  return normalized;
+}
+
+function findUserMessageById(room, messageId) {
+  if (!room || !Number.isInteger(messageId) || messageId <= 0) {
+    return null;
+  }
+  const target = room.messages.find((item) => Number(item?.id || 0) === messageId);
+  if (!target || target.type !== "user") {
+    return null;
+  }
+  return target;
+}
+
 function buildReplyReference(room, replyToMessageId) {
   if (!Number.isInteger(replyToMessageId) || replyToMessageId <= 0) {
     return null;
@@ -1418,6 +1465,14 @@ function ensureRoomRuntimeState(room) {
   }
   if (!(room.clientMessageLog instanceof Map)) {
     room.clientMessageLog = new Map();
+  }
+  if (Array.isArray(room.messages)) {
+    room.messages.forEach((message) => {
+      if (!message || message.type !== "user") {
+        return;
+      }
+      message.reactions = normalizeMessageReactions(message.reactions);
+    });
   }
   ensureRoomVideoRuntimeState(room);
 }
@@ -1456,6 +1511,7 @@ function pushUserMessage(room, username, text, replyTo = null) {
     user: username,
     text,
     replyTo: replyTo ? { ...replyTo } : null,
+    reactions: {},
     timestamp: Date.now()
   });
   room.nextMessageId += 1;
@@ -3391,7 +3447,65 @@ async function handleApi(req, res) {
     }
 
     if (req.method === "POST" && roomPath.action === "messages") {
-      const { text, clientMessageId, replyToMessageId } = await parseBody(req);
+      const {
+        text,
+        clientMessageId,
+        replyToMessageId,
+        action,
+        messageId,
+        emoji
+      } = await parseBody(req);
+      const cleanAction = String(action || "").trim().toLowerCase();
+      if (cleanAction === "react") {
+        const targetMessageId = normalizeReplyToMessageId(messageId);
+        const reactionEmoji = normalizeReactionEmoji(emoji);
+        if (Number.isNaN(targetMessageId) || !targetMessageId || !reactionEmoji) {
+          sendJson(res, 400, {
+            error: i18n(req, "بيانات التفاعل غير صالحة.", "Invalid reaction payload.")
+          });
+          return;
+        }
+        const targetMessage = findUserMessageById(room, targetMessageId);
+        if (!targetMessage) {
+          sendJson(res, 404, {
+            error: i18n(req, "لم يتم العثور على رسالة مناسبة للتفاعل.", "No eligible message was found for reaction.")
+          });
+          return;
+        }
+        const reactions = normalizeMessageReactions(targetMessage.reactions);
+        const users = new Set(Array.isArray(reactions[reactionEmoji]) ? reactions[reactionEmoji] : []);
+        if (users.has(username)) {
+          users.delete(username);
+        } else {
+          users.add(username);
+        }
+        if (users.size > 0) {
+          reactions[reactionEmoji] = Array.from(users).sort((a, b) => a.localeCompare(b));
+        } else {
+          delete reactions[reactionEmoji];
+        }
+        // Keep reaction payload bounded and predictable.
+        const cleanReactionEntries = Object.entries(reactions)
+          .slice(0, CHAT_REACTION_MAX_TYPES_PER_MESSAGE)
+          .reduce((acc, [entryEmoji, entryUsers]) => {
+            if (!Array.isArray(entryUsers) || entryUsers.length === 0) {
+              return acc;
+            }
+            acc[entryEmoji] = entryUsers.slice(0, 80);
+            return acc;
+          }, {});
+        targetMessage.reactions = cleanReactionEntries;
+        pushSystemMessage(room, "message_reaction", {
+          messageId: targetMessage.id,
+          reactions: cleanReactionEntries
+        });
+        sendJson(res, 200, {
+          ok: true,
+          messageId: targetMessage.id,
+          reactions: cleanReactionEntries
+        });
+        return;
+      }
       const messageText = String(text || "").trim();
       if (!messageText) {
         sendJson(res, 400, {
@@ -3447,14 +3561,14 @@ async function handleApi(req, res) {
         }
       }
 
-      const messageId = pushUserMessage(room, username, messageText, replyTo);
+      const createdMessageId = pushUserMessage(room, username, messageText, replyTo);
       if (dedupeKey) {
         room.clientMessageLog.set(dedupeKey, {
-          messageId,
+          messageId: createdMessageId,
           timestamp: Date.now()
         });
       }
-      sendJson(res, 201, { ok: true, messageId });
+      sendJson(res, 201, { ok: true, messageId: createdMessageId });
       return;
     }
 

@@ -229,6 +229,31 @@ async function run() {
       msgs.data.messages.some((msg) => msg && msg.type === "user" && msg.user === userB),
       "Host should receive user B message."
     );
+    const userBMessage = msgs.data.messages.find((msg) => msg && msg.type === "user" && msg.user === userB);
+    assert(Boolean(userBMessage?.id), "User B message id should be available.");
+
+    const reactResult = await request(baseUrl, `/api/rooms/${roomCode}/messages`, {
+      method: "POST",
+      token: tokenA,
+      body: { action: "react", messageId: userBMessage.id, emoji: "🔥" },
+      expectedStatus: 200
+    });
+    assert(reactResult.data.ok === true, "Reaction API should return ok=true.");
+
+    const msgsAfterReaction = await request(baseUrl, `/api/rooms/${roomCode}/messages?since=0`, {
+      token: tokenB
+    });
+    const reactedMessage = msgsAfterReaction.data.messages.find((msg) => msg && msg.id === userBMessage.id);
+    assert(
+      Array.isArray(reactedMessage?.reactions?.["🔥"]) && reactedMessage.reactions["🔥"].includes(userA),
+      "Reacted message should include user A in fire emoji reactions."
+    );
+    assert(
+      msgsAfterReaction.data.messages.some(
+        (msg) => msg && msg.type === "system" && msg.key === "message_reaction" && msg.payload?.messageId === userBMessage.id
+      ),
+      "Reaction update system event should be emitted."
+    );
 
     await request(baseUrl, `/api/rooms/${roomCode}/kick`, {
       method: "POST",

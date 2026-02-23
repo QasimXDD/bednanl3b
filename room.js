@@ -168,9 +168,11 @@ let isSendingChatMessage = false;
 let refreshMessagesInFlight = false;
 let refreshMessagesQueued = false;
 let retryableChatSend = null;
+let chatLastOutsidePointerAt = 0;
 let activeReplyTarget = null;
 const renderedMessageIds = new Set();
 const CHAT_SEND_RETRY_WINDOW_MS = 30000;
+const CHAT_REACTION_CHOICES = Object.freeze(["👍", "❤️", "😂", "🔥", "😮", "😢"]);
 const ROOM_VIDEO_MAX_BYTES = 1024 * 1024 * 1024;
 const ROOM_VIDEO_SYNC_LOCK_TOAST_MS = 4000;
 const ROOM_VIDEO_LEADER_SEEK_DRIFT_SEC = 0.9;
@@ -224,6 +226,9 @@ let roomVideoUploadPercentValueEl = null;
 let roomVideoUploadStatusEl = null;
 let roomVideoUploadBarFillEl = null;
 let roomVideoUploadHideTimer = null;
+let activeReactionPickerMessageId = 0;
+const messageReactionState = new Map();
+const reactionToggleInFlight = new Set();
 let roomVideoUploadState = {
   fileName: "",
   totalBytes: 0,
@@ -292,6 +297,8 @@ const I18N = {
     videoFullscreenBtn: "ملء الشاشة",
     videoExitFullscreenBtn: "خروج",
     replyBtn: "رد",
+    reactBtn: "تفاعل",
+    reactPickOne: "اختيار تفاعل {emoji}",
     replyingTo: "الرد على {user}",
     replyCancel: "إلغاء الرد",
     playersTitle: "اللاعبون",
@@ -443,6 +450,8 @@ const I18N = {
     videoFullscreenBtn: "Fullscreen",
     videoExitFullscreenBtn: "Exit",
     replyBtn: "Reply",
+    reactBtn: "React",
+    reactPickOne: "Choose reaction {emoji}",
     replyingTo: "Replying to {user}",
     replyCancel: "Cancel reply",
     playersTitle: "Players",
@@ -553,6 +562,8 @@ function setLang(lang) {
     chatMessages.innerHTML = "";
     lastMessageId = 0;
     renderedMessageIds.clear();
+    messageReactionState.clear();
+    closeReactionPickers();
     refreshMessages();
   }
 }
@@ -617,6 +628,41 @@ function setChatSendingState(sending) {
   if (sendBtn) {
     sendBtn.disabled = isSendingChatMessage;
   }
+}
+
+function focusChatInputForContinuousTyping(submitStartedAt = 0) {
+  if (!chatInput || !chatForm) {
+    return;
+  }
+  if (Number(submitStartedAt) > 0 && chatLastOutsidePointerAt > Number(submitStartedAt)) {
+    return;
+  }
+  const active = document.activeElement;
+  if (
+    active &&
+    active !== document.body &&
+    active !== document.documentElement &&
+    active !== chatInput &&
+    !(chatForm.contains(active))
+  ) {
+    return;
+  }
+  const runFocus = () => {
+    try {
+      chatInput.focus({ preventScroll: true });
+      const len = Number(chatInput.value?.length || 0);
+      if (typeof chatInput.setSelectionRange === "function") {
+        chatInput.setSelectionRange(len, len);
+      }
+    } catch (_error) {
+      // Ignore focus errors.
+    }
+  };
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(runFocus);
+    return;
+  }
+  setTimeout(runFocus, 0);
 }
 
 function shortenReplyText(text, max = 90) {
@@ -685,6 +731,221 @@ function setReplyTargetFromMessage(message) {
   };
   renderReplyDraft();
   chatInput.focus();
+}
+
+function normalizeMessageReactionsState(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  const normalized = {};
+  CHAT_REACTION_CHOICES.forEach((emoji) => {
+    const usersRaw = value[emoji];
+    if (!Array.isArray(usersRaw) || usersRaw.length === 0) {
+      return;
+    }
+    const users = [];
+    const seen = new Set();
+    usersRaw.forEach((entry) => {
+      const username = String(entry || "").trim();
+      if (!username || seen.has(username)) {
+        return;
+      }
+      seen.add(username);
+      users.push(username);
+    });
+    if (users.length > 0) {
+      normalized[emoji] = users;
+    }
+  });
+  return normalized;
+}
+
+function getMessageReactionsState(messageId) {
+  const id = Number(messageId || 0);
+  if (!id) {
+    return {};
+  }
+  return messageReactionState.get(id) || {};
+}
+
+function setMessageReactionsState(messageId, value) {
+  const id = Number(messageId || 0);
+  if (!id) {
+    return {};
+  }
+  const normalized = normalizeMessageReactionsState(value);
+  if (Object.keys(normalized).length === 0) {
+    messageReactionState.delete(id);
+    return {};
+  }
+  messageReactionState.set(id, normalized);
+  return normalized;
+}
+
+function closeReactionPickers(exceptMessageId = 0) {
+  const keepId = Number(exceptMessageId || 0);
+  const lineElements = chatMessages ? chatMessages.querySelectorAll(".chat-line-message[data-message-id]") : [];
+  lineElements.forEach((lineWrap) => {
+    const lineMessageId = Number(lineWrap.dataset.messageId || 0);
+    if (keepId && lineMessageId === keepId) {
+      return;
+    }
+    const picker = lineWrap.querySelector(".chat-line-reaction-picker");
+    const reactBtn = lineWrap.querySelector(".chat-line-react-btn");
+    if (picker) {
+      picker.classList.add("hidden");
+      picker.classList.remove("is-open");
+    }
+    if (reactBtn) {
+      reactBtn.setAttribute("aria-expanded", "false");
+    }
+  });
+  if (!keepId) {
+    activeReactionPickerMessageId = 0;
+  }
+}
+
+function toggleReactionPicker(lineWrap, messageId) {
+  if (!lineWrap) {
+    return;
+  }
+  const lineMessageId = Number(messageId || lineWrap.dataset.messageId || 0);
+  if (!lineMessageId) {
+    return;
+  }
+  const picker = lineWrap.querySelector(".chat-line-reaction-picker");
+  const reactBtn = lineWrap.querySelector(".chat-line-react-btn");
+  if (!picker || !reactBtn) {
+    return;
+  }
+  const shouldOpen = picker.classList.contains("hidden");
+  closeReactionPickers(shouldOpen ? lineMessageId : 0);
+  if (!shouldOpen) {
+    return;
+  }
+  picker.classList.remove("hidden");
+  picker.classList.add("is-open");
+  reactBtn.setAttribute("aria-expanded", "true");
+  activeReactionPickerMessageId = lineMessageId;
+}
+
+function reactionChipTitle(emoji, users) {
+  const list = Array.isArray(users) ? users : [];
+  if (list.length === 0) {
+    return emoji;
+  }
+  const preview = list.slice(0, 4).map((username) => replyTargetDisplayName(username)).join(", ");
+  const suffix = list.length > 4 ? ` +${list.length - 4}` : "";
+  return `${emoji} ${preview}${suffix}`;
+}
+
+function renderMessageReactionChips(lineWrap, messageId) {
+  if (!lineWrap) {
+    return;
+  }
+  const row = lineWrap.querySelector(".chat-line-reactions");
+  if (!row) {
+    return;
+  }
+  const reactions = getMessageReactionsState(messageId);
+  row.innerHTML = "";
+  CHAT_REACTION_CHOICES.forEach((emoji) => {
+    const users = Array.isArray(reactions[emoji]) ? reactions[emoji] : [];
+    if (users.length === 0) {
+      return;
+    }
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "chat-line-reaction-chip";
+    chip.dataset.emoji = emoji;
+    chip.title = reactionChipTitle(emoji, users);
+    chip.setAttribute("aria-label", fmt(t("reactPickOne"), { emoji }));
+    if (users.includes(me)) {
+      chip.classList.add("is-active");
+    }
+    const emojiText = document.createElement("span");
+    emojiText.className = "chat-line-reaction-emoji";
+    emojiText.textContent = emoji;
+    const countText = document.createElement("span");
+    countText.className = "chat-line-reaction-count";
+    countText.textContent = String(users.length);
+    chip.appendChild(emojiText);
+    chip.appendChild(countText);
+    chip.addEventListener("click", () => {
+      sfx("click");
+      toggleMessageReaction(messageId, emoji);
+    });
+    row.appendChild(chip);
+  });
+  row.classList.toggle("hidden", row.childElementCount === 0);
+}
+
+function updateLineReactionButton(lineWrap, messageId) {
+  if (!lineWrap) {
+    return;
+  }
+  const reactBtn = lineWrap.querySelector(".chat-line-react-btn");
+  if (!reactBtn) {
+    return;
+  }
+  const reactions = getMessageReactionsState(messageId);
+  const hasMyReaction = Object.values(reactions).some(
+    (users) => Array.isArray(users) && users.includes(me)
+  );
+  reactBtn.classList.toggle("has-my-reaction", hasMyReaction);
+  reactBtn.setAttribute("aria-pressed", hasMyReaction ? "true" : "false");
+}
+
+function updateMessageReactionUi(messageId) {
+  const id = Number(messageId || 0);
+  if (!id || !chatMessages) {
+    return;
+  }
+  const lines = chatMessages.querySelectorAll(`.chat-line-message[data-message-id="${id}"]`);
+  lines.forEach((lineWrap) => {
+    renderMessageReactionChips(lineWrap, id);
+    updateLineReactionButton(lineWrap, id);
+  });
+}
+
+function applyMessageReactionUpdate(payload) {
+  const messageId = Number(payload?.messageId || 0);
+  if (!messageId) {
+    return;
+  }
+  setMessageReactionsState(messageId, payload?.reactions);
+  updateMessageReactionUi(messageId);
+}
+
+async function toggleMessageReaction(messageId, emoji) {
+  const targetMessageId = Number(messageId || 0);
+  const targetEmoji = CHAT_REACTION_CHOICES.includes(String(emoji || "").trim())
+    ? String(emoji).trim()
+    : "";
+  if (!targetMessageId || !targetEmoji) {
+    return;
+  }
+  const inFlightKey = `${targetMessageId}:${targetEmoji}`;
+  if (reactionToggleInFlight.has(inFlightKey)) {
+    return;
+  }
+  reactionToggleInFlight.add(inFlightKey);
+  try {
+    const result = await api(`/api/rooms/${encodedCode}/messages`, {
+      method: "POST",
+      body: {
+        action: "react",
+        messageId: targetMessageId,
+        emoji: targetEmoji
+      }
+    });
+    setMessageReactionsState(targetMessageId, result?.reactions);
+    updateMessageReactionUi(targetMessageId);
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    reactionToggleInFlight.delete(inFlightKey);
+  }
 }
 
 function formatDate(ts) {
@@ -3114,6 +3375,8 @@ function redirectToHome(message = "") {
   hideGlobalAnnouncement();
   queuedAnnouncement = null;
   clearReplyTarget();
+  closeReactionPickers();
+  messageReactionState.clear();
   closeRequestModal();
   clearRoomVideoPlayer();
   const suffix = message ? `?msg=${encodeURIComponent(message)}` : "";
@@ -3180,6 +3443,9 @@ function systemMessageText(message) {
   }
   if (message.key === "host_changed") {
     return fmt(t("sysHostChanged"), { user: message.payload?.user || "" });
+  }
+  if (message.key === "message_reaction") {
+    return "";
   }
   return message.text || "";
 }
@@ -3717,6 +3983,7 @@ function createMessageLineElement(message) {
   lineWrap.className = "chat-body-line-wrap chat-line-message";
   if (messageId) {
     lineWrap.dataset.messageId = String(messageId);
+    setMessageReactionsState(messageId, message?.reactions);
   }
 
   const lineText = document.createElement("div");
@@ -3724,14 +3991,58 @@ function createMessageLineElement(message) {
   lineText.textContent = message.text;
   lineWrap.appendChild(lineText);
 
+  const actions = document.createElement("div");
+  actions.className = "chat-line-actions";
+
+  const reactBtn = document.createElement("button");
+  reactBtn.type = "button";
+  reactBtn.className = "chat-line-react-btn";
+  reactBtn.textContent = "☺";
+  reactBtn.title = t("reactBtn");
+  reactBtn.setAttribute("aria-label", t("reactBtn"));
+  reactBtn.setAttribute("aria-expanded", "false");
+  reactBtn.addEventListener("click", () => {
+    sfx("click");
+    toggleReactionPicker(lineWrap, messageId);
+  });
+  actions.appendChild(reactBtn);
+
   const replyBtn = document.createElement("button");
   replyBtn.type = "button";
   replyBtn.className = "chat-line-reply-btn";
   replyBtn.textContent = t("replyBtn");
   replyBtn.addEventListener("click", () => {
+    closeReactionPickers();
     setReplyTargetFromMessage(message);
   });
-  lineWrap.appendChild(replyBtn);
+  actions.appendChild(replyBtn);
+  lineWrap.appendChild(actions);
+
+  const picker = document.createElement("div");
+  picker.className = "chat-line-reaction-picker hidden";
+  CHAT_REACTION_CHOICES.forEach((emoji) => {
+    const optionBtn = document.createElement("button");
+    optionBtn.type = "button";
+    optionBtn.className = "chat-line-reaction-option";
+    optionBtn.textContent = emoji;
+    optionBtn.title = fmt(t("reactPickOne"), { emoji });
+    optionBtn.setAttribute("aria-label", fmt(t("reactPickOne"), { emoji }));
+    optionBtn.addEventListener("click", () => {
+      sfx("click");
+      closeReactionPickers();
+      toggleMessageReaction(messageId, emoji);
+    });
+    picker.appendChild(optionBtn);
+  });
+  lineWrap.appendChild(picker);
+
+  const reactionRow = document.createElement("div");
+  reactionRow.className = "chat-line-reactions hidden";
+  lineWrap.appendChild(reactionRow);
+  if (messageId) {
+    renderMessageReactionChips(lineWrap, messageId);
+    updateLineReactionButton(lineWrap, messageId);
+  }
 
   return lineWrap;
 }
@@ -3757,6 +4068,10 @@ function canMergeMessageIntoLastRow(lastRow, message) {
 }
 
 function appendMessage(message) {
+  if (message?.type === "system" && message?.key === "message_reaction") {
+    applyMessageReactionUpdate(message.payload || {});
+    return;
+  }
   const messageId = Number(message?.id || 0);
   const lastRow = chatMessages.lastElementChild;
   if (canMergeMessageIntoLastRow(lastRow, message)) {
@@ -3887,12 +4202,24 @@ async function refreshMessages() {
     const result = await api(`/api/rooms/${encodedCode}/messages?since=${lastMessageId}`);
     const members = Array.isArray(result.room?.members) ? result.room.members : [];
     const messageUsers = (result.messages || []).flatMap((message) => {
-      if (message.type !== "user") {
-        return [];
+      const list = [];
+      if (message.type === "user") {
+        list.push(message.user);
+        if (message.replyTo?.user) {
+          list.push(message.replyTo.user);
+        }
+        const reactions = normalizeMessageReactionsState(message.reactions);
+        CHAT_REACTION_CHOICES.forEach((emoji) => {
+          const users = Array.isArray(reactions[emoji]) ? reactions[emoji] : [];
+          users.forEach((username) => list.push(username));
+        });
       }
-      const list = [message.user];
-      if (message.replyTo?.user) {
-        list.push(message.replyTo.user);
+      if (message.type === "system" && message.key === "message_reaction") {
+        const reactions = normalizeMessageReactionsState(message.payload?.reactions);
+        CHAT_REACTION_CHOICES.forEach((emoji) => {
+          const users = Array.isArray(reactions[emoji]) ? reactions[emoji] : [];
+          users.forEach((username) => list.push(username));
+        });
       }
       return list;
     });
@@ -4317,10 +4644,20 @@ if (videoToolsOverlay) {
 document.addEventListener("pointerdown", (event) => {
   markRoomVideoUserInteracted();
   tryUnlockYouTubeAudioFromGesture();
+  const target = event.target;
+  const isElementTarget = target instanceof Element;
+  const isReactionTarget = isElementTarget
+    ? Boolean(target.closest(".chat-line-reaction-picker, .chat-line-react-btn, .chat-line-reaction-chip"))
+    : false;
+  if (!isReactionTarget && activeReactionPickerMessageId) {
+    closeReactionPickers();
+  }
+  if (target && chatForm && !chatForm.contains(target)) {
+    chatLastOutsidePointerAt = Date.now();
+  }
   if ((!playersDrawerOpen && !videoToolsOpen) || !isRoomMobileLayout()) {
     return;
   }
-  const target = event.target;
   if (!target) {
     return;
   }
@@ -4687,6 +5024,10 @@ document.addEventListener("keydown", (event) => {
     clearReplyTarget();
     return;
   }
+  if (event.key === "Escape" && activeReactionPickerMessageId) {
+    closeReactionPickers();
+    return;
+  }
   if (event.key === "Escape" && playersDrawerOpen) {
     setPlayersDrawerOpen(false);
     return;
@@ -4736,6 +5077,7 @@ chatForm.addEventListener("submit", async (event) => {
   if (isSendingChatMessage) {
     return;
   }
+  const submitStartedAt = Date.now();
   const text = String(chatInput.value || "").trim();
   if (!text) {
     return;
@@ -4743,6 +5085,7 @@ chatForm.addEventListener("submit", async (event) => {
   const replyToMessageId = Number(activeReplyTarget?.id || 0);
   const clientMessageId = reserveClientMessageId(text, replyToMessageId);
   setChatSendingState(true);
+  focusChatInputForContinuousTyping(submitStartedAt);
 
   try {
     await api(`/api/rooms/${encodedCode}/messages`, {
@@ -4765,6 +5108,7 @@ chatForm.addEventListener("submit", async (event) => {
     showToast(error.message);
   } finally {
     setChatSendingState(false);
+    focusChatInputForContinuousTyping(submitStartedAt);
   }
 });
 
