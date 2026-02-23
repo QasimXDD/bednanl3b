@@ -210,6 +210,25 @@ let roomVideoSyncHeartbeatTimer = null;
 let roomVideoLeaderIgnoreSyncUntil = 0;
 let roomVideoSyncClientSeq = 0;
 let roomVideoLastKnownTime = 0;
+let roomVideoUploadOverlay = null;
+let roomVideoUploadTitleEl = null;
+let roomVideoUploadHintEl = null;
+let roomVideoUploadFileLabelEl = null;
+let roomVideoUploadFileValueEl = null;
+let roomVideoUploadProgressLabelEl = null;
+let roomVideoUploadProgressValueEl = null;
+let roomVideoUploadPercentLabelEl = null;
+let roomVideoUploadPercentValueEl = null;
+let roomVideoUploadStatusEl = null;
+let roomVideoUploadBarFillEl = null;
+let roomVideoUploadHideTimer = null;
+let roomVideoUploadState = {
+  fileName: "",
+  totalBytes: 0,
+  loadedBytes: 0,
+  percent: 0,
+  status: "idle"
+};
 
 const I18N = {
   ar: {
@@ -250,6 +269,17 @@ const I18N = {
     videoUploadTooLarge: "حجم الفيديو كبير جدًا (الحد 1GB).",
     videoUploadType: "نوع الفيديو غير مدعوم. استخدم MP4 أو WebM أو OGG.",
     videoUploadNetworkError: "تعذر رفع الفيديو بسبب مشكلة اتصال. تأكد من الإنترنت وحاول مرة أخرى.",
+    videoUploadModalTitle: "رفع الفيديو",
+    videoUploadModalHint: "يرجى الانتظار حتى يكتمل الرفع، سيتم الإغلاق تلقائيا.",
+    videoUploadModalFileLabel: "الملف",
+    videoUploadModalProgressLabel: "المرفوع",
+    videoUploadModalPercentLabel: "النسبة",
+    videoUploadModalProgressValue: "{loaded} / {total} MB",
+    videoUploadModalProgressUnknown: "{loaded} MB",
+    videoUploadModalPreparing: "جاري تجهيز الرفع...",
+    videoUploadModalUploading: "جاري رفع البيانات...",
+    videoUploadModalProcessing: "تم رفع البيانات، جارٍ المعالجة...",
+    videoUploadModalDone: "اكتمل رفع الفيديو.",
     requestNetworkError: "تعذر الاتصال بالخادم. تأكد من الإنترنت وحاول مرة أخرى.",
     videoHostOnly: "التحكم بالفيديو متاح لقائد الغرفة فقط.",
     videoSyncFailed: "تعذر مزامنة الفيديو.",
@@ -390,6 +420,17 @@ const I18N = {
     videoUploadTooLarge: "Video is too large (max 1GB).",
     videoUploadType: "Unsupported video type. Use MP4, WebM, or OGG.",
     videoUploadNetworkError: "Video upload failed due to a network issue. Check your connection and try again.",
+    videoUploadModalTitle: "Uploading Video",
+    videoUploadModalHint: "Please wait until upload finishes. This window closes automatically.",
+    videoUploadModalFileLabel: "File",
+    videoUploadModalProgressLabel: "Uploaded",
+    videoUploadModalPercentLabel: "Percent",
+    videoUploadModalProgressValue: "{loaded} / {total} MB",
+    videoUploadModalProgressUnknown: "{loaded} MB",
+    videoUploadModalPreparing: "Preparing upload...",
+    videoUploadModalUploading: "Uploading data...",
+    videoUploadModalProcessing: "Upload complete, processing...",
+    videoUploadModalDone: "Video upload completed.",
     requestNetworkError: "Could not reach the server. Check your connection and try again.",
     videoHostOnly: "Video controls are leader-only.",
     videoSyncFailed: "Failed to sync video.",
@@ -1964,6 +2005,243 @@ function ensureRoomVideoSyncHeartbeat() {
   }, ROOM_VIDEO_SYNC_HEARTBEAT_MS);
 }
 
+function clearRoomVideoUploadHideTimer() {
+  if (!roomVideoUploadHideTimer) {
+    return;
+  }
+  clearTimeout(roomVideoUploadHideTimer);
+  roomVideoUploadHideTimer = null;
+}
+
+function ensureRoomVideoUploadOverlay() {
+  if (roomVideoUploadOverlay) {
+    return roomVideoUploadOverlay;
+  }
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay room-video-upload-overlay hidden";
+  overlay.setAttribute("aria-hidden", "true");
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+
+  const card = document.createElement("div");
+  card.className = "modal-card room-video-upload-card";
+
+  roomVideoUploadTitleEl = document.createElement("h3");
+  roomVideoUploadTitleEl.className = "room-video-upload-title";
+
+  roomVideoUploadHintEl = document.createElement("p");
+  roomVideoUploadHintEl.className = "muted room-video-upload-hint";
+
+  const meta = document.createElement("div");
+  meta.className = "room-video-upload-meta";
+
+  const createMetaRow = () => {
+    const row = document.createElement("div");
+    row.className = "room-video-upload-row";
+    const label = document.createElement("span");
+    label.className = "room-video-upload-label";
+    const value = document.createElement("span");
+    value.className = "room-video-upload-value";
+    row.appendChild(label);
+    row.appendChild(value);
+    meta.appendChild(row);
+    return { label, value };
+  };
+
+  const fileRow = createMetaRow();
+  roomVideoUploadFileLabelEl = fileRow.label;
+  roomVideoUploadFileValueEl = fileRow.value;
+
+  const progressRow = createMetaRow();
+  roomVideoUploadProgressLabelEl = progressRow.label;
+  roomVideoUploadProgressValueEl = progressRow.value;
+  roomVideoUploadProgressValueEl.classList.add("room-video-upload-value-progress");
+
+  const percentRow = createMetaRow();
+  roomVideoUploadPercentLabelEl = percentRow.label;
+  roomVideoUploadPercentValueEl = percentRow.value;
+  roomVideoUploadPercentValueEl.classList.add("room-video-upload-value-percent");
+
+  const track = document.createElement("div");
+  track.className = "room-video-upload-track";
+  roomVideoUploadBarFillEl = document.createElement("span");
+  roomVideoUploadBarFillEl.className = "room-video-upload-fill";
+  track.appendChild(roomVideoUploadBarFillEl);
+
+  roomVideoUploadStatusEl = document.createElement("p");
+  roomVideoUploadStatusEl.className = "room-video-upload-status";
+
+  card.appendChild(roomVideoUploadTitleEl);
+  card.appendChild(roomVideoUploadHintEl);
+  card.appendChild(meta);
+  card.appendChild(track);
+  card.appendChild(roomVideoUploadStatusEl);
+  overlay.appendChild(card);
+
+  document.body.appendChild(overlay);
+  roomVideoUploadOverlay = overlay;
+  return overlay;
+}
+
+function clampUploadPercent(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(100, numeric));
+}
+
+function formatUploadMbValue(bytes) {
+  const safeBytes = Math.max(0, Number(bytes) || 0);
+  const mb = safeBytes / (1024 * 1024);
+  const fractionDigits = mb >= 100 ? 0 : mb >= 10 ? 1 : 2;
+  try {
+    return new Intl.NumberFormat(getLang() === "ar" ? "ar" : "en-US", {
+      minimumFractionDigits: fractionDigits,
+      maximumFractionDigits: fractionDigits
+    }).format(mb);
+  } catch (_error) {
+    return mb.toFixed(fractionDigits);
+  }
+}
+
+function updateRoomVideoUploadOverlayText() {
+  if (!roomVideoUploadOverlay) {
+    return;
+  }
+  if (roomVideoUploadTitleEl) {
+    roomVideoUploadTitleEl.textContent = t("videoUploadModalTitle");
+  }
+  if (roomVideoUploadHintEl) {
+    roomVideoUploadHintEl.textContent = t("videoUploadModalHint");
+  }
+  if (roomVideoUploadFileLabelEl) {
+    roomVideoUploadFileLabelEl.textContent = t("videoUploadModalFileLabel");
+  }
+  if (roomVideoUploadFileValueEl) {
+    roomVideoUploadFileValueEl.textContent = roomVideoUploadState.fileName || "video";
+  }
+  if (roomVideoUploadProgressLabelEl) {
+    roomVideoUploadProgressLabelEl.textContent = t("videoUploadModalProgressLabel");
+  }
+  const loadedBytes = Math.max(0, Number(roomVideoUploadState.loadedBytes) || 0);
+  const totalBytes = Math.max(0, Number(roomVideoUploadState.totalBytes) || 0);
+  const loadedMb = formatUploadMbValue(loadedBytes);
+  const totalMb = formatUploadMbValue(totalBytes);
+  if (roomVideoUploadProgressValueEl) {
+    roomVideoUploadProgressValueEl.textContent = totalBytes > 0
+      ? fmt(t("videoUploadModalProgressValue"), {
+          loaded: loadedMb,
+          total: totalMb
+        })
+      : fmt(t("videoUploadModalProgressUnknown"), {
+          loaded: loadedMb
+        });
+  }
+  const percent = clampUploadPercent(roomVideoUploadState.percent);
+  if (roomVideoUploadPercentLabelEl) {
+    roomVideoUploadPercentLabelEl.textContent = t("videoUploadModalPercentLabel");
+  }
+  if (roomVideoUploadPercentValueEl) {
+    roomVideoUploadPercentValueEl.textContent = `${Math.round(percent)}%`;
+  }
+  if (roomVideoUploadBarFillEl) {
+    roomVideoUploadBarFillEl.style.width = `${percent}%`;
+  }
+  if (roomVideoUploadStatusEl) {
+    let statusKey = "videoUploadModalPreparing";
+    if (roomVideoUploadState.status === "uploading") {
+      statusKey = "videoUploadModalUploading";
+    } else if (roomVideoUploadState.status === "processing") {
+      statusKey = "videoUploadModalProcessing";
+    } else if (roomVideoUploadState.status === "done") {
+      statusKey = "videoUploadModalDone";
+    }
+    roomVideoUploadStatusEl.textContent = t(statusKey);
+  }
+}
+
+function showRoomVideoUploadOverlay(file) {
+  if (!isRoomLeader()) {
+    return;
+  }
+  clearRoomVideoUploadHideTimer();
+  const overlay = ensureRoomVideoUploadOverlay();
+  roomVideoUploadState = {
+    fileName: String(file?.name || "video"),
+    totalBytes: Math.max(0, Number(file?.size) || 0),
+    loadedBytes: 0,
+    percent: 0,
+    status: "preparing"
+  };
+  updateRoomVideoUploadOverlayText();
+  overlay.classList.remove("hidden");
+  overlay.setAttribute("aria-hidden", "false");
+  document.body.classList.add("room-video-upload-lock");
+}
+
+function setRoomVideoUploadProgress({
+  loadedBytes = null,
+  totalBytes = null,
+  percent = null,
+  status = null
+} = {}) {
+  if (!roomVideoUploadOverlay || roomVideoUploadOverlay.classList.contains("hidden")) {
+    return;
+  }
+  if (typeof status === "string" && status) {
+    roomVideoUploadState.status = status;
+  }
+  const nextTotal = Number(totalBytes);
+  if (Number.isFinite(nextTotal) && nextTotal >= 0) {
+    roomVideoUploadState.totalBytes = nextTotal;
+  }
+  const nextLoaded = Number(loadedBytes);
+  if (Number.isFinite(nextLoaded) && nextLoaded >= 0) {
+    roomVideoUploadState.loadedBytes = nextLoaded;
+  }
+  if (roomVideoUploadState.totalBytes > 0 && roomVideoUploadState.loadedBytes > roomVideoUploadState.totalBytes) {
+    roomVideoUploadState.loadedBytes = roomVideoUploadState.totalBytes;
+  }
+  const nextPercent = Number(percent);
+  if (Number.isFinite(nextPercent)) {
+    roomVideoUploadState.percent = clampUploadPercent(nextPercent);
+  } else if (roomVideoUploadState.totalBytes > 0) {
+    roomVideoUploadState.percent = clampUploadPercent(
+      (roomVideoUploadState.loadedBytes / roomVideoUploadState.totalBytes) * 100
+    );
+  }
+  if (roomVideoUploadState.status === "done") {
+    roomVideoUploadState.percent = 100;
+  }
+  updateRoomVideoUploadOverlayText();
+}
+
+function hideRoomVideoUploadOverlay({ delayMs = 0 } = {}) {
+  clearRoomVideoUploadHideTimer();
+  const close = () => {
+    if (!roomVideoUploadOverlay) {
+      document.body.classList.remove("room-video-upload-lock");
+      return;
+    }
+    roomVideoUploadOverlay.classList.add("hidden");
+    roomVideoUploadOverlay.setAttribute("aria-hidden", "true");
+    document.body.classList.remove("room-video-upload-lock");
+    roomVideoUploadState = {
+      fileName: "",
+      totalBytes: 0,
+      loadedBytes: 0,
+      percent: 0,
+      status: "idle"
+    };
+  };
+  if (delayMs > 0) {
+    roomVideoUploadHideTimer = setTimeout(close, delayMs);
+    return;
+  }
+  close();
+}
+
 function setVideoUploadBusy(busy) {
   isUploadingRoomVideo = Boolean(busy);
   if (videoUploadBtn) {
@@ -2289,6 +2567,14 @@ async function uploadRoomVideo() {
     return;
   }
 
+  showRoomVideoUploadOverlay(file);
+  setRoomVideoUploadProgress({
+    status: "preparing",
+    loadedBytes: 0,
+    totalBytes: Number(file.size || 0),
+    percent: 0
+  });
+
   const duration = await readVideoDurationFromFile(file);
   const formData = new FormData();
   formData.append("video", file, file.name);
@@ -2297,8 +2583,41 @@ async function uploadRoomVideo() {
   }
 
   setVideoUploadBusy(true);
+  let uploadSucceeded = false;
   try {
-    const result = await uploadRoomVideoRequest(`/api/rooms/${encodedCode}/video`, formData);
+    const result = await uploadRoomVideoRequest(`/api/rooms/${encodedCode}/video`, formData, {
+      onStart: () => {
+        setRoomVideoUploadProgress({
+          status: "uploading",
+          loadedBytes: 0,
+          totalBytes: Number(file.size || 0),
+          percent: 0
+        });
+      },
+      onProgress: ({ loadedBytes, totalBytes, percent }) => {
+        setRoomVideoUploadProgress({
+          status: "uploading",
+          loadedBytes,
+          totalBytes: totalBytes || Number(file.size || 0),
+          percent
+        });
+      },
+      onUploadComplete: () => {
+        setRoomVideoUploadProgress({
+          status: "processing",
+          loadedBytes: Number(file.size || 0),
+          totalBytes: Number(file.size || 0),
+          percent: 100
+        });
+      }
+    });
+    setRoomVideoUploadProgress({
+      status: "done",
+      loadedBytes: Number(file.size || 0),
+      totalBytes: Number(file.size || 0),
+      percent: 100
+    });
+    uploadSucceeded = true;
     videoFileInput.value = "";
     showToast(t("videoUploadSuccess"), "success");
     if (result?.room) {
@@ -2322,6 +2641,7 @@ async function uploadRoomVideo() {
     showToast(error.message || t("videoSyncFailed"));
   } finally {
     setVideoUploadBusy(false);
+    hideRoomVideoUploadOverlay({ delayMs: uploadSucceeded ? 420 : 0 });
   }
 }
 
@@ -2409,10 +2729,30 @@ async function clearRoomVideo() {
   }
 }
 
-function uploadRoomVideoRequest(pathname, formData) {
+function uploadRoomVideoRequest(
+  pathname,
+  formData,
+  {
+    onStart = null,
+    onProgress = null,
+    onUploadComplete = null
+  } = {}
+) {
   return new Promise((resolve, reject) => {
     const token = getToken();
     const xhr = new XMLHttpRequest();
+    let uploadCompleteNotified = false;
+    const notifyUploadComplete = () => {
+      if (uploadCompleteNotified || typeof onUploadComplete !== "function") {
+        return;
+      }
+      uploadCompleteNotified = true;
+      try {
+        onUploadComplete();
+      } catch (_error) {
+        // Ignore callback errors to avoid breaking upload flow.
+      }
+    };
     xhr.open("POST", pathname, true);
     xhr.responseType = "json";
     xhr.timeout = 180000;
@@ -2420,8 +2760,32 @@ function uploadRoomVideoRequest(pathname, formData) {
     if (token) {
       xhr.setRequestHeader("Authorization", `Bearer ${token}`);
     }
+    if (typeof onProgress === "function" && xhr.upload) {
+      xhr.upload.onprogress = (event) => {
+        const loadedBytes = Math.max(0, Number(event?.loaded) || 0);
+        const totalBytes = event?.lengthComputable
+          ? Math.max(0, Number(event.total) || 0)
+          : 0;
+        const percent = totalBytes > 0 ? (loadedBytes / totalBytes) * 100 : null;
+        try {
+          onProgress({
+            loadedBytes,
+            totalBytes,
+            percent
+          });
+        } catch (_error) {
+          // Ignore callback errors to avoid breaking upload flow.
+        }
+      };
+    }
+    if (xhr.upload) {
+      xhr.upload.onload = () => {
+        notifyUploadComplete();
+      };
+    }
 
     xhr.onload = () => {
+      notifyUploadComplete();
       const payload =
         xhr.response && typeof xhr.response === "object"
           ? xhr.response
@@ -2464,6 +2828,13 @@ function uploadRoomVideoRequest(pathname, formData) {
       reject(error);
     };
 
+    if (typeof onStart === "function") {
+      try {
+        onStart();
+      } catch (_error) {
+        // Ignore callback errors to avoid breaking upload flow.
+      }
+    }
     xhr.send(formData);
   });
 }
@@ -3553,6 +3924,7 @@ function applyTranslations() {
   }
   updateVideoEmptyNoticeState();
   setVideoUploadBusy(isUploadingRoomVideo);
+  updateRoomVideoUploadOverlayText();
   updateRoomVideoControls();
   renderReplyDraft();
   document.getElementById("playersTitle").textContent = t("playersTitle");
@@ -4388,6 +4760,7 @@ window.addEventListener("beforeunload", () => {
   queuedAnnouncement = null;
   closeRequestModal();
   hideFullscreenChatNotice();
+  hideRoomVideoUploadOverlay();
   clearRoomVideoPlayer();
   unlockOrientationAfterFullscreen();
 });
