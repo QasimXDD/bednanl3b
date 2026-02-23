@@ -2554,6 +2554,10 @@ function handleRoomVideoControlEvent(action) {
     showVideoControlLockedToast();
     return;
   }
+  // File playback emits noisy native events around seek/buffer; we sync those paths explicitly.
+  if (!isYouTubeRoomVideo(roomVideoState)) {
+    return;
+  }
   sendRoomVideoSync(action);
 }
 
@@ -4021,10 +4025,14 @@ if (videoPlayPauseBtn) {
       return;
     }
     if (roomVideoPlayer.paused || roomVideoPlayer.ended) {
+      const current = getSafeLocalVideoCurrentTime(getRoomVideoDuration());
       roomVideoPlayer.play().catch(() => {});
+      sendRoomVideoSync("play", { currentTimeOverride: current });
       return;
     }
+    const current = getSafeLocalVideoCurrentTime(getRoomVideoDuration());
     roomVideoPlayer.pause();
+    sendRoomVideoSync("pause", { currentTimeOverride: current });
   });
 }
 
