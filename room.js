@@ -1848,6 +1848,14 @@ function getSafeLocalVideoCurrentTime(duration = 0) {
   const raw = Number(roomVideoPlayer?.currentTime);
   if (Number.isFinite(raw) && raw >= 0) {
     const clamped = clampVideoTime(raw, duration);
+    const known = clampVideoTime(roomVideoLastKnownTime, duration);
+    if (
+      clamped <= 0.05 &&
+      known > 0.25 &&
+      !roomVideoPlayer?.ended
+    ) {
+      return known;
+    }
     roomVideoLastKnownTime = clamped;
     return clamped;
   }
