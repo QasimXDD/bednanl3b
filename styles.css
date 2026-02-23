@@ -1341,6 +1341,43 @@ ul {
   object-fit: contain;
 }
 
+.video-empty-notice {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 0.52rem;
+  padding: 1.15rem 1.28rem 3.55rem;
+  text-align: center;
+  color: #e9f1ff;
+  pointer-events: none;
+  box-sizing: border-box;
+  background:
+    radial-gradient(circle at 50% 20%, rgba(87, 146, 245, 0.2), transparent 58%),
+    linear-gradient(180deg, rgba(6, 12, 24, 0.52) 0%, rgba(6, 12, 24, 0.76) 52%, rgba(6, 12, 24, 0.9) 100%);
+}
+
+.video-empty-notice p {
+  margin: 0;
+  max-width: min(64ch, 100%);
+  line-height: 1.72;
+}
+
+#videoEmptyNoticeLine1 {
+  font-size: 1.03rem;
+  font-weight: 800;
+  color: #f4f8ff;
+}
+
+#videoEmptyNoticeLine2 {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: rgba(229, 238, 255, 0.94);
+}
+
 .video-controls-bar {
   position: absolute;
   inset-inline: 0;
@@ -3475,6 +3512,21 @@ ul {
     aspect-ratio: auto;
     object-fit: contain;
     background: #000;
+  }
+
+  .video-empty-notice {
+    gap: 0.38rem;
+    padding: 0.95rem 0.9rem 3.15rem;
+  }
+
+  #videoEmptyNoticeLine1 {
+    font-size: 0.83rem;
+    line-height: 1.55;
+  }
+
+  #videoEmptyNoticeLine2 {
+    font-size: 0.72rem;
+    line-height: 1.58;
   }
 
   #roomVideoEmbed {

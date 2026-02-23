@@ -100,6 +100,9 @@ const videoPlayerFrame = document.getElementById("videoPlayerFrame");
 const roomVideoPlayer = document.getElementById("roomVideoPlayer");
 const roomVideoEmbed = document.getElementById("roomVideoEmbed");
 const videoYouTubeMask = document.getElementById("videoYouTubeMask");
+const videoEmptyNotice = document.getElementById("videoEmptyNotice");
+const videoEmptyNoticeLine1 = document.getElementById("videoEmptyNoticeLine1");
+const videoEmptyNoticeLine2 = document.getElementById("videoEmptyNoticeLine2");
 const videoControlsBar = document.getElementById("videoControlsBar");
 const videoPlayPauseBtn = document.getElementById("videoPlayPauseBtn");
 const videoSeekRange = document.getElementById("videoSeekRange");
@@ -221,6 +224,8 @@ const I18N = {
     videoNoVideo: "لا يوجد فيديو مرفوع بعد.",
     videoNowPlaying: "الفيديو الحالي: {name}",
     videoHint: "قائد الغرفة فقط يمكنه رفع ومزامنة الفيديو.",
+    videoEmptyLine1: "تم إنشاء هذا الموقع لتسهيل مشاهدة الأفلام والفيديوهات.",
+    videoEmptyLine2: "يُعتبر هذا الموقع بديل ل ريف مؤقتا لان هذا الموقع يعمل بسلاسة وبدون تعليق عكس تطبيق Rave.",
     videoToolsTitle: "أدوات الفيديو",
     videoToolsOpenLabel: "فتح أدوات الفيديو",
     videoToolsCloseLabel: "إغلاق أدوات الفيديو",
@@ -359,6 +364,8 @@ const I18N = {
     videoNoVideo: "No video uploaded yet.",
     videoNowPlaying: "Current video: {name}",
     videoHint: "Only the room leader can upload and sync video.",
+    videoEmptyLine1: "This site was created to make watching movies and videos easier.",
+    videoEmptyLine2: "It is a temporary alternative to Rave because it runs smoothly without lag unlike the Rave app.",
     videoToolsTitle: "Video Tools",
     videoToolsOpenLabel: "Open video tools",
     videoToolsCloseLabel: "Close video tools",
@@ -1971,6 +1978,14 @@ function updateVideoClearButtonState() {
   updateButton(videoClearBtn, isLeader && mobile);
 }
 
+function updateVideoEmptyNoticeState() {
+  if (!videoEmptyNotice) {
+    return;
+  }
+  const hasVideo = Boolean(roomVideoState && roomVideoState.src);
+  videoEmptyNotice.classList.toggle("hidden", hasVideo);
+}
+
 function showVideoControlLockedToast() {
   // Hidden by request: members should not see lock toast.
 }
@@ -1997,6 +2012,7 @@ function clearRoomVideoPlayer() {
   roomVideoMetadataReady = false;
   roomVideoState = null;
   roomVideoSyncState = null;
+  updateVideoEmptyNoticeState();
   setYouTubeMaskVisible(false);
   hideFullscreenChatNotice();
   setRoomVideoControlsVisible(true);
@@ -2138,6 +2154,7 @@ function renderRoomVideo(room) {
   }
 
   roomVideoState = nextVideo;
+  updateVideoEmptyNoticeState();
   updateVideoClearButtonState();
   const incomingDuration = Number(nextVideo.duration || 0);
   roomVideoSyncState = normalizeIncomingRoomVideoSync(nextVideo.sync, incomingDuration);
@@ -3471,6 +3488,12 @@ function applyTranslations() {
   sendBtn.textContent = t("sendBtn");
   videoTitle.textContent = t("videoTitle");
   videoHintText.textContent = t("videoHint");
+  if (videoEmptyNoticeLine1) {
+    videoEmptyNoticeLine1.textContent = t("videoEmptyLine1");
+  }
+  if (videoEmptyNoticeLine2) {
+    videoEmptyNoticeLine2.textContent = t("videoEmptyLine2");
+  }
   if (videoToolsTitle) {
     videoToolsTitle.textContent = t("videoToolsTitle");
   }
@@ -3486,6 +3509,7 @@ function applyTranslations() {
   } else {
     videoStatusText.textContent = t("videoNoVideo");
   }
+  updateVideoEmptyNoticeState();
   setVideoUploadBusy(isUploadingRoomVideo);
   updateRoomVideoControls();
   renderReplyDraft();
