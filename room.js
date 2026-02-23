@@ -4188,7 +4188,28 @@ if (roomVideoPlayer) {
   roomVideoPlayer.addEventListener("ended", () => {
     revealRoomVideoControls();
     updateRoomVideoControls();
-    handleRoomVideoControlEvent("stop");
+    if (!roomVideoState || isYouTubeRoomVideo(roomVideoState)) {
+      handleRoomVideoControlEvent("stop");
+      return;
+    }
+    const duration = getRoomVideoDuration();
+    let current = getSafeLocalVideoCurrentTime(duration);
+    const known = clampVideoTime(roomVideoLastKnownTime, duration);
+    if (current <= 0.05 && known > 0.25) {
+      current = known;
+    }
+    // Some browsers can emit a transient "ended" after seek even when not at video end.
+    if (duration > 2 && current < duration - 1.4) {
+      applyRoomVideoSyncToPlayer({ forceSeek: true });
+      return;
+    }
+    if (!isRoomLeader()) {
+      applyRoomVideoSyncToPlayer({ forceSeek: true });
+      return;
+    }
+    const endTime = duration > 0 && current >= duration - 0.35 ? duration : current;
+    roomVideoLastKnownTime = endTime;
+    sendRoomVideoSync("pause", { currentTimeOverride: endTime });
   });
 
   roomVideoPlayer.addEventListener("contextmenu", (event) => {
