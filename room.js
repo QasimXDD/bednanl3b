@@ -182,6 +182,7 @@ const ROOM_VIDEO_SYNC_HEARTBEAT_MS = 1200;
 const ROOM_VIDEO_LEADER_SYNC_SUPPRESS_MS = 1400;
 const ROOM_VIDEO_CONTROLS_HIDE_DELAY_MS = 2200;
 const ROOM_VIDEO_CONTROLS_AUTO_HIDE = true;
+const ROOM_VIDEO_EVENT_SUPPRESS_MS = 160;
 const FULLSCREEN_CHAT_NOTICE_TIMEOUT_MS = 2600;
 let roomVideoState = null;
 let roomVideoSyncState = null;
@@ -1882,7 +1883,7 @@ function withSuppressedRoomVideoEvents(callback) {
   } finally {
     setTimeout(() => {
       suppressRoomVideoEvents = false;
-    }, 0);
+    }, ROOM_VIDEO_EVENT_SUPPRESS_MS);
   }
 }
 
@@ -1896,19 +1897,6 @@ function isYouTubeRoomVideo(video = roomVideoState) {
   }
   const src = String(video?.src || "");
   return Boolean(parseYouTubeVideoId(src));
-}
-
-function normalizeComparableVideoSource(value) {
-  const raw = String(value || "").trim();
-  if (!raw) {
-    return "";
-  }
-  try {
-    const parsed = new URL(raw, window.location.origin);
-    return `${parsed.pathname}${parsed.search}`;
-  } catch (_error) {
-    return raw;
-  }
 }
 
 function shouldSendRoomVideoSyncHeartbeat() {
@@ -2081,7 +2069,7 @@ async function applyRoomVideoSyncToPlayer({ forceSeek = false } = {}) {
       setTimeout(() => {
         suppressRoomVideoEvents = false;
         suppressYouTubeStateBroadcast = false;
-      }, 0);
+      }, ROOM_VIDEO_EVENT_SUPPRESS_MS);
       youTubeInitialSyncPending = false;
       setYouTubeMaskVisible(!roomVideoSyncState.playing);
       updateRoomVideoControls();
@@ -2137,7 +2125,7 @@ async function applyRoomVideoSyncToPlayer({ forceSeek = false } = {}) {
   } finally {
     setTimeout(() => {
       suppressRoomVideoEvents = false;
-    }, 0);
+    }, ROOM_VIDEO_EVENT_SUPPRESS_MS);
     updateRoomVideoControls();
   }
 }
@@ -2173,15 +2161,7 @@ function renderRoomVideo(room) {
   roomVideoSyncState = normalizeIncomingRoomVideoSync(nextVideo.sync, incomingDuration);
   const nextVideoId = String(nextVideo.id || "");
   const isYoutube = isYouTubeRoomVideo(nextVideo);
-  const currentSource = isYoutube
-    ? String(activeYouTubeVideoId || "")
-    : normalizeComparableVideoSource(
-      roomVideoPlayer.currentSrc || roomVideoPlayer.getAttribute("src") || roomVideoPlayer.src || ""
-    );
-  const expectedSource = isYoutube
-    ? String(parseYouTubeVideoId(nextVideo.youtubeId) || parseYouTubeVideoId(nextVideo.src) || "")
-    : normalizeComparableVideoSource(nextVideo.src || "");
-  const sourceChanged = activeRoomVideoId !== nextVideoId || currentSource !== expectedSource;
+  const sourceChanged = activeRoomVideoId !== nextVideoId;
   activeRoomVideoId = nextVideoId;
 
   // Always enforce a single visible renderer to avoid stacked video views.
