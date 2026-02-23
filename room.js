@@ -1851,9 +1851,13 @@ function getSafeLocalVideoCurrentTime(duration = 0) {
     roomVideoLastKnownTime = clamped;
     return clamped;
   }
+  const knownFallback = clampVideoTime(roomVideoLastKnownTime, duration);
+  if (knownFallback > 0) {
+    return knownFallback;
+  }
   const syncFallback = roomVideoSyncState
     ? computeRoomVideoTargetTime(roomVideoSyncState, duration)
-    : roomVideoLastKnownTime;
+    : 0;
   const fallback = clampVideoTime(syncFallback, duration);
   roomVideoLastKnownTime = fallback;
   return fallback;
@@ -2487,9 +2491,18 @@ async function sendRoomVideoSync(
     const overrideTime = Number(currentTimeOverride);
     const hasOverrideTime = Number.isFinite(overrideTime) && overrideTime >= 0;
     const safeDuration = useYouTube ? getYouTubeDuration() : getRoomVideoDuration();
-    const currentTime = hasOverrideTime
+    let currentTime = hasOverrideTime
       ? overrideTime
       : (useYouTube ? clampVideoTime(getYouTubeCurrentTime(), safeDuration) : getSafeLocalVideoCurrentTime(safeDuration));
+    if (!useYouTube) {
+      const known = clampVideoTime(roomVideoLastKnownTime, safeDuration);
+      if (!hasOverrideTime && action !== "stop" && currentTime <= 0.05 && known > 0.25) {
+        currentTime = known;
+      }
+      if (currentTime > 0.05) {
+        roomVideoLastKnownTime = clampVideoTime(currentTime, safeDuration);
+      }
+    }
     const rawRate = useYouTube
       ? Number(
           youTubePlayer && youTubePlayerReady && typeof youTubePlayer.getPlaybackRate === "function"
@@ -4042,6 +4055,7 @@ if (videoSeekRange) {
     }
     const progress = Number(videoSeekRange.value || 0) / 1000;
     const targetTime = clampVideoTime(progress * duration, duration);
+    roomVideoLastKnownTime = targetTime;
     if (isYouTubeRoomVideo(roomVideoState)) {
       if (!isRoomLeader()) {
         roomVideoSeekDragging = false;
