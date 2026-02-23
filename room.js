@@ -1898,6 +1898,19 @@ function isYouTubeRoomVideo(video = roomVideoState) {
   return Boolean(parseYouTubeVideoId(src));
 }
 
+function normalizeComparableVideoSource(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+  try {
+    const parsed = new URL(raw, window.location.origin);
+    return `${parsed.pathname}${parsed.search}`;
+  } catch (_error) {
+    return raw;
+  }
+}
+
 function shouldSendRoomVideoSyncHeartbeat() {
   if (!isRoomLeader() || !roomVideoState || !activeRoomVideoId || !roomVideoPlayer) {
     return false;
@@ -2162,10 +2175,12 @@ function renderRoomVideo(room) {
   const isYoutube = isYouTubeRoomVideo(nextVideo);
   const currentSource = isYoutube
     ? String(activeYouTubeVideoId || "")
-    : String(roomVideoPlayer.getAttribute("src") || "");
+    : normalizeComparableVideoSource(
+      roomVideoPlayer.currentSrc || roomVideoPlayer.getAttribute("src") || roomVideoPlayer.src || ""
+    );
   const expectedSource = isYoutube
     ? String(parseYouTubeVideoId(nextVideo.youtubeId) || parseYouTubeVideoId(nextVideo.src) || "")
-    : String(nextVideo.src || "");
+    : normalizeComparableVideoSource(nextVideo.src || "");
   const sourceChanged = activeRoomVideoId !== nextVideoId || currentSource !== expectedSource;
   activeRoomVideoId = nextVideoId;
 

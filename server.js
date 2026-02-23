@@ -39,7 +39,7 @@ const CLIENT_MESSAGE_ID_REGEX = /^[A-Za-z0-9_-]+$/;
 const MESSAGE_DEDUP_TTL_MS = 1000 * 60 * 5;
 const REPLY_PREVIEW_MAX_LENGTH = 160;
 const ROOM_VIDEO_MAX_BYTES = 1024 * 1024 * 1024;
-const ROOM_VIDEO_MULTIPART_OVERHEAD_BYTES = 1024 * 1024;
+const ROOM_VIDEO_MULTIPART_OVERHEAD_BYTES = 8 * 1024 * 1024;
 const ROOM_VIDEO_MAX_DURATION_SEC = 60 * 60 * 8;
 const ROOM_VIDEO_MAX_FILENAME_LENGTH = 120;
 const YOUTUBE_SEARCH_TIMEOUT_MS = 9000;
@@ -3713,6 +3713,19 @@ const server = http.createServer(async (req, res) => {
     serveStatic(pathname, req, res);
   } catch (error) {
     if (error.message === "Payload too large") {
+      const roomPath = parseRoomPath(pathname);
+      const contentType = String(req.headers["content-type"] || "").toLowerCase();
+      if (
+        req.method === "POST"
+        && roomPath?.action === "video"
+        && contentType.includes("multipart/form-data")
+      ) {
+        sendJson(res, 413, {
+          code: "VIDEO_TOO_LARGE",
+          error: i18n(req, "Video file is too large (max 1GB).", "Video file is too large (max 1GB).")
+        });
+        return;
+      }
       sendJson(res, 413, {
         error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Payload is too large.")
       });
@@ -3744,4 +3757,3 @@ loadYouTubeCache();
 server.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
 });
-
