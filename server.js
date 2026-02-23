@@ -38,7 +38,7 @@ const CLIENT_MESSAGE_ID_MAX_LENGTH = 80;
 const CLIENT_MESSAGE_ID_REGEX = /^[A-Za-z0-9_-]+$/;
 const MESSAGE_DEDUP_TTL_MS = 1000 * 60 * 5;
 const REPLY_PREVIEW_MAX_LENGTH = 160;
-const ROOM_VIDEO_MAX_BYTES = 80 * 1024 * 1024;
+const ROOM_VIDEO_MAX_BYTES = 1024 * 1024 * 1024;
 const ROOM_VIDEO_MULTIPART_OVERHEAD_BYTES = 1024 * 1024;
 const ROOM_VIDEO_MAX_DURATION_SEC = 60 * 60 * 8;
 const ROOM_VIDEO_MAX_FILENAME_LENGTH = 120;
@@ -704,10 +704,10 @@ const I18N_AR_BY_EN = Object.freeze({
   "Unsupported video type. Use MP4, WebM or OGG.": "نوع الفيديو غير مدعوم. استخدم MP4 أو WebM أو OGG.",
   "User not found.": "المستخدم غير موجود.",
   "Username is already in use.": "اسم المستخدم مستخدم بالفعل.",
-  "Video file is too large (max 80MB).": "ملف الفيديو كبير جدًا (الحد الأقصى 80MB).",
+  "Video file is too large (max 1GB).": "ملف الفيديو كبير جدًا (الحد الأقصى 1GB).",
   "Video stream link expired. Please set the video again.": "انتهت صلاحية رابط بث الفيديو. يرجى تعيين الفيديو مرة أخرى.",
   "You cannot join until the leader approves your request.": "لا يمكنك الانضمام حتى يوافق القائد على طلبك.",
-  "YouTube video is too large (max 80MB).": "فيديو يوتيوب كبير جدًا (الحد الأقصى 80MB).",
+  "YouTube video is too large (max 1GB).": "فيديو يوتيوب كبير جدًا (الحد الأقصى 1GB).",
   "Your join request is still pending.": "طلب انضمامك ما يزال قيد الانتظار."
 });
 
@@ -3445,7 +3445,7 @@ async function handleApi(req, res) {
       if (uploaded.data.length > ROOM_VIDEO_MAX_BYTES) {
         sendJson(res, 413, {
           code: "VIDEO_TOO_LARGE",
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ (أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ 80MB).", "Video file is too large (max 80MB).")
+          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ (أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ 1GB).", "Video file is too large (max 1GB).")
         });
         return;
       }

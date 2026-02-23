@@ -171,7 +171,7 @@ let retryableChatSend = null;
 let activeReplyTarget = null;
 const renderedMessageIds = new Set();
 const CHAT_SEND_RETRY_WINDOW_MS = 30000;
-const ROOM_VIDEO_MAX_BYTES = 80 * 1024 * 1024;
+const ROOM_VIDEO_MAX_BYTES = 1024 * 1024 * 1024;
 const ROOM_VIDEO_SYNC_LOCK_TOAST_MS = 4000;
 const ROOM_VIDEO_LEADER_SEEK_DRIFT_SEC = 0.9;
 const ROOM_VIDEO_MEMBER_HARD_SEEK_DRIFT_SEC = 1.6;
@@ -244,7 +244,7 @@ const I18N = {
     videoYoutubeResolveFail: "تعذر جلب نتائج يوتيوب الآن.",
     videoUploadSuccess: "تم رفع الفيديو وتحديث المزامنة.",
     videoClearSuccess: "تم حذف الفيديو الحالي من الغرفة.",
-    videoUploadTooLarge: "حجم الفيديو كبير جدًا (الحد 80MB).",
+    videoUploadTooLarge: "حجم الفيديو كبير جدًا (الحد 1GB).",
     videoUploadType: "نوع الفيديو غير مدعوم. استخدم MP4 أو WebM أو OGG.",
     videoUploadNetworkError: "تعذر رفع الفيديو بسبب مشكلة اتصال. تأكد من الإنترنت وحاول مرة أخرى.",
     requestNetworkError: "تعذر الاتصال بالخادم. تأكد من الإنترنت وحاول مرة أخرى.",
@@ -384,7 +384,7 @@ const I18N = {
     videoYoutubeResolveFail: "Could not resolve YouTube right now.",
     videoUploadSuccess: "Video uploaded and sync updated.",
     videoClearSuccess: "Current room video removed.",
-    videoUploadTooLarge: "Video is too large (max 80MB).",
+    videoUploadTooLarge: "Video is too large (max 1GB).",
     videoUploadType: "Unsupported video type. Use MP4, WebM, or OGG.",
     videoUploadNetworkError: "Video upload failed due to a network issue. Check your connection and try again.",
     requestNetworkError: "Could not reach the server. Check your connection and try again.",
