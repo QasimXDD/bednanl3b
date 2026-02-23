@@ -701,6 +701,7 @@ const I18N_AR_BY_EN = Object.freeze({
   "Only the room leader can set video source.": "فقط قائد الغرفة يمكنه تحديد مصدر الفيديو.",
   "Only the room leader can sync the video.": "فقط قائد الغرفة يمكنه مزامنة الفيديو.",
   "Only the room leader can upload videos.": "فقط قائد الغرفة يمكنه رفع الفيديو.",
+  "Only the room leader can remove videos.": "فقط قائد الغرفة يمكنه حذف الفيديو.",
   "Only the room leader can view requests.": "فقط قائد الغرفة يمكنه عرض الطلبات.",
   "Payload is too large.": "حجم البيانات المرسلة كبير جدًا.",
   "Player is not in this room.": "اللاعب ليس في هذه الغرفة.",
