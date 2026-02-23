@@ -209,6 +209,7 @@ let videoToolsModalHideTimer = null;
 let roomVideoSyncHeartbeatTimer = null;
 let roomVideoLeaderIgnoreSyncUntil = 0;
 let roomVideoSyncClientSeq = 0;
+let roomVideoLastKnownTime = 0;
 
 const I18N = {
   ar: {
@@ -1777,7 +1778,7 @@ function updateRoomVideoControls({ previewTime = null } = {}) {
   if (canUseCustomControls) {
     currentTime = isYoutube
       ? clampVideoTime(getYouTubeCurrentTime(), duration)
-      : clampVideoTime(roomVideoPlayer?.currentTime, duration);
+      : getSafeLocalVideoCurrentTime(duration);
   }
   if (previewTime !== null && Number.isFinite(previewTime)) {
     currentTime = clampVideoTime(previewTime, duration);
@@ -1841,6 +1842,21 @@ function clampVideoTime(value, duration = 0) {
     return Math.min(duration, safe);
   }
   return safe;
+}
+
+function getSafeLocalVideoCurrentTime(duration = 0) {
+  const raw = Number(roomVideoPlayer?.currentTime);
+  if (Number.isFinite(raw) && raw >= 0) {
+    const clamped = clampVideoTime(raw, duration);
+    roomVideoLastKnownTime = clamped;
+    return clamped;
+  }
+  const syncFallback = roomVideoSyncState
+    ? computeRoomVideoTargetTime(roomVideoSyncState, duration)
+    : roomVideoLastKnownTime;
+  const fallback = clampVideoTime(syncFallback, duration);
+  roomVideoLastKnownTime = fallback;
+  return fallback;
 }
 
 function normalizeIncomingRoomVideoSync(sync, duration = 0) {
@@ -2014,6 +2030,7 @@ function clearRoomVideoPlayer() {
   roomVideoMetadataReady = false;
   roomVideoState = null;
   roomVideoSyncState = null;
+  roomVideoLastKnownTime = 0;
   updateVideoEmptyNoticeState();
   setYouTubeMaskVisible(false);
   hideFullscreenChatNotice();
@@ -2086,7 +2103,7 @@ async function applyRoomVideoSyncToPlayer({ forceSeek = false } = {}) {
     : Number(roomVideoState.duration || 0);
   const targetTime = computeRoomVideoTargetTime(roomVideoSyncState, duration);
   const baseRate = normalizeVideoRate(roomVideoSyncState.playbackRate);
-  const localTime = clampVideoTime(roomVideoPlayer.currentTime, duration);
+  const localTime = getSafeLocalVideoCurrentTime(duration);
   const drift = targetTime - localTime;
   const absDrift = Math.abs(drift);
   const leaderControl = isRoomLeader();
@@ -2191,6 +2208,7 @@ function renderRoomVideo(room) {
   } else if (sourceChanged) {
     destroyYouTubePlayer();
     roomVideoMetadataReady = false;
+    roomVideoLastKnownTime = 0;
     withSuppressedRoomVideoEvents(() => {
       roomVideoPlayer.pause();
       roomVideoPlayer.src = nextVideo.src;
@@ -2468,9 +2486,10 @@ async function sendRoomVideoSync(
       : undefined;
     const overrideTime = Number(currentTimeOverride);
     const hasOverrideTime = Number.isFinite(overrideTime) && overrideTime >= 0;
+    const safeDuration = useYouTube ? getYouTubeDuration() : getRoomVideoDuration();
     const currentTime = hasOverrideTime
       ? overrideTime
-      : (useYouTube ? getYouTubeCurrentTime() : Number(roomVideoPlayer.currentTime || 0));
+      : (useYouTube ? clampVideoTime(getYouTubeCurrentTime(), safeDuration) : getSafeLocalVideoCurrentTime(safeDuration));
     const rawRate = useYouTube
       ? Number(
           youTubePlayer && youTubePlayerReady && typeof youTubePlayer.getPlaybackRate === "function"
@@ -4142,6 +4161,11 @@ if (roomVideoPlayer) {
   });
 
   roomVideoPlayer.addEventListener("timeupdate", () => {
+    const duration = getRoomVideoDuration();
+    const current = Number(roomVideoPlayer.currentTime);
+    if (Number.isFinite(current) && current >= 0) {
+      roomVideoLastKnownTime = clampVideoTime(current, duration);
+    }
     if (!roomVideoSeekDragging) {
       updateRoomVideoControls();
     }
