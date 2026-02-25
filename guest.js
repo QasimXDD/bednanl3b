@@ -11,7 +11,7 @@ const toastContainer = document.getElementById("guestToastContainer");
 
 const I18N = {
   ar: {
-    pageTitle: "الدخول كضيف - Bedna NL3B",
+    pageTitle: "الدخول كضيف - SawaWatch",
     langLabel: "اللغة",
     guestTitle: "الدخول كضيف",
     guestDesc: "اكتب اسمك فقط وسيتم إدخالك للموقع مباشرة بدون حساب.",
@@ -24,7 +24,7 @@ const I18N = {
     toastNetworkError: "تعذر الاتصال بالخادم. تأكد من الإنترنت وحاول مرة أخرى."
   },
   en: {
-    pageTitle: "Guest Login - Bedna NL3B",
+    pageTitle: "Guest Login - SawaWatch",
     langLabel: "Language",
     guestTitle: "Continue as Guest",
     guestDesc: "Enter your name only, and you will join the site without creating an account.",

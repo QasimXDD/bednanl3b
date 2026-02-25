@@ -1,13 +1,13 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="ar" dir="rtl">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Bedna NL3B Platform</title>
+  <title>SawaWatch</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Changa:wght@600;700;800&family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=20260222a">
+  <link rel="stylesheet" href="styles.css?v=20260225a">
 </head>
 <body>
   <div class="top-controls">
@@ -16,7 +16,6 @@
       <option value="ar">العربية</option>
       <option value="en">English</option>
     </select>
-    <button id="soundToggle" class="sound-toggle" type="button">Sound: On</button>
   </div>
   <button id="supervisorMenuToggle" class="btn btn-ghost supervisor-global-toggle hidden" type="button" aria-controls="supervisorSidebar" aria-expanded="false" aria-label="Supervisor Menu" title="Supervisor Menu">ظ„ظˆط­ط© ط§ظ„ظ…ط´ط±ظپ</button>
 
@@ -25,20 +24,15 @@
     <div class="orb orb-2"></div>
     <div class="splash-content">
       <p class="label" id="splashLabel">WELCOME TO</p>
-      <h1>BEDNA NL3B</h1>
-      <p class="sub" id="splashSub">Game Server Portal</p>
+      <h1>SawaWatch</h1>
+      <p class="sub" id="splashSub">Watch Party Server</p>
     </div>
   </div>
 
   <main id="app" class="app hidden">
     <section id="authSection" class="panel auth-panel">
       <h2 id="authTitle">Start Your Journey</h2>
-      <p class="muted" id="authDesc">Create a new account or sign in to your existing account</p>
-
-      <div class="tabs">
-        <button class="tab active" data-tab="register" id="tabRegister">Register</button>
-        <button class="tab" data-tab="login" id="tabLogin">Login</button>
-      </div>
+      <p class="muted" id="authDesc">Sign in to your account</p>
 
       <form id="authForm" class="form">
         <label for="username" id="usernameLabel">Username</label>
@@ -47,20 +41,27 @@
         <label for="password" id="passwordLabel">Password</label>
         <input id="password" name="password" type="password" minlength="4" required>
 
-        <button id="authBtn" class="btn" type="submit">Create Account</button>
+        <button id="authBtn" class="btn" type="submit">Login</button>
       </form>
+      <button id="openRegisterBtn" class="btn auth-register-open-btn" type="button">Create Account</button>
       <button id="guestLoginBtn" class="btn btn-ghost auth-guest-btn" type="button">Continue as Guest</button>
     </section>
 
     <section id="lobbySection" class="lobby-shell hidden">
+      <div class="lobby-sakura-scene" aria-hidden="true">
+        <div class="lobby-sakura-branch"></div>
+        <div class="lobby-sakura-bloom"></div>
+        <div class="lobby-sakura-petals"></div>
+      </div>
       <div class="panel lobby-panel">
         <div class="lobby-head">
           <div>
-            <h2 id="lobbyTitle">Lobby</h2>
+            <h2 id="lobbyTitle">الصفحة الرئيسية</h2>
             <p class="muted"><span id="welcomePrefix">Welcome</span> <span id="currentUser"></span></p>
             <p class="muted" id="siteStatsText">Online: 0 | In Rooms: 0</p>
           </div>
           <div class="lobby-head-actions">
+            <button id="openProfileBtn" class="btn btn-ghost" type="button">الملف الشخصي</button>
             <button id="logoutBtn" class="btn btn-ghost" type="button">Logout</button>
           </div>
         </div>
@@ -70,7 +71,7 @@
             <form id="createRoomForm" class="form box">
               <h3 id="createRoomTitle">Create Room</h3>
               <label for="roomName" id="roomNameLabel">Room Name</label>
-              <input id="roomName" name="roomName" type="text" maxlength="40" placeholder="Example: Tournament Room">
+              <input id="roomName" name="roomName" type="text" maxlength="40" placeholder="Example: Movie Night">
               <button class="btn" type="submit" id="createRoomBtn">Create</button>
             </form>
 
@@ -165,9 +166,37 @@
     </section>
   </main>
 
+  <div id="lobbyProfileModal" class="modal-overlay hidden">
+    <div class="modal-card profile-modal-card">
+      <button id="lobbyProfileModalTopClose" class="modal-close-x" type="button" aria-label="Close">X</button>
+      <h3 id="lobbyProfileTitle">الملف الشخصي</h3>
+      <div class="profile-top">
+        <img id="lobbyProfileAvatar" class="profile-avatar" alt="avatar">
+        <div>
+          <p class="muted" id="lobbyProfileUsername"></p>
+          <p class="muted" id="lobbyProfileStatus"></p>
+          <p class="muted" id="lobbyProfileCreatedAt"></p>
+        </div>
+      </div>
+      <div class="profile-edit">
+        <label for="lobbyProfileDisplayNameInput" id="lobbyProfileDisplayNameLabel">Display Name</label>
+        <input id="lobbyProfileDisplayNameInput" type="text" maxlength="30">
+        <label for="lobbyProfileAvatarInput" id="lobbyProfileAvatarLabel">Profile Image</label>
+        <input id="lobbyProfileAvatarInput" type="file" accept="image/png,image/jpeg,image/webp">
+        <div class="room-actions">
+          <button id="lobbyProfileSaveBtn" class="btn" type="button">Save</button>
+          <button id="lobbyProfileRemoveAvatarBtn" class="btn btn-ghost" type="button">Remove Image</button>
+        </div>
+      </div>
+      <div class="room-actions">
+        <button id="lobbyProfileCloseBtn" class="btn btn-ghost" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
-  <script src="sound.js?v=20260222b"></script>
-  <script src="script.js?v=20260222a"></script>
+  <script src="sound.js?v=20260225c"></script>
+  <script src="script.js?v=20260225c"></script>
 </body>
 </html>
 

@@ -1,13 +1,13 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="ar" dir="rtl">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Room</title>
+  <title>SawaWatch Room</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Changa:wght@600;700;800&family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=20260223h">
+  <link rel="stylesheet" href="styles.css?v=20260225c">
 </head>
 <body>
   <div class="top-controls">
@@ -16,8 +16,7 @@
       <option value="ar">العربية</option>
       <option value="en">English</option>
     </select>
-    <button id="soundToggle" class="sound-toggle" type="button">Sound: On</button>
-    <button id="quickLeaveBtn" class="top-leave-btn" type="button">خروج</button>
+    <button id="quickLeaveBtn" class="top-leave-btn" type="button">Leave</button>
   </div>
   <button id="roomSupervisorToggle" class="btn btn-ghost supervisor-global-toggle hidden" type="button" aria-controls="roomSupervisorPanel" aria-expanded="false">ظ„ظˆط­ط© ط§ظ„ظ…ط´ط±ظپ</button>
 
@@ -30,8 +29,7 @@
           <p class="muted"><span id="youLabel">You</span>: <span id="meName"></span></p>
         </div>
         <div class="room-head-actions">
-          <button class="btn btn-ghost" type="button" id="openMyProfile">My Profile</button>
-          <a class="btn btn-ghost" href="/" id="backToLobby">Back to Lobby</a>
+          <a class="btn btn-danger" href="/" id="backToLobby">Leave Room</a>
         </div>
       </header>
       <div class="room-grid">
@@ -49,7 +47,7 @@
               </svg>
             </span>
             <span class="players-drawer-toggle-icon players-drawer-toggle-icon-close" aria-hidden="true">X</span>
-            <span id="playersDrawerToggleText" class="players-drawer-toggle-text">Users</span>
+            <span id="playersDrawerToggleText" class="players-drawer-toggle-text">Members</span>
             <span id="playersDrawerCountBadge" class="players-drawer-count-badge">0</span>
           </button>
           <button id="videoToolsToggle" class="video-tools-toggle hidden" type="button" aria-controls="videoLeaderTools" aria-expanded="false">
@@ -61,7 +59,7 @@
             <div id="videoYouTubeMask" class="video-youtube-mask hidden"></div>
             <div id="videoEmptyNotice" class="video-empty-notice hidden">
               <p id="videoEmptyNoticeLine1">تم إنشاء هذا الموقع لتسهيل مشاهدة الأفلام والفيديوهات.</p>
-              <p id="videoEmptyNoticeLine2">يُعتبر هذا الموقع بديل ل ريف مؤقتا لان هذا الموقع يعمل بسلاسة وبدون تعليق عكس تطبيق Rave.</p>
+              <p id="videoEmptyNoticeLine2">صُمم هذا الموقع لجلسات المشاهدة الجماعية السلسة مع الأصدقاء.</p>
             </div>
             <div id="videoControlsBar" class="video-controls-bar">
               <button id="videoPlayPauseBtn" class="btn btn-ghost video-control-btn" type="button">Play</button>
@@ -116,10 +114,10 @@
 
         <aside id="playersDrawer" class="players-box box" aria-hidden="false">
           <div class="players-box-head">
-            <h3 id="playersTitle">Players</h3>
+            <h3 id="playersTitle">Members</h3>
             <button id="playersDrawerClose" class="btn btn-ghost players-drawer-close" type="button" aria-label="Close">X</button>
           </div>
-          <p class="muted" id="roomMembersCountText">Inside room: 0</p>
+          <p class="muted" id="roomMembersCountText">Inside watch room: 0</p>
           <ul id="playersList" class="players-list"></ul>
           <section id="pendingRequestsBox" class="pending-requests hidden">
             <h4 id="pendingRequestsTitle">Join Requests</h4>
@@ -248,8 +246,8 @@
   </section>
 
   <div id="toastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
-  <script src="sound.js?v=20260222b"></script>
-  <script src="room.js?v=20260223x"></script>
+  <script src="sound.js?v=20260225c"></script>
+  <script src="room.js?v=20260225s"></script>
 </body>
 </html>
 

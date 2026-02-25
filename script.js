@@ -4,15 +4,45 @@ const app = document.getElementById("app");
 const authSection = document.getElementById("authSection");
 const lobbySection = document.getElementById("lobbySection");
 const bannedSection = document.getElementById("bannedSection");
-const tabs = document.querySelectorAll(".tab");
 const authForm = document.getElementById("authForm");
 const authBtn = document.getElementById("authBtn");
+const openRegisterBtn = document.getElementById("openRegisterBtn");
 const guestLoginBtn = document.getElementById("guestLoginBtn");
 const logoutBtn = document.getElementById("logoutBtn");
+const openProfileBtn = document.getElementById("openProfileBtn");
 const currentUser = document.getElementById("currentUser");
 const siteStatsText = document.getElementById("siteStatsText");
 const langSelect = document.getElementById("langSelect");
 const soundToggleBtn = document.getElementById("soundToggle");
+const lobbyProfileModal = document.getElementById("lobbyProfileModal");
+const lobbyProfileModalTopClose = document.getElementById("lobbyProfileModalTopClose");
+const lobbyProfileTitle = document.getElementById("lobbyProfileTitle");
+const lobbyProfileAvatar = document.getElementById("lobbyProfileAvatar");
+const lobbyProfileUsername = document.getElementById("lobbyProfileUsername");
+const lobbyProfileStatus = document.getElementById("lobbyProfileStatus");
+const lobbyProfileCreatedAt = document.getElementById("lobbyProfileCreatedAt");
+const lobbyProfileDisplayNameLabel = document.getElementById("lobbyProfileDisplayNameLabel");
+const lobbyProfileDisplayNameInput = document.getElementById("lobbyProfileDisplayNameInput");
+const lobbyProfileAvatarLabel = document.getElementById("lobbyProfileAvatarLabel");
+const lobbyProfileAvatarInput = document.getElementById("lobbyProfileAvatarInput");
+const lobbyProfileSaveBtn = document.getElementById("lobbyProfileSaveBtn");
+const lobbyProfileRemoveAvatarBtn = document.getElementById("lobbyProfileRemoveAvatarBtn");
+const lobbyProfileCloseBtn = document.getElementById("lobbyProfileCloseBtn");
+const registerModal = document.getElementById("registerModal");
+const registerModalTopClose = document.getElementById("registerModalTopClose");
+const registerModalTitle = document.getElementById("registerModalTitle");
+const registerForm = document.getElementById("registerForm");
+const registerUsernameLabel = document.getElementById("registerUsernameLabel");
+const registerUsernameInput = document.getElementById("registerUsername");
+const registerPasswordLabel = document.getElementById("registerPasswordLabel");
+const registerPasswordInput = document.getElementById("registerPassword");
+const registerDisplayNameLabel = document.getElementById("registerDisplayNameLabel");
+const registerDisplayNameInput = document.getElementById("registerDisplayName");
+const registerAvatarLabel = document.getElementById("registerAvatarLabel");
+const registerAvatarInput = document.getElementById("registerAvatarInput");
+const registerSubmitBtn = document.getElementById("registerSubmitBtn");
+const registerRemoveAvatarBtn = document.getElementById("registerRemoveAvatarBtn");
+const registerCancelBtn = document.getElementById("registerCancelBtn");
 
 const createRoomForm = document.getElementById("createRoomForm");
 const joinRoomForm = document.getElementById("joinRoomForm");
@@ -57,7 +87,6 @@ const USER_KEY = "bedna_user";
 const LANG_KEY = "bedna_lang";
 const PENDING_JOIN_KEY = "bedna_pending_join_room";
 const ANNOUNCEMENT_SEEN_KEY = "bedna_seen_announcement_id";
-let mode = "register";
 let lobbyPollTimer = null;
 let cachedRooms = [];
 let cachedAppeals = [];
@@ -88,29 +117,61 @@ let roomActionStartedAt = 0;
 let roomActionMode = "";
 let roomActionBusy = false;
 const ROOM_ACTION_MIN_MS = 2600;
+let pendingJoinOverlay = null;
+let pendingJoinTitle = null;
+let pendingJoinText = null;
+let pendingJoinCodeText = null;
+let pendingJoinHint = null;
+let pendingJoinCancelBtn = null;
+let pendingJoinActiveCode = "";
+let pendingJoinCancelInFlight = false;
+let selectedLobbyAvatarDataUrl = null;
+let activeLobbyProfile = null;
+let selectedRegisterAvatarDataUrl = null;
+const AVATAR_MAX_DATA_URL_LENGTH = 280000;
+const AVATAR_DIMENSION_STEPS = [720, 600, 512, 420, 360, 300, 256];
+const AVATAR_QUALITY_STEPS = [0.86, 0.78, 0.7, 0.62, 0.54, 0.46, 0.38];
+let avatarWebpSupported = null;
 
 const I18N = {
   ar: {
-    pageTitle: "منصة Bedna NL3B",
+    pageTitle: "SawaWatch",
     langLabel: "اللغة",
     splashLabel: "مرحبًا بك في",
-    splashSub: "بوابة سيرفر الألعاب",
+    splashSub: "منصة المشاهدة الجماعية",
     authTitle: "ابدأ رحلتك",
-    authDesc: "أنشئ حسابًا جديدًا أو سجّل الدخول إلى حسابك الحالي",
-    tabRegister: "تسجيل",
-    tabLogin: "دخول",
+    authDesc: "سجّل الدخول إلى حسابك",
     usernameLabel: "اسم المستخدم",
     passwordLabel: "كلمة المرور",
     authBtnRegister: "إنشاء حساب",
     authBtnLogin: "دخول",
+    openRegisterBtn: "إنشاء حساب جديد",
+    registerModalTitle: "إنشاء حساب",
+    registerDisplayNameLabel: "اسم الحساب",
+    registerAvatarLabel: "الصورة الشخصية (اختياري)",
+    registerCancelBtn: "إغلاق",
     guestLoginBtn: "الدخول كضيف",
-    lobbyTitle: "اللوبي",
+    lobbyTitle: "الصفحة الرئيسية",
     welcomePrefix: "مرحبًا",
     siteStatsText: "المتواجدون الآن: {online} | داخل الغرف: {inRooms}",
+    profileBtn: "الملف الشخصي",
     logoutBtn: "تسجيل الخروج",
+    profileTitle: "الملف الشخصي",
+    profileOnline: "الحالة: متصل الآن",
+    profileOffline: "الحالة: غير متصل",
+    profileCreated: "تاريخ إنشاء الحساب: {date}",
+    profileDisplayName: "الاسم الظاهر",
+    profileAvatar: "الصورة الشخصية",
+    profileSave: "حفظ",
+    profileRemoveAvatar: "إزالة الصورة",
+    profileSaved: "تم حفظ الملف الشخصي.",
+    profileOpenFail: "تعذر تحميل الملف الشخصي.",
+    profileNameInvalid: "الاسم الظاهر يجب أن يكون بين 2 و 30 حرفًا.",
+    profileAvatarTooLarge: "الصورة كبيرة جدًا. اختر صورة أصغر أو أقل دقة.",
+    closeBtn: "إغلاق",
     createRoomTitle: "إنشاء غرفة",
     roomNameLabel: "اسم الغرفة",
-    roomNamePlaceholder: "مثال: غرفة البطولات",
+    roomNamePlaceholder: "مثال: سهرة فيلم",
     createRoomBtn: "إنشاء",
     joinRoomTitle: "الانضمام برمز الدعوة",
     roomCodeLabel: "رمز الغرفة",
@@ -184,14 +245,22 @@ const I18N = {
     rejectBtn: "رفض",
     toastRequestFailed: "فشل الطلب.",
     toastInputShort: "اسم المستخدم 3 أحرف على الأقل وكلمة المرور 4 أحرف على الأقل.",
+    toastRegisterInputShort: "اسم المستخدم 3+، كلمة المرور 4+، واسم الحساب 2+ أحرف.",
     toastRegisterOk: "تم إنشاء الحساب بنجاح.",
     toastLoginOk: "تم تسجيل الدخول بنجاح.",
     toastGuestEnter: "تم الدخول كضيف.",
     toastLogoutOk: "تم تسجيل الخروج.",
     toastInvalidCode: "أدخل رمز غرفة صحيح.",
     toastJoinRequestSent: "تم إرسال طلب الانضمام.",
-    toastJoinApproved: "تم قبول اللاعب {user}.",
-    toastJoinRejected: "تم رفض طلب اللاعب {user}.",
+    toastJoinRequestCancelled: "تم إلغاء طلب الانضمام.",
+    toastJoinRequestClosed: "تم إغلاق طلب الانضمام (رفض أو إزالة).",
+    toastJoinApproved: "تم قبول {user}.",
+    toastJoinRejected: "تم رفض طلب {user}.",
+    joinWaitTitle: "طلب الانضمام قيد الانتظار",
+    joinWaitText: "تم إرسال طلبك إلى قائد الغرفة: {room}",
+    joinWaitCode: "رمز الغرفة: {code}",
+    joinWaitHint: "انتظر قبول القائد أو رفضه. يمكنك إلغاء الطلب الآن.",
+    joinWaitCancelBtn: "إلغاء طلب الانضمام",
     bannedTitle: "الحساب محظور",
     bannedDesc: "تم حظر هذا الحساب من الموقع. يمكنك إرسال طلب للمشرف لرفع الحظر.",
     bannedReasonText: "سبب الحظر: {reason}",
@@ -205,7 +274,7 @@ const I18N = {
     banTransitionTitle: "تم حظر حسابك",
     banTransitionSub: "جارٍ نقلك إلى صفحة الحظر...",
     unbanTransitionTitle: "تم فك الحظر",
-    unbanTransitionSubLobby: "يمكنك المتابعة الآن. جارٍ إعادتك إلى اللوبي...",
+    unbanTransitionSubLobby: "يمكنك المتابعة الآن. جارٍ إعادتك إلى الصفحة الرئيسية...",
     unbanTransitionSubAuth: "يمكنك المتابعة الآن. جارٍ إعادتك إلى صفحة الدخول...",
     announcementModalTitle: "رسالة عامة من المشرف",
     announcementModalTimer: "ستختفي خلال {seconds} ثوانٍ",
@@ -218,26 +287,43 @@ const I18N = {
     soundOff: "الصوت: إيقاف"
   },
   en: {
-    pageTitle: "Bedna NL3B Platform",
+    pageTitle: "SawaWatch",
     langLabel: "Language",
     splashLabel: "WELCOME TO",
-    splashSub: "Game Server Portal",
+    splashSub: "Watch Party Server",
     authTitle: "Start Your Journey",
-    authDesc: "Create a new account or sign in to your existing account",
-    tabRegister: "Register",
-    tabLogin: "Login",
+    authDesc: "Sign in to your account",
     usernameLabel: "Username",
     passwordLabel: "Password",
     authBtnRegister: "Create Account",
     authBtnLogin: "Login",
+    openRegisterBtn: "Create New Account",
+    registerModalTitle: "Create Account",
+    registerDisplayNameLabel: "Account Name",
+    registerAvatarLabel: "Profile Image (Optional)",
+    registerCancelBtn: "Close",
     guestLoginBtn: "Continue as Guest",
-    lobbyTitle: "Lobby",
+    lobbyTitle: "Home",
     welcomePrefix: "Welcome",
     siteStatsText: "Online now: {online} | Inside rooms: {inRooms}",
+    profileBtn: "Profile",
     logoutBtn: "Logout",
+    profileTitle: "Profile",
+    profileOnline: "Status: Online",
+    profileOffline: "Status: Offline",
+    profileCreated: "Account created: {date}",
+    profileDisplayName: "Display Name",
+    profileAvatar: "Profile Image",
+    profileSave: "Save",
+    profileRemoveAvatar: "Remove Image",
+    profileSaved: "Profile saved.",
+    profileOpenFail: "Failed to load profile.",
+    profileNameInvalid: "Display name must be 2 to 30 characters.",
+    profileAvatarTooLarge: "Image is too large. Choose a smaller one.",
+    closeBtn: "Close",
     createRoomTitle: "Create Room",
     roomNameLabel: "Room Name",
-    roomNamePlaceholder: "Example: Tournament Room",
+    roomNamePlaceholder: "Example: Movie Night",
     createRoomBtn: "Create",
     joinRoomTitle: "Join by Invite Code",
     roomCodeLabel: "Room Code",
@@ -311,14 +397,22 @@ const I18N = {
     rejectBtn: "Reject",
     toastRequestFailed: "Request failed.",
     toastInputShort: "Username must be at least 3 chars and password at least 4 chars.",
+    toastRegisterInputShort: "Username 3+, password 4+, and account name 2+ chars are required.",
     toastRegisterOk: "Account created successfully.",
     toastLoginOk: "Logged in successfully.",
     toastGuestEnter: "Entered as guest.",
     toastLogoutOk: "Logged out successfully.",
     toastInvalidCode: "Enter a valid room code.",
     toastJoinRequestSent: "Join request sent.",
+    toastJoinRequestCancelled: "Join request cancelled.",
+    toastJoinRequestClosed: "Join request is no longer pending (rejected or removed).",
     toastJoinApproved: "{user} was approved.",
     toastJoinRejected: "{user} was rejected.",
+    joinWaitTitle: "Join Request Pending",
+    joinWaitText: "Your request was sent to the room leader: {room}",
+    joinWaitCode: "Room code: {code}",
+    joinWaitHint: "Wait for approval or rejection. You can cancel this request now.",
+    joinWaitCancelBtn: "Cancel Join Request",
     bannedTitle: "Account Banned",
     bannedDesc: "This account is banned from the site. You can send an unban request to the supervisor.",
     bannedReasonText: "Ban reason: {reason}",
@@ -332,7 +426,7 @@ const I18N = {
     banTransitionTitle: "Your account was banned",
     banTransitionSub: "Moving you to the ban page...",
     unbanTransitionTitle: "Ban removed",
-    unbanTransitionSubLobby: "You can continue now. Returning you to the lobby...",
+    unbanTransitionSubLobby: "You can continue now. Returning you to the home page...",
     unbanTransitionSubAuth: "You can continue now. Returning you to the login page...",
     announcementModalTitle: "Global Message From Supervisor",
     announcementModalTimer: "Closes in {seconds}s",
@@ -397,6 +491,194 @@ function formatDate(ts) {
     dateStyle: "medium",
     timeStyle: "short"
   }).format(new Date(value));
+}
+
+function closeLobbyProfileModal() {
+  activeLobbyProfile = null;
+  selectedLobbyAvatarDataUrl = null;
+  if (lobbyProfileAvatarInput) {
+    lobbyProfileAvatarInput.value = "";
+  }
+  if (lobbyProfileModal) {
+    lobbyProfileModal.classList.remove("is-supervisor-profile");
+    lobbyProfileModal.classList.add("hidden");
+  }
+}
+
+function supportsWebpEncoding() {
+  if (avatarWebpSupported !== null) {
+    return avatarWebpSupported;
+  }
+  try {
+    const canvas = document.createElement("canvas");
+    avatarWebpSupported = canvas.toDataURL("image/webp", 0.8).startsWith("data:image/webp");
+  } catch (_error) {
+    avatarWebpSupported = false;
+  }
+  return avatarWebpSupported;
+}
+
+function loadImageFromFile(file) {
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error(t("profileAvatarTooLarge")));
+    };
+    image.src = objectUrl;
+  });
+}
+
+function drawAvatarFrame(ctx, image, width, height, mimeType) {
+  ctx.clearRect(0, 0, width, height);
+  if (mimeType === "image/jpeg") {
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, width, height);
+  }
+  ctx.drawImage(image, 0, 0, width, height);
+}
+
+async function readFileAsDataUrl(file) {
+  if (!file || !String(file.type || "").startsWith("image/")) {
+    throw new Error(t("profileAvatarTooLarge"));
+  }
+  const image = await loadImageFromFile(file);
+  const sourceWidth = Math.max(1, Number(image.naturalWidth || image.width || 0));
+  const sourceHeight = Math.max(1, Number(image.naturalHeight || image.height || 0));
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d", { alpha: false });
+  if (!ctx) {
+    throw new Error(t("profileAvatarTooLarge"));
+  }
+  const mimeType = supportsWebpEncoding() ? "image/webp" : "image/jpeg";
+  for (const maxDimension of AVATAR_DIMENSION_STEPS) {
+    const scale = Math.min(1, maxDimension / Math.max(sourceWidth, sourceHeight));
+    const width = Math.max(1, Math.round(sourceWidth * scale));
+    const height = Math.max(1, Math.round(sourceHeight * scale));
+    canvas.width = width;
+    canvas.height = height;
+    drawAvatarFrame(ctx, image, width, height, mimeType);
+    for (const quality of AVATAR_QUALITY_STEPS) {
+      let dataUrl = "";
+      try {
+        dataUrl = canvas.toDataURL(mimeType, quality);
+      } catch (_error) {
+        dataUrl = "";
+      }
+      if (dataUrl && dataUrl.length <= AVATAR_MAX_DATA_URL_LENGTH) {
+        return dataUrl;
+      }
+    }
+  }
+  throw new Error(t("profileAvatarTooLarge"));
+}
+
+async function openLobbyProfileModal() {
+  if (!lobbyProfileModal) {
+    return;
+  }
+  try {
+    const result = await api("/api/profile");
+    const profile = result?.profile;
+    if (!profile) {
+      showToast(t("profileOpenFail"));
+      return;
+    }
+    activeLobbyProfile = profile;
+    selectedLobbyAvatarDataUrl = profile.avatarDataUrl || null;
+    lobbyProfileTitle.textContent = t("profileTitle");
+    lobbyProfileUsername.textContent = `@${profile.username} • ${profile.displayName || profile.username}`;
+    lobbyProfileStatus.textContent = profile.isOnline ? t("profileOnline") : t("profileOffline");
+    lobbyProfileCreatedAt.textContent = fmt(t("profileCreated"), { date: formatDate(profile.createdAt) });
+    lobbyProfileDisplayNameInput.value = profile.displayName || profile.username;
+    if (profile.avatarDataUrl) {
+      lobbyProfileAvatar.src = profile.avatarDataUrl;
+    } else {
+      lobbyProfileAvatar.removeAttribute("src");
+    }
+    lobbyProfileModal.classList.toggle("is-supervisor-profile", Boolean(profile.isSupervisor));
+    lobbyProfileModal.classList.remove("hidden");
+    sfx("modal");
+  } catch (error) {
+    showToast(error.message || t("profileOpenFail"));
+  }
+}
+
+async function saveLobbyProfile() {
+  if (!activeLobbyProfile) {
+    return;
+  }
+  const displayName = String(lobbyProfileDisplayNameInput.value || "").trim();
+  if (displayName.length < 2 || displayName.length > 30) {
+    showToast(t("profileNameInvalid"));
+    return;
+  }
+  const body = { displayName };
+  if (selectedLobbyAvatarDataUrl !== null) {
+    body.avatarDataUrl = selectedLobbyAvatarDataUrl;
+  }
+  await api("/api/profile", { method: "PATCH", body });
+  showToast(t("profileSaved"), "success");
+  await openLobbyProfileModal();
+}
+
+function closeRegisterModal() {
+  selectedRegisterAvatarDataUrl = null;
+  if (registerForm) {
+    registerForm.reset();
+  }
+  if (registerModal) {
+    registerModal.classList.add("hidden");
+  }
+}
+
+function openRegisterModal() {
+  if (!registerModal) {
+    return;
+  }
+  selectedRegisterAvatarDataUrl = null;
+  if (registerForm) {
+    registerForm.reset();
+  }
+  registerModal.classList.remove("hidden");
+  sfx("modal");
+}
+
+async function createAccountFromModal() {
+  const username = String(registerUsernameInput?.value || "").trim();
+  const password = String(registerPasswordInput?.value || "");
+  const displayName = String(registerDisplayNameInput?.value || "").trim();
+  if (username.length < 3 || password.length < 4 || displayName.length < 2) {
+    showToast(t("toastRegisterInputShort"));
+    return;
+  }
+
+  const result = await api("/api/register", {
+    method: "POST",
+    body: { username, password }
+  });
+  setSession(result.token, result.username);
+
+  const profilePayload = { displayName };
+  if (selectedRegisterAvatarDataUrl !== null) {
+    profilePayload.avatarDataUrl = selectedRegisterAvatarDataUrl;
+  }
+  await api("/api/profile", { method: "PATCH", body: profilePayload });
+
+  try {
+    const meData = await api("/api/me");
+    isSupervisor = Boolean(meData.isSupervisor);
+  } catch (_) {
+    isSupervisor = false;
+  }
+  closeRegisterModal();
+  showToast(t("toastRegisterOk"), "success");
+  showLobby();
 }
 
 function showToast(text, type = "error") {
@@ -654,6 +936,9 @@ function clearSession() {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(USER_KEY);
   localStorage.removeItem(PENDING_JOIN_KEY);
+  closeLobbyProfileModal();
+  closeRegisterModal();
+  hidePendingJoinOverlay();
   hideGlobalAnnouncement();
   closeRoomActionOverlay();
   queuedAnnouncement = null;
@@ -763,6 +1048,122 @@ function processGlobalAnnouncement(payload) {
     }
     updateGlobalAnnouncementTimerText();
   }, 1000);
+}
+
+function ensurePendingJoinOverlay() {
+  if (pendingJoinOverlay) {
+    return pendingJoinOverlay;
+  }
+  pendingJoinOverlay = document.createElement("div");
+  pendingJoinOverlay.className = "modal-overlay join-request-wait-overlay hidden";
+  pendingJoinOverlay.innerHTML = `
+    <div class="modal-card join-request-wait-card" role="dialog" aria-modal="true">
+      <div class="operation-loader join-request-wait-loader" aria-hidden="true"></div>
+      <h3 id="pendingJoinTitle"></h3>
+      <p id="pendingJoinText" class="muted"></p>
+      <p id="pendingJoinCode" class="join-request-wait-code"></p>
+      <p id="pendingJoinHint" class="muted join-request-wait-hint"></p>
+      <div class="room-actions">
+        <button id="pendingJoinCancelBtn" class="btn btn-ghost" type="button"></button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(pendingJoinOverlay);
+  pendingJoinTitle = pendingJoinOverlay.querySelector("#pendingJoinTitle");
+  pendingJoinText = pendingJoinOverlay.querySelector("#pendingJoinText");
+  pendingJoinCodeText = pendingJoinOverlay.querySelector("#pendingJoinCode");
+  pendingJoinHint = pendingJoinOverlay.querySelector("#pendingJoinHint");
+  pendingJoinCancelBtn = pendingJoinOverlay.querySelector("#pendingJoinCancelBtn");
+
+  if (pendingJoinCancelBtn) {
+    pendingJoinCancelBtn.addEventListener("click", async () => {
+      sfx("click");
+      await cancelPendingJoinRequest();
+    });
+  }
+
+  // This modal is intentionally forced; outside clicks do not close it.
+  pendingJoinOverlay.addEventListener("click", (event) => {
+    if (event.target === pendingJoinOverlay) {
+      event.preventDefault();
+    }
+  });
+  return pendingJoinOverlay;
+}
+
+function hidePendingJoinOverlay() {
+  if (pendingJoinOverlay) {
+    pendingJoinOverlay.classList.add("hidden");
+  }
+  pendingJoinActiveCode = "";
+  pendingJoinCancelInFlight = false;
+  if (pendingJoinCancelBtn) {
+    pendingJoinCancelBtn.disabled = false;
+    pendingJoinCancelBtn.textContent = t("joinWaitCancelBtn");
+  }
+  document.body.classList.remove("pending-join-lock");
+}
+
+function updatePendingJoinOverlayText(room = null, code = "") {
+  if (!pendingJoinOverlay) {
+    return;
+  }
+  const safeCode = String(code || pendingJoinActiveCode || "").trim().toUpperCase();
+  const roomLabel = String(room?.name || safeCode || "-");
+  if (pendingJoinTitle) {
+    pendingJoinTitle.textContent = t("joinWaitTitle");
+  }
+  if (pendingJoinText) {
+    pendingJoinText.textContent = fmt(t("joinWaitText"), { room: roomLabel });
+  }
+  if (pendingJoinCodeText) {
+    pendingJoinCodeText.textContent = fmt(t("joinWaitCode"), { code: safeCode || "-" });
+  }
+  if (pendingJoinHint) {
+    pendingJoinHint.textContent = t("joinWaitHint");
+  }
+  if (pendingJoinCancelBtn) {
+    pendingJoinCancelBtn.textContent = t("joinWaitCancelBtn");
+  }
+}
+
+function showPendingJoinOverlay(room = null, code = "") {
+  const overlay = ensurePendingJoinOverlay();
+  pendingJoinActiveCode = String(code || pendingJoinActiveCode || room?.code || "").trim().toUpperCase();
+  updatePendingJoinOverlayText(room, pendingJoinActiveCode);
+  overlay.classList.remove("hidden");
+  document.body.classList.add("pending-join-lock");
+}
+
+async function cancelPendingJoinRequest(code = "") {
+  const targetCode = String(code || pendingJoinActiveCode || localStorage.getItem(PENDING_JOIN_KEY) || "")
+    .trim()
+    .toUpperCase();
+  if (!targetCode || pendingJoinCancelInFlight) {
+    return;
+  }
+  pendingJoinCancelInFlight = true;
+  if (pendingJoinCancelBtn) {
+    pendingJoinCancelBtn.disabled = true;
+  }
+  try {
+    await api(`/api/rooms/${encodeURIComponent(targetCode)}/request-join`, {
+      method: "POST",
+      body: { action: "cancel" }
+    });
+    localStorage.removeItem(PENDING_JOIN_KEY);
+    hidePendingJoinOverlay();
+    showToast(t("toastJoinRequestCancelled"), "success");
+    await refreshPublicRooms();
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    pendingJoinCancelInFlight = false;
+    if (pendingJoinCancelBtn) {
+      pendingJoinCancelBtn.disabled = false;
+      pendingJoinCancelBtn.textContent = t("joinWaitCancelBtn");
+    }
+  }
 }
 
 async function api(pathname, options = {}) {
@@ -915,9 +1316,17 @@ function syncSupervisorControls() {
   setSupervisorMenuOpen(false);
 }
 
+function setLobbyBackgroundAnimation(active) {
+  document.body.classList.toggle("lobby-animated", Boolean(active));
+}
+
 function showAuth() {
+  setLobbyBackgroundAnimation(false);
   stopLobbyPolling();
   stopBanStatusPolling();
+  closeLobbyProfileModal();
+  closeRegisterModal();
+  hidePendingJoinOverlay();
   hideGlobalAnnouncement();
   queuedAnnouncement = null;
   currentBanInfo = null;
@@ -932,6 +1341,7 @@ function showAuth() {
 }
 
 function showLobby() {
+  setLobbyBackgroundAnimation(true);
   stopBanStatusPolling();
   authSection.classList.add("hidden");
   lobbySection.classList.remove("hidden");
@@ -946,8 +1356,10 @@ function showLobby() {
 }
 
 function showBanned(ban, username = "") {
+  setLobbyBackgroundAnimation(false);
   stopLobbyPolling();
   stopBanStatusPolling();
+  hidePendingJoinOverlay();
   authSection.classList.add("hidden");
   lobbySection.classList.add("hidden");
   bannedSection.classList.remove("hidden");
@@ -1302,13 +1714,6 @@ async function decideAppeal(username, action) {
   }
 }
 
-function updateModeUI() {
-  tabs.forEach((tab) => {
-    tab.classList.toggle("active", tab.dataset.tab === mode);
-  });
-  authBtn.textContent = mode === "register" ? t("authBtnRegister") : t("authBtnLogin");
-}
-
 function roomCardInfo(label, value) {
   const row = document.createElement("p");
   row.className = "muted room-line";
@@ -1336,20 +1741,30 @@ function roomMetaItem(label, value) {
 async function autoOpenApprovedRoom(rooms) {
   const pendingCode = String(localStorage.getItem(PENDING_JOIN_KEY) || "").trim().toUpperCase();
   if (!pendingCode) {
+    hidePendingJoinOverlay();
     return false;
   }
   const room = rooms.find((item) => item.code === pendingCode);
   if (!room) {
     localStorage.removeItem(PENDING_JOIN_KEY);
+    hidePendingJoinOverlay();
+    showToast(t("toastJoinRequestClosed"));
     return false;
   }
   if (room.isMember) {
     localStorage.removeItem(PENDING_JOIN_KEY);
+    hidePendingJoinOverlay();
     await enterRoomWithOverlay(room.code);
     return true;
   }
+  if (room.hasPendingRequest) {
+    showPendingJoinOverlay(room, pendingCode);
+    return false;
+  }
   if (!room.hasPendingRequest) {
     localStorage.removeItem(PENDING_JOIN_KEY);
+    hidePendingJoinOverlay();
+    showToast(t("toastJoinRequestClosed"));
   }
   return false;
 }
@@ -1359,10 +1774,12 @@ async function handleJoinRequest(code) {
     const result = await api(`/api/rooms/${encodeURIComponent(code)}/request-join`, { method: "POST" });
     if (result.status === "already_member" && result.room?.code) {
       localStorage.removeItem(PENDING_JOIN_KEY);
+      hidePendingJoinOverlay();
       await enterRoomWithOverlay(result.room.code);
       return;
     }
     localStorage.setItem(PENDING_JOIN_KEY, code);
+    showPendingJoinOverlay({ code, name: code }, code);
     showToast(t("toastJoinRequestSent"), "success");
     await refreshPublicRooms();
   } catch (error) {
@@ -1628,17 +2045,74 @@ function applyTranslations() {
   document.getElementById("splashSub").textContent = t("splashSub");
   document.getElementById("authTitle").textContent = t("authTitle");
   document.getElementById("authDesc").textContent = t("authDesc");
-  document.getElementById("tabRegister").textContent = t("tabRegister");
-  document.getElementById("tabLogin").textContent = t("tabLogin");
   document.getElementById("usernameLabel").textContent = t("usernameLabel");
   document.getElementById("passwordLabel").textContent = t("passwordLabel");
+  if (authBtn) {
+    authBtn.textContent = t("authBtnLogin");
+  }
+  if (openRegisterBtn) {
+    openRegisterBtn.textContent = t("openRegisterBtn");
+  }
+  if (registerModalTitle) {
+    registerModalTitle.textContent = t("registerModalTitle");
+  }
+  if (registerUsernameLabel) {
+    registerUsernameLabel.textContent = t("usernameLabel");
+  }
+  if (registerPasswordLabel) {
+    registerPasswordLabel.textContent = t("passwordLabel");
+  }
+  if (registerDisplayNameLabel) {
+    registerDisplayNameLabel.textContent = t("registerDisplayNameLabel");
+  }
+  if (registerAvatarLabel) {
+    registerAvatarLabel.textContent = t("registerAvatarLabel");
+  }
+  if (registerSubmitBtn) {
+    registerSubmitBtn.textContent = t("authBtnRegister");
+  }
+  if (registerRemoveAvatarBtn) {
+    registerRemoveAvatarBtn.textContent = t("profileRemoveAvatar");
+  }
+  if (registerCancelBtn) {
+    registerCancelBtn.textContent = t("registerCancelBtn");
+  }
+  if (registerModalTopClose) {
+    registerModalTopClose.setAttribute("aria-label", t("closeBtn"));
+    registerModalTopClose.title = t("closeBtn");
+  }
   if (guestLoginBtn) {
     guestLoginBtn.textContent = t("guestLoginBtn");
   }
   document.getElementById("lobbyTitle").textContent = t("lobbyTitle");
   document.getElementById("welcomePrefix").textContent = t("welcomePrefix");
   renderSiteStats(cachedSiteStats);
+  if (openProfileBtn) {
+    openProfileBtn.textContent = t("profileBtn");
+  }
   document.getElementById("logoutBtn").textContent = t("logoutBtn");
+  if (lobbyProfileTitle) {
+    lobbyProfileTitle.textContent = t("profileTitle");
+  }
+  if (lobbyProfileDisplayNameLabel) {
+    lobbyProfileDisplayNameLabel.textContent = t("profileDisplayName");
+  }
+  if (lobbyProfileAvatarLabel) {
+    lobbyProfileAvatarLabel.textContent = t("profileAvatar");
+  }
+  if (lobbyProfileSaveBtn) {
+    lobbyProfileSaveBtn.textContent = t("profileSave");
+  }
+  if (lobbyProfileRemoveAvatarBtn) {
+    lobbyProfileRemoveAvatarBtn.textContent = t("profileRemoveAvatar");
+  }
+  if (lobbyProfileCloseBtn) {
+    lobbyProfileCloseBtn.textContent = t("closeBtn");
+  }
+  if (lobbyProfileModalTopClose) {
+    lobbyProfileModalTopClose.setAttribute("aria-label", t("closeBtn"));
+    lobbyProfileModalTopClose.title = t("closeBtn");
+  }
   document.getElementById("createRoomTitle").textContent = t("createRoomTitle");
   document.getElementById("roomNameLabel").textContent = t("roomNameLabel");
   document.getElementById("roomName").placeholder = t("roomNamePlaceholder");
@@ -1682,7 +2156,6 @@ function applyTranslations() {
   appealReason.placeholder = t("appealPlaceholder");
   appealSubmitBtn.textContent = t("appealSubmitBtn");
   bannedLogoutBtn.textContent = t("bannedLogoutBtn");
-  updateModeUI();
   renderPublicRooms(cachedRooms);
   renderSupervisorAppeals(cachedAppeals);
   renderSupervisorUsers(cachedSupervisorUsers);
@@ -1693,6 +2166,16 @@ function applyTranslations() {
   }
   if (roomActionOverlay && !roomActionOverlay.classList.contains("hidden")) {
     updateRoomActionOverlayText();
+  }
+  if (pendingJoinOverlay && !pendingJoinOverlay.classList.contains("hidden")) {
+    const pendingCode = String(localStorage.getItem(PENDING_JOIN_KEY) || "").trim().toUpperCase();
+    const pendingRoom = cachedRooms.find((item) => item.code === pendingCode) || null;
+    updatePendingJoinOverlayText(pendingRoom, pendingCode);
+  } else if (pendingJoinCancelBtn) {
+    pendingJoinCancelBtn.textContent = t("joinWaitCancelBtn");
+  }
+  if (lobbyProfileModal && !lobbyProfileModal.classList.contains("hidden")) {
+    openLobbyProfileModal().catch(() => {});
   }
 }
 
@@ -1715,18 +2198,154 @@ if (soundToggleBtn) {
   });
 }
 
-tabs.forEach((tab) => {
-  tab.addEventListener("click", () => {
+if (openRegisterBtn) {
+  openRegisterBtn.addEventListener("click", () => {
     sfx("click");
-    mode = tab.dataset.tab;
-    updateModeUI();
+    window.location.href = "register.html";
   });
-});
+}
+
+if (registerCancelBtn) {
+  registerCancelBtn.addEventListener("click", () => {
+    sfx("click");
+    closeRegisterModal();
+  });
+}
+
+if (registerModalTopClose) {
+  registerModalTopClose.addEventListener("click", () => {
+    sfx("click");
+    closeRegisterModal();
+  });
+}
+
+if (registerModal) {
+  registerModal.addEventListener("click", (event) => {
+    if (event.target === registerModal) {
+      closeRegisterModal();
+    }
+  });
+}
+
+if (registerAvatarInput) {
+  registerAvatarInput.addEventListener("change", async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      selectedRegisterAvatarDataUrl = dataUrl;
+    } catch (error) {
+      if (registerAvatarInput) {
+        registerAvatarInput.value = "";
+      }
+      showToast(error.message);
+    }
+  });
+}
+
+if (registerRemoveAvatarBtn) {
+  registerRemoveAvatarBtn.addEventListener("click", () => {
+    sfx("click");
+    selectedRegisterAvatarDataUrl = "";
+    if (registerAvatarInput) {
+      registerAvatarInput.value = "";
+    }
+  });
+}
+
+if (registerForm) {
+  registerForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      await createAccountFromModal();
+    } catch (error) {
+      if (error.code === "ACCOUNT_BANNED") {
+        sfx("ban");
+        const rawUser = String(registerUsernameInput?.value || "").trim();
+        localStorage.setItem(USER_KEY, rawUser.toLowerCase());
+        await transitionToBanned(error.data?.ban, rawUser);
+        return;
+      }
+      showToast(error.message);
+    }
+  });
+}
 
 if (guestLoginBtn) {
   guestLoginBtn.addEventListener("click", () => {
     sfx("click");
     window.location.href = "guest.html";
+  });
+}
+
+if (openProfileBtn) {
+  openProfileBtn.addEventListener("click", () => {
+    sfx("click");
+    openLobbyProfileModal();
+  });
+}
+
+if (lobbyProfileCloseBtn) {
+  lobbyProfileCloseBtn.addEventListener("click", () => {
+    sfx("click");
+    closeLobbyProfileModal();
+  });
+}
+
+if (lobbyProfileModalTopClose) {
+  lobbyProfileModalTopClose.addEventListener("click", () => {
+    sfx("click");
+    closeLobbyProfileModal();
+  });
+}
+
+if (lobbyProfileModal) {
+  lobbyProfileModal.addEventListener("click", (event) => {
+    if (event.target === lobbyProfileModal) {
+      closeLobbyProfileModal();
+    }
+  });
+}
+
+if (lobbyProfileAvatarInput) {
+  lobbyProfileAvatarInput.addEventListener("change", async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      selectedLobbyAvatarDataUrl = dataUrl;
+      lobbyProfileAvatar.src = dataUrl;
+    } catch (error) {
+      if (lobbyProfileAvatarInput) {
+        lobbyProfileAvatarInput.value = "";
+      }
+      showToast(error.message);
+    }
+  });
+}
+
+if (lobbyProfileRemoveAvatarBtn) {
+  lobbyProfileRemoveAvatarBtn.addEventListener("click", () => {
+    sfx("click");
+    selectedLobbyAvatarDataUrl = "";
+    lobbyProfileAvatar.removeAttribute("src");
+    if (lobbyProfileAvatarInput) {
+      lobbyProfileAvatarInput.value = "";
+    }
+  });
+}
+
+if (lobbyProfileSaveBtn) {
+  lobbyProfileSaveBtn.addEventListener("click", async () => {
+    try {
+      await saveLobbyProfile();
+    } catch (error) {
+      showToast(error.message);
+    }
   });
 }
 
@@ -1742,8 +2361,7 @@ authForm.addEventListener("submit", async (event) => {
   }
 
   try {
-    const endpoint = mode === "register" ? "/api/register" : "/api/login";
-    const result = await api(endpoint, {
+    const result = await api("/api/login", {
       method: "POST",
       body: { username, password }
     });
@@ -1754,7 +2372,7 @@ authForm.addEventListener("submit", async (event) => {
     } catch (_) {
       isSupervisor = false;
     }
-    showToast(mode === "register" ? t("toastRegisterOk") : t("toastLoginOk"), "success");
+    showToast(t("toastLoginOk"), "success");
     showLobby();
   } catch (error) {
     if (error.code === "ACCOUNT_BANNED") {
@@ -1839,6 +2457,14 @@ if (supervisorSidebarOverlay) {
 }
 
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && registerModal && !registerModal.classList.contains("hidden")) {
+    closeRegisterModal();
+    return;
+  }
+  if (event.key === "Escape" && pendingJoinOverlay && !pendingJoinOverlay.classList.contains("hidden")) {
+    event.preventDefault();
+    return;
+  }
   if (event.key === "Escape" && isSupervisorMenuOpen) {
     setSupervisorMenuOpen(false);
   }

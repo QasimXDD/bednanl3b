@@ -82,37 +82,41 @@ const BednaSound = (() => {
     });
   }
 
-  function setEnabled(next) {
-    enabled = Boolean(next);
+  function forceEnabledState() {
+    enabled = true;
     try {
-      localStorage.setItem(STORAGE_KEY, enabled ? "1" : "0");
+      localStorage.removeItem(STORAGE_KEY);
     } catch (_error) {
       // Ignore storage failures (private mode, blocked storage, etc.).
     }
-    if (enabled) {
-      ensureContext();
-      bindUnlock();
+    ensureContext();
+    bindUnlock();
+    return enabled;
+  }
+
+  function setEnabled(_next) {
+    // Sound is mandatory for all users.
+    enabled = true;
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch (_error) {
+      // Ignore storage failures (private mode, blocked storage, etc.).
     }
+    ensureContext();
+    bindUnlock();
     return enabled;
   }
 
   function toggle() {
-    return setEnabled(!enabled);
+    // Keep mandatory sound always on.
+    return setEnabled(true);
   }
 
   function isEnabled() {
     return enabled;
   }
 
-  try {
-    enabled = localStorage.getItem(STORAGE_KEY) !== "0";
-  } catch (_error) {
-    enabled = true;
-  }
-  if (enabled) {
-    ensureContext();
-    bindUnlock();
-  }
+  forceEnabledState();
 
   return {
     play,

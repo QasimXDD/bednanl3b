@@ -144,6 +144,7 @@ let requestModalQueue = [];
 let activeRequestUser = "";
 let requestModalSeconds = 0;
 let requestModalTimer = null;
+const dismissedRequestUsers = new Set();
 let hasLeftRoom = false;
 let selectedAvatarDataUrl = null;
 let activeProfileUsername = "";
@@ -167,6 +168,10 @@ let queuedAnnouncement = null;
 let isSendingChatMessage = false;
 let refreshMessagesInFlight = false;
 let refreshMessagesQueued = false;
+const AVATAR_MAX_DATA_URL_LENGTH = 280000;
+const AVATAR_DIMENSION_STEPS = [720, 600, 512, 420, 360, 300, 256];
+const AVATAR_QUALITY_STEPS = [0.86, 0.78, 0.7, 0.62, 0.54, 0.46, 0.38];
+let avatarWebpSupported = null;
 let retryableChatSend = null;
 let chatLastOutsidePointerAt = 0;
 let activeReplyTarget = null;
@@ -208,12 +213,15 @@ let activeYouTubeVideoId = "";
 let suppressYouTubeStateBroadcast = false;
 let youTubeAudioUnlockNeeded = false;
 let youTubeInitialSyncPending = false;
+let youTubeLeaderPlayPending = false;
 let roomVideoUserInteracted = false;
 let videoToolsModalHideTimer = null;
 let roomVideoSyncHeartbeatTimer = null;
 let roomVideoLeaderIgnoreSyncUntil = 0;
 let roomVideoSyncClientSeq = 0;
 let roomVideoLastKnownTime = 0;
+let roomVideoPageLeaving = false;
+let roomVideoResumePending = false;
 let roomVideoUploadOverlay = null;
 let roomVideoUploadTitleEl = null;
 let roomVideoUploadHintEl = null;
@@ -239,12 +247,12 @@ let roomVideoUploadState = {
 
 const I18N = {
   ar: {
-    pageTitle: "الغرفة",
+    pageTitle: "SawaWatch - الغرفة",
     langLabel: "اللغة",
     codeLabel: "الرمز",
     leaderLabel: "القائد",
     youLabel: "أنت",
-    backToLobby: "العودة إلى اللوبي",
+    backToLobby: "خروج من الغرفة",
     quickLeave: "خروج",
     chatTitle: "دردشة الغرفة",
     chatPlaceholder: "اكتب رسالتك...",
@@ -254,13 +262,13 @@ const I18N = {
     videoNowPlaying: "الفيديو الحالي: {name}",
     videoHint: "قائد الغرفة فقط يمكنه رفع ومزامنة الفيديو.",
     videoEmptyLine1: "تم إنشاء هذا الموقع لتسهيل مشاهدة الأفلام والفيديوهات.",
-    videoEmptyLine2: "يُعتبر هذا الموقع بديل ل ريف مؤقتا لان هذا الموقع يعمل بسلاسة وبدون تعليق عكس تطبيق Rave.",
+    videoEmptyLine2: "صُمم هذا الموقع لتجربة مشاهدة جماعية مستقرة وسلسة.",
     videoToolsTitle: "أدوات الفيديو",
     videoToolsOpenLabel: "فتح أدوات الفيديو",
     videoToolsCloseLabel: "إغلاق أدوات الفيديو",
     videoFileLabel: "اختيار فيديو من الجهاز",
     videoYoutubeLabel: "رابط يوتيوب أو بحث",
-    videoYoutubePlaceholder: "الصق رابط يوتيوب أو اكتب اسم الأغنية",
+    videoYoutubePlaceholder: "الصق رابط يوتيوب أو اكتب اسم الفيلم/الحلقة",
     videoUploadBtn: "رفع الفيديو",
     videoYoutubeBtn: "تشغيل من يوتيوب",
     videoClearBtn: "حذف الفيديو الحالي",
@@ -301,7 +309,7 @@ const I18N = {
     reactPickOne: "اختيار تفاعل {emoji}",
     replyingTo: "الرد على {user}",
     replyCancel: "إلغاء الرد",
-    playersTitle: "اللاعبون",
+    playersTitle: "المشاهدون",
     playersDrawerBtn: "الأعضاء",
     playersDrawerOpenLabel: "فتح قائمة الأعضاء",
     playersDrawerCloseLabel: "إغلاق قائمة الأعضاء",
@@ -313,10 +321,10 @@ const I18N = {
     closeBtn: "إغلاق",
     joinModalTitle: "طلب انضمام",
     joinModalPrompt: "{user} يريد الانضمام إلى الغرفة.",
-    joinModalTimer: "إغلاق تلقائي خلال {seconds} ثانية",
+    joinModalTimer: "يمكنك الإغلاق الآن والطلب سيبقى في القائمة.",
     selfKickJokeTitle: "تنبيه",
     selfKickJokeText: "لا يمكنك طرد نفسك.",
-    selfKickJokeLobbyBtn: "العودة إلى اللوبي",
+    selfKickJokeLobbyBtn: "العودة إلى الصفحة الرئيسية",
     kickSupervisorDeniedTitle: "مرفوض",
     kickSupervisorDeniedText: "لا يمكن طرد المشرف من الغرفة.",
     kickSupervisorDeniedOkBtn: "إغلاق",
@@ -324,7 +332,7 @@ const I18N = {
     kickBtn: "طرد",
     systemName: "النظام",
     toastRequestFailed: "فشل الطلب.",
-    toastKickedOk: "تم طرد {player} من الغرفة.",
+    toastKickedOk: "تمت إزالة {player} من الغرفة.",
     toastJoinApproved: "تم قبول {user}.",
     toastJoinRejected: "تم رفض {user}.",
     toastLoginFirst: "يرجى تسجيل الدخول أولًا.",
@@ -336,6 +344,8 @@ const I18N = {
     sysKicked: "تم طرد {user} بواسطة القائد.",
     sysLeft: "{user} غادر الغرفة.",
     sysHostChanged: "{user} أصبح القائد الجديد.",
+    sysVideoSet: "{user} شغّل الفيديو: {name}.",
+    sysVideoRemoved: "{user} حذف الفيديو الحالي.",
     supervisorBadge: "مشرف",
     profileBtn: "ملفي",
     profileTitle: "الملف الشخصي",
@@ -349,6 +359,7 @@ const I18N = {
     profileSaved: "تم حفظ الملف الشخصي.",
     profileOpenFail: "تعذر تحميل الملف الشخصي.",
     profileNameInvalid: "الاسم الظاهر يجب أن يكون بين 2 و 30 حرفًا.",
+    profileAvatarTooLarge: "الصورة كبيرة جدًا. اختر صورة أصغر أو أقل دقة.",
     supervisorBanReason: "سبب الحظر",
     supervisorBanBtn: "حظر الحساب",
     supervisorUnbanBtn: "إزالة الحظر",
@@ -392,12 +403,12 @@ const I18N = {
     soundOff: "الصوت: إيقاف"
   },
   en: {
-    pageTitle: "Room",
+    pageTitle: "SawaWatch Room",
     langLabel: "Language",
     codeLabel: "Code",
     leaderLabel: "Leader",
     youLabel: "You",
-    backToLobby: "Back to Lobby",
+    backToLobby: "Leave Room",
     quickLeave: "Leave",
     chatTitle: "Room Chat",
     chatPlaceholder: "Type your message...",
@@ -407,13 +418,13 @@ const I18N = {
     videoNowPlaying: "Current video: {name}",
     videoHint: "Only the room leader can upload and sync video.",
     videoEmptyLine1: "This site was created to make watching movies and videos easier.",
-    videoEmptyLine2: "It is a temporary alternative to Rave because it runs smoothly without lag unlike the Rave app.",
+    videoEmptyLine2: "Built for smooth and reliable group watching sessions.",
     videoToolsTitle: "Video Tools",
     videoToolsOpenLabel: "Open video tools",
     videoToolsCloseLabel: "Close video tools",
     videoFileLabel: "Choose video from device",
     videoYoutubeLabel: "YouTube link or search",
-    videoYoutubePlaceholder: "Paste a YouTube URL or type a song name",
+    videoYoutubePlaceholder: "Paste a YouTube URL or type a movie/episode title",
     videoUploadBtn: "Upload Video",
     videoYoutubeBtn: "Play from YouTube",
     videoClearBtn: "Remove Current Video",
@@ -454,7 +465,7 @@ const I18N = {
     reactPickOne: "Choose reaction {emoji}",
     replyingTo: "Replying to {user}",
     replyCancel: "Cancel reply",
-    playersTitle: "Players",
+    playersTitle: "Viewers",
     playersDrawerBtn: "Members",
     playersDrawerOpenLabel: "Open members list",
     playersDrawerCloseLabel: "Close members list",
@@ -466,10 +477,10 @@ const I18N = {
     closeBtn: "Close",
     joinModalTitle: "Join Request",
     joinModalPrompt: "{user} wants to join this room.",
-    joinModalTimer: "Auto close in {seconds}s",
+    joinModalTimer: "You can close now and keep this request pending.",
     selfKickJokeTitle: "Warning",
     selfKickJokeText: "You cannot kick yourself.",
-    selfKickJokeLobbyBtn: "Back to Lobby",
+    selfKickJokeLobbyBtn: "Back to Home",
     kickSupervisorDeniedTitle: "Denied",
     kickSupervisorDeniedText: "You cannot kick a supervisor from this room.",
     kickSupervisorDeniedOkBtn: "Close",
@@ -477,7 +488,7 @@ const I18N = {
     kickBtn: "Kick",
     systemName: "System",
     toastRequestFailed: "Request failed.",
-    toastKickedOk: "{player} was removed from the room.",
+    toastKickedOk: "{player} was removed from the watch room.",
     toastJoinApproved: "{user} was approved.",
     toastJoinRejected: "{user} was rejected.",
     toastLoginFirst: "Please login first.",
@@ -489,6 +500,8 @@ const I18N = {
     sysKicked: "{user} was kicked by the leader.",
     sysLeft: "{user} left the room.",
     sysHostChanged: "{user} is now the leader.",
+    sysVideoSet: "{user} started video: {name}.",
+    sysVideoRemoved: "{user} removed the current video.",
     supervisorBadge: "Supervisor",
     profileBtn: "My Profile",
     profileTitle: "Profile",
@@ -502,6 +515,7 @@ const I18N = {
     profileSaved: "Profile saved.",
     profileOpenFail: "Failed to load profile.",
     profileNameInvalid: "Display name must be 2 to 30 characters.",
+    profileAvatarTooLarge: "Image is too large. Choose a smaller one.",
     supervisorBanReason: "Ban Reason",
     supervisorBanBtn: "Ban Account",
     supervisorUnbanBtn: "Unban Account",
@@ -1112,13 +1126,77 @@ async function openProfileModal(username) {
   }
 }
 
-function readFileAsDataUrl(file) {
+function supportsWebpEncoding() {
+  if (avatarWebpSupported !== null) {
+    return avatarWebpSupported;
+  }
+  try {
+    const canvas = document.createElement("canvas");
+    avatarWebpSupported = canvas.toDataURL("image/webp", 0.8).startsWith("data:image/webp");
+  } catch (_error) {
+    avatarWebpSupported = false;
+  }
+  return avatarWebpSupported;
+}
+
+function loadImageFromFile(file) {
   return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ""));
-    reader.onerror = () => reject(new Error("Failed to read image."));
-    reader.readAsDataURL(file);
+    const objectUrl = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error(t("profileAvatarTooLarge")));
+    };
+    image.src = objectUrl;
   });
+}
+
+function drawAvatarFrame(ctx, image, width, height, mimeType) {
+  ctx.clearRect(0, 0, width, height);
+  if (mimeType === "image/jpeg") {
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, width, height);
+  }
+  ctx.drawImage(image, 0, 0, width, height);
+}
+
+async function readFileAsDataUrl(file) {
+  if (!file || !String(file.type || "").startsWith("image/")) {
+    throw new Error(t("profileAvatarTooLarge"));
+  }
+  const image = await loadImageFromFile(file);
+  const sourceWidth = Math.max(1, Number(image.naturalWidth || image.width || 0));
+  const sourceHeight = Math.max(1, Number(image.naturalHeight || image.height || 0));
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d", { alpha: false });
+  if (!ctx) {
+    throw new Error(t("profileAvatarTooLarge"));
+  }
+  const mimeType = supportsWebpEncoding() ? "image/webp" : "image/jpeg";
+  for (const maxDimension of AVATAR_DIMENSION_STEPS) {
+    const scale = Math.min(1, maxDimension / Math.max(sourceWidth, sourceHeight));
+    const width = Math.max(1, Math.round(sourceWidth * scale));
+    const height = Math.max(1, Math.round(sourceHeight * scale));
+    canvas.width = width;
+    canvas.height = height;
+    drawAvatarFrame(ctx, image, width, height, mimeType);
+    for (const quality of AVATAR_QUALITY_STEPS) {
+      let dataUrl = "";
+      try {
+        dataUrl = canvas.toDataURL(mimeType, quality);
+      } catch (_error) {
+        dataUrl = "";
+      }
+      if (dataUrl && dataUrl.length <= AVATAR_MAX_DATA_URL_LENGTH) {
+        return dataUrl;
+      }
+    }
+  }
+  throw new Error(t("profileAvatarTooLarge"));
 }
 
 async function saveMyProfile() {
@@ -1450,22 +1528,31 @@ function triggerAutoPlayForNewRoomVideo() {
   if (!isRoomLeader()) {
     return;
   }
+  let started = false;
   const run = () => {
-    if (!isRoomLeader() || !roomVideoState) {
+    if (started || !isRoomLeader() || !roomVideoState) {
       return;
     }
     if (isYouTubeRoomVideo(roomVideoState)) {
-      if (youTubePlayerReady && youTubePlayer && typeof youTubePlayer.playVideo === "function") {
+      if (!youTubePlayerReady || !youTubePlayer) {
+        youTubeLeaderPlayPending = true;
+        return;
+      }
+      youTubeLeaderPlayPending = false;
+      started = true;
+      const current = getSafeYouTubeCurrentTime(getRoomVideoDuration(), { keepMonotonicWhilePlaying: true });
+      if (typeof youTubePlayer.playVideo === "function") {
         try {
           youTubePlayer.playVideo();
         } catch (_error) {
           // Ignore and continue sync request.
         }
       }
-      sendRoomVideoSync("play");
+      sendRoomVideoSync("play", { currentTimeOverride: current, quietError: true });
       return;
     }
     if (roomVideoPlayer) {
+      started = true;
       roomVideoPlayer.play().catch(() => {});
       sendRoomVideoSync("play");
     }
@@ -1478,7 +1565,8 @@ function triggerAutoPlayForNewRoomVideo() {
 function setVideoToolsDrawerOpen(open) {
   const mobile = isRoomMobileLayout();
   placeVideoToolsInBody(mobile);
-  const canOpen = mobile && isRoomLeader();
+  const canControl = isRoomLeader();
+  const canOpen = mobile && canControl;
   const nextOpen = Boolean(open && canOpen);
   videoToolsOpen = nextOpen;
   if (videoLeaderTools) {
@@ -1493,9 +1581,9 @@ function setVideoToolsDrawerOpen(open) {
       videoLeaderTools.setAttribute("aria-hidden", canOpen ? (nextOpen ? "false" : "true") : "true");
     } else {
       videoLeaderTools.classList.remove("is-open");
-      videoLeaderTools.classList.remove("hidden");
+      videoLeaderTools.classList.toggle("hidden", !canControl);
       videoLeaderTools.removeAttribute("style");
-      videoLeaderTools.setAttribute("aria-hidden", "false");
+      videoLeaderTools.setAttribute("aria-hidden", canControl ? "false" : "true");
     }
   }
   if (videoToolsOverlay) {
@@ -1525,11 +1613,15 @@ function syncPlayersDrawerMode() {
     return;
   }
   const mobile = isRoomMobileLayout();
+  if (videoToolsClose) {
+    videoToolsClose.classList.toggle("hidden", !mobile);
+  }
   placeVideoToolsInBody(mobile);
   playersDrawerToggle.classList.toggle("hidden", !mobile);
   if (!mobile) {
     playersDrawerOpen = false;
     videoToolsOpen = false;
+    const canControlVideo = isRoomLeader();
     if (playersDrawer) {
       playersDrawer.classList.remove("hidden", "is-open");
       playersDrawer.setAttribute("aria-hidden", "false");
@@ -1541,8 +1633,9 @@ function syncPlayersDrawerMode() {
     }
     if (videoLeaderTools) {
       videoLeaderTools.classList.remove("is-open");
+      videoLeaderTools.classList.toggle("hidden", !canControlVideo);
       videoLeaderTools.removeAttribute("style");
-      videoLeaderTools.setAttribute("aria-hidden", "false");
+      videoLeaderTools.setAttribute("aria-hidden", canControlVideo ? "false" : "true");
     }
     if (videoToolsOverlay) {
       videoToolsOverlay.classList.add("hidden");
@@ -1698,6 +1791,7 @@ function destroyYouTubePlayer() {
   activeYouTubeVideoId = "";
   youTubeAudioUnlockNeeded = false;
   youTubeInitialSyncPending = false;
+  youTubeLeaderPlayPending = false;
   setYouTubeMaskVisible(false);
 }
 
@@ -1716,8 +1810,7 @@ function hardenYouTubeIframeUi() {
 
 function shouldUnlockYouTubeAudio() {
   return Boolean(
-    youTubeAudioUnlockNeeded
-      && youTubePlayer
+    youTubePlayer
       && youTubePlayerReady
       && roomVideoUserInteracted
       && isYouTubeRoomVideo(roomVideoState)
@@ -1776,6 +1869,55 @@ function tryUnlockYouTubeAudioFromGesture() {
     return false;
   }
   return !youTubeAudioUnlockNeeded;
+}
+
+function attemptMobileRoomVideoResume({ fromGesture = false } = {}) {
+  if (!roomVideoResumePending) {
+    return;
+  }
+  if (!roomVideoState || !roomVideoSyncState || !roomVideoSyncState.playing) {
+    roomVideoResumePending = false;
+    return;
+  }
+
+  if (isYouTubeRoomVideo(roomVideoState)) {
+    if (!youTubePlayer || !youTubePlayerReady) {
+      return;
+    }
+    try {
+      if (typeof youTubePlayer.playVideo === "function") {
+        ensureMutedAutoplayForYouTube(youTubePlayer);
+        youTubePlayer.playVideo();
+      }
+      if (fromGesture) {
+        youTubeAudioUnlockNeeded = true;
+        tryUnlockYouTubeAudioFromGesture();
+      }
+    } catch (_) {
+      // Ignore resume failures and retry on the next interaction.
+    }
+    applyRoomVideoSyncToPlayer({ forceSeek: true });
+    if ((isYouTubePlaying() && !youTubeAudioUnlockNeeded) || (fromGesture && !youTubeAudioUnlockNeeded)) {
+      roomVideoResumePending = false;
+    }
+    return;
+  }
+
+  if (!roomVideoPlayer) {
+    return;
+  }
+  try {
+    if (fromGesture && roomVideoPlayer.muted) {
+      roomVideoPlayer.muted = false;
+    }
+    roomVideoPlayer.play().catch(() => {});
+  } catch (_) {
+    // Ignore resume failures and retry on the next interaction.
+  }
+  applyRoomVideoSyncToPlayer({ forceSeek: true });
+  if (!roomVideoPlayer.paused) {
+    roomVideoResumePending = false;
+  }
 }
 
 function getYouTubeDuration() {
@@ -1844,6 +1986,13 @@ async function ensureYouTubePlayer(videoId, { autoplay = true } = {}) {
           if (youTubeInitialSyncPending && roomVideoSyncState) {
             applyRoomVideoSyncToPlayer({ forceSeek: true });
           }
+          if (isRoomLeader() && youTubeLeaderPlayPending && event?.target?.playVideo) {
+            const current = getSafeYouTubeCurrentTime(getRoomVideoDuration(), { keepMonotonicWhilePlaying: true });
+            ensureMutedAutoplayForYouTube(event.target);
+            event.target.playVideo();
+            sendRoomVideoSync("play", { currentTimeOverride: current, quietError: true });
+            youTubeLeaderPlayPending = false;
+          }
           tryUnlockYouTubeAudioFromGesture();
         },
         onStateChange: (event) => {
@@ -1858,16 +2007,8 @@ async function ensureYouTubePlayer(videoId, { autoplay = true } = {}) {
           } else {
             setRoomVideoControlsVisible(true);
           }
-          if (suppressRoomVideoEvents || suppressYouTubeStateBroadcast || youTubeInitialSyncPending || !isRoomLeader()) {
-            return;
-          }
-          if (youTubeState === 1) {
-            sendRoomVideoSync("play");
-          } else if (youTubeState === 2) {
-            sendRoomVideoSync("pause");
-          } else if (youTubeState === 0) {
-            sendRoomVideoSync("stop");
-          }
+          // Leader sync is sent only from explicit UI controls + heartbeat.
+          // Avoid broadcasting browser-generated state changes on tab hide/show.
         },
         onError: () => {
           showToast(t("videoSyncFailed"));
@@ -2081,7 +2222,7 @@ function updateRoomVideoControls({ previewTime = null } = {}) {
   let currentTime = 0;
   if (canUseCustomControls) {
     currentTime = isYoutube
-      ? clampVideoTime(getYouTubeCurrentTime(), duration)
+      ? getSafeYouTubeCurrentTime(duration, { keepMonotonicWhilePlaying: true })
       : getSafeLocalVideoCurrentTime(duration);
   }
   if (previewTime !== null && Number.isFinite(previewTime)) {
@@ -2172,6 +2313,33 @@ function getSafeLocalVideoCurrentTime(duration = 0) {
     : 0;
   const fallback = clampVideoTime(syncFallback, duration);
   roomVideoLastKnownTime = fallback;
+  return fallback;
+}
+
+function getSafeYouTubeCurrentTime(duration = 0, { keepMonotonicWhilePlaying = false } = {}) {
+  const current = clampVideoTime(getYouTubeCurrentTime(), duration);
+  const known = clampVideoTime(roomVideoLastKnownTime, duration);
+
+  if (current > 0.05) {
+    // Guard against transient YouTube API regressions while playback is active.
+    if (keepMonotonicWhilePlaying && isYouTubePlaying() && current + 0.35 < known) {
+      return known;
+    }
+    roomVideoLastKnownTime = current;
+    return current;
+  }
+
+  if (known > 0.25 && !youTubeInitialSyncPending) {
+    return known;
+  }
+
+  const syncFallback = roomVideoSyncState
+    ? computeRoomVideoTargetTime(roomVideoSyncState, duration)
+    : 0;
+  const fallback = clampVideoTime(syncFallback, duration);
+  if (fallback > 0) {
+    roomVideoLastKnownTime = fallback;
+  }
   return fallback;
 }
 
@@ -2291,11 +2459,14 @@ function shouldSendRoomVideoSyncHeartbeat() {
   if (!isRoomLeader() || !roomVideoState || !activeRoomVideoId || !roomVideoPlayer) {
     return false;
   }
+  if (roomVideoPageLeaving || document.visibilityState === "hidden") {
+    return false;
+  }
   if (suppressRoomVideoEvents || roomVideoSeekDragging) {
     return false;
   }
   if (isYouTubeRoomVideo(roomVideoState)) {
-    return Boolean(youTubePlayer && youTubePlayerReady && isYouTubePlaying());
+    return false;
   }
   if (roomVideoPlayer.ended || roomVideoPlayer.paused) {
     return false;
@@ -2319,7 +2490,12 @@ function ensureRoomVideoSyncHeartbeat() {
     if (!shouldSendRoomVideoSyncHeartbeat()) {
       return;
     }
-    sendRoomVideoSync("seek", { silent: true, includeDuration: false, quietError: true });
+    sendRoomVideoSync("seek", {
+      silent: true,
+      includeDuration: false,
+      quietError: true,
+      heartbeat: true
+    });
   }, ROOM_VIDEO_SYNC_HEARTBEAT_MS);
 }
 
@@ -2601,7 +2777,7 @@ function updateVideoClearButtonState() {
     button.title = label;
   };
   updateButton(videoClearTopBtn, isLeader && !mobile);
-  updateButton(videoClearBtn, isLeader && mobile);
+  updateButton(videoClearBtn, isLeader);
 }
 
 function updateVideoEmptyNoticeState() {
@@ -2639,6 +2815,8 @@ function clearRoomVideoPlayer() {
   roomVideoState = null;
   roomVideoSyncState = null;
   roomVideoLastKnownTime = 0;
+  roomVideoResumePending = false;
+  youTubeLeaderPlayPending = false;
   updateVideoEmptyNoticeState();
   setYouTubeMaskVisible(false);
   hideFullscreenChatNotice();
@@ -2650,6 +2828,9 @@ async function applyRoomVideoSyncToPlayer({ forceSeek = false } = {}) {
   if (!roomVideoState || !roomVideoSyncState) {
     return;
   }
+  if (!roomVideoSyncState.playing) {
+    roomVideoResumePending = false;
+  }
   if (isRoomLeader() && !forceSeek && Date.now() < roomVideoLeaderIgnoreSyncUntil) {
     updateRoomVideoControls();
     return;
@@ -2660,7 +2841,7 @@ async function applyRoomVideoSyncToPlayer({ forceSeek = false } = {}) {
     }
     const duration = getYouTubeDuration();
     const targetTime = computeRoomVideoTargetTime(roomVideoSyncState, duration);
-    const current = clampVideoTime(getYouTubeCurrentTime(), duration);
+    const current = getSafeYouTubeCurrentTime(duration, { keepMonotonicWhilePlaying: true });
     const drift = Math.abs(targetTime - current);
     const leaderControl = isRoomLeader();
     const hardSeekThreshold = leaderControl ? ROOM_VIDEO_LEADER_SEEK_DRIFT_SEC : ROOM_VIDEO_MEMBER_HARD_SEEK_DRIFT_SEC;
@@ -2696,6 +2877,7 @@ async function applyRoomVideoSyncToPlayer({ forceSeek = false } = {}) {
         suppressRoomVideoEvents = false;
         suppressYouTubeStateBroadcast = false;
       }, ROOM_VIDEO_EVENT_SUPPRESS_MS);
+      roomVideoLastKnownTime = clampVideoTime(targetTime, duration);
       youTubeInitialSyncPending = false;
       setYouTubeMaskVisible(!roomVideoSyncState.playing);
       updateRoomVideoControls();
@@ -2780,6 +2962,7 @@ function renderRoomVideo(room) {
     return;
   }
 
+  ensureRoomVideoSyncHeartbeat();
   roomVideoState = nextVideo;
   updateVideoEmptyNoticeState();
   updateVideoClearButtonState();
@@ -2806,18 +2989,29 @@ function renderRoomVideo(room) {
 
   if (isYoutube) {
     roomVideoMetadataReady = false;
+    if (sourceChanged) {
+      roomVideoLastKnownTime = 0;
+      youTubeLeaderPlayPending = false;
+    }
     const shouldAutoplay = roomVideoSyncState ? Boolean(roomVideoSyncState.playing) : true;
     youTubeAudioUnlockNeeded = shouldAutoplay;
-    youTubeInitialSyncPending = Boolean(roomVideoSyncState);
-    withSuppressedRoomVideoEvents(() => {
-      roomVideoPlayer.pause();
-      roomVideoPlayer.removeAttribute("src");
-      roomVideoPlayer.load();
-    });
     const youtubeId = parseYouTubeVideoId(nextVideo.youtubeId) || parseYouTubeVideoId(nextVideo.src);
-    ensureYouTubePlayer(youtubeId, { autoplay: shouldAutoplay }).catch(() => {
-      showToast(t("videoSyncFailed"));
-    });
+    const shouldResetNativePlayer =
+      sourceChanged ||
+      !youTubePlayer ||
+      !youTubePlayerReady ||
+      activeYouTubeVideoId !== youtubeId;
+    youTubeInitialSyncPending = Boolean(roomVideoSyncState && shouldResetNativePlayer);
+    if (shouldResetNativePlayer) {
+      withSuppressedRoomVideoEvents(() => {
+        roomVideoPlayer.pause();
+        roomVideoPlayer.removeAttribute("src");
+        roomVideoPlayer.load();
+      });
+      ensureYouTubePlayer(youtubeId, { autoplay: shouldAutoplay }).catch(() => {
+        showToast(t("videoSyncFailed"));
+      });
+    }
   } else if (sourceChanged) {
     destroyYouTubePlayer();
     roomVideoMetadataReady = false;
@@ -3165,10 +3359,12 @@ function uploadRoomVideoRequest(
 async function sendRoomVideoSync(
   action,
   {
-    silent = false,
+    silent = true,
     includeDuration = true,
     quietError = false,
-    currentTimeOverride = null
+    currentTimeOverride = null,
+    heartbeat = false,
+    allowRewind = false
   } = {}
 ) {
   if (!isRoomLeader() || !roomVideoState || !activeRoomVideoId || !roomVideoPlayer) {
@@ -3195,7 +3391,9 @@ async function sendRoomVideoSync(
     const safeDuration = useYouTube ? getYouTubeDuration() : getRoomVideoDuration();
     let currentTime = hasOverrideTime
       ? overrideTime
-      : (useYouTube ? clampVideoTime(getYouTubeCurrentTime(), safeDuration) : getSafeLocalVideoCurrentTime(safeDuration));
+      : (useYouTube
+          ? getSafeYouTubeCurrentTime(safeDuration, { keepMonotonicWhilePlaying: true })
+          : getSafeLocalVideoCurrentTime(safeDuration));
     if (!useYouTube) {
       const known = clampVideoTime(roomVideoLastKnownTime, safeDuration);
       if (!hasOverrideTime && action !== "stop" && currentTime <= 0.05 && known > 0.25) {
@@ -3204,6 +3402,8 @@ async function sendRoomVideoSync(
       if (currentTime > 0.05) {
         roomVideoLastKnownTime = clampVideoTime(currentTime, safeDuration);
       }
+    } else if (currentTime > 0.05) {
+      roomVideoLastKnownTime = clampVideoTime(currentTime, safeDuration);
     }
     const rawRate = useYouTube
       ? Number(
@@ -3222,6 +3422,8 @@ async function sendRoomVideoSync(
       playing,
       playbackRate: normalizeVideoRate(rawRate),
       duration,
+      heartbeat: Boolean(heartbeat),
+      allowRewind: Boolean(allowRewind),
       clientNow: Date.now(),
       clientSeq: ++roomVideoSyncClientSeq
     };
@@ -3229,9 +3431,8 @@ async function sendRoomVideoSync(
       method: "POST",
       body: payload
     });
-    if (!silent && result?.room) {
-      renderRoomInfo(result.room);
-    }
+    // Avoid re-rendering the full room on each sync action; polling will deliver state updates.
+    void result;
   } catch (error) {
     if (!quietError) {
       showToast(error.message || t("videoSyncFailed"));
@@ -3243,16 +3444,20 @@ function handleRoomVideoControlEvent(action) {
   if (suppressRoomVideoEvents || !roomVideoState) {
     return;
   }
+  if (roomVideoPageLeaving || document.visibilityState === "hidden") {
+    return;
+  }
   if (!isRoomLeader()) {
     applyRoomVideoSyncToPlayer({ forceSeek: true });
     showVideoControlLockedToast();
     return;
   }
-  // File playback emits noisy native events around seek/buffer; we sync those paths explicitly.
+  // File playback sync is driven by explicit UI actions + heartbeat.
+  // This avoids broadcasting browser auto-pause events when the tab is backgrounded.
   if (!isYouTubeRoomVideo(roomVideoState)) {
     return;
   }
-  sendRoomVideoSync(action);
+  sendRoomVideoSync(action, { allowRewind: action === "seek" });
 }
 
 function getToken() {
@@ -3367,6 +3572,7 @@ function leaveCurrentRoom({ keepalive = false } = {}) {
 }
 
 function redirectToHome(message = "") {
+  roomVideoPageLeaving = true;
   if (pollTimer) {
     clearInterval(pollTimer);
     pollTimer = null;
@@ -3443,6 +3649,15 @@ function systemMessageText(message) {
   }
   if (message.key === "host_changed") {
     return fmt(t("sysHostChanged"), { user: message.payload?.user || "" });
+  }
+  if (message.key === "room_video_set") {
+    return fmt(t("sysVideoSet"), {
+      user: message.payload?.user || "",
+      name: message.payload?.name || "video"
+    });
+  }
+  if (message.key === "room_video_removed") {
+    return fmt(t("sysVideoRemoved"), { user: message.payload?.user || "" });
   }
   if (message.key === "message_reaction") {
     return "";
@@ -3793,7 +4008,14 @@ function closeKickSupervisorDeniedModal() {
 }
 
 function updateModalTimerText() {
-  joinModalTimer.textContent = fmt(t("joinModalTimer"), { seconds: requestModalSeconds });
+  if (!joinModalTimer) {
+    return;
+  }
+  if (requestModalSeconds > 0) {
+    joinModalTimer.textContent = fmt(t("joinModalTimer"), { seconds: requestModalSeconds });
+    return;
+  }
+  joinModalTimer.textContent = t("joinModalTimer");
 }
 
 async function dismissActiveModalRequest(action, silentToast = false) {
@@ -3802,30 +4024,27 @@ async function dismissActiveModalRequest(action, silentToast = false) {
     closeRequestModal();
     return;
   }
+  dismissedRequestUsers.delete(target);
   closeRequestModal();
   await handleRequestDecision(target, action, { silentToast });
 }
 
+function postponeActiveModalRequest() {
+  if (activeRequestUser) {
+    dismissedRequestUsers.add(activeRequestUser);
+  }
+  closeRequestModal();
+  maybeOpenNextRequestModal();
+}
+
 function openRequestModal(username) {
   activeRequestUser = username;
-  requestModalSeconds = 60;
+  requestModalSeconds = 0;
   joinModalTitle.textContent = t("joinModalTitle");
   joinModalText.textContent = fmt(t("joinModalPrompt"), { user: username });
   updateModalTimerText();
   sfx("modal");
   joinRequestModal.classList.remove("hidden");
-
-  if (requestModalTimer) {
-    clearInterval(requestModalTimer);
-  }
-  requestModalTimer = setInterval(() => {
-    requestModalSeconds -= 1;
-    if (requestModalSeconds <= 0) {
-      dismissActiveModalRequest("reject", true);
-      return;
-    }
-    updateModalTimerText();
-  }, 1000);
 }
 
 function maybeOpenNextRequestModal() {
@@ -3842,16 +4061,22 @@ function maybeOpenNextRequestModal() {
 function syncRequestModalQueue(requests) {
   if (me !== host) {
     requestModalQueue = [];
+    dismissedRequestUsers.clear();
     closeRequestModal();
     return;
   }
   const activeSet = new Set(requests);
-  requestModalQueue = requestModalQueue.filter((user) => activeSet.has(user));
+  requestModalQueue = requestModalQueue.filter((user) => activeSet.has(user) && !dismissedRequestUsers.has(user));
+  Array.from(dismissedRequestUsers).forEach((user) => {
+    if (!activeSet.has(user)) {
+      dismissedRequestUsers.delete(user);
+    }
+  });
   if (activeRequestUser && !activeSet.has(activeRequestUser)) {
     closeRequestModal();
   }
   requests.forEach((user) => {
-    if (user !== activeRequestUser && !requestModalQueue.includes(user)) {
+    if (user !== activeRequestUser && !dismissedRequestUsers.has(user) && !requestModalQueue.includes(user)) {
       requestModalQueue.push(user);
     }
   });
@@ -3877,6 +4102,7 @@ async function refreshPendingRequests() {
 async function handleRequestDecision(username, action, options = {}) {
   const { silentToast = false } = options;
   try {
+    dismissedRequestUsers.delete(username);
     await api(`/api/rooms/${encodedCode}/requests`, {
       method: "POST",
       body: { username, action }
@@ -3918,17 +4144,12 @@ function renderPlayers(members) {
     info.appendChild(name);
     item.appendChild(info);
 
-    if (me === host) {
+    if (me === host && player !== host) {
       const kickBtn = document.createElement("button");
       kickBtn.className = "kick-btn";
       kickBtn.type = "button";
       kickBtn.textContent = t("kickBtn");
       kickBtn.addEventListener("click", async () => {
-        if (player === host) {
-          sfx("click");
-          openSelfKickJokeModal();
-          return;
-        }
         if (playerIsSupervisor) {
           sfx("click");
           openKickSupervisorDeniedModal();
@@ -4337,7 +4558,9 @@ function applyTranslations() {
   setPlayersDrawerOpen(playersDrawerOpen);
   setVideoToolsDrawerOpen(videoToolsOpen);
   renderRoomMembersCount(currentMembers.length);
-  openMyProfileBtn.textContent = t("profileBtn");
+  if (openMyProfileBtn) {
+    openMyProfileBtn.textContent = t("profileBtn");
+  }
   profileModalTitle.textContent = t("profileTitle");
   profileDisplayNameLabel.textContent = t("profileDisplayName");
   profileAvatarLabel.textContent = t("profileAvatar");
@@ -4454,20 +4677,20 @@ joinModalReject.addEventListener("click", () => {
 
 joinModalClose.addEventListener("click", () => {
   sfx("click");
-  dismissActiveModalRequest("reject", true);
+  postponeActiveModalRequest();
 });
 
 if (joinModalTopClose) {
   joinModalTopClose.addEventListener("click", () => {
     sfx("click");
-    dismissActiveModalRequest("reject", true);
+    postponeActiveModalRequest();
   });
 }
 
 if (joinRequestModal) {
   joinRequestModal.addEventListener("click", (event) => {
     if (event.target === joinRequestModal) {
-      dismissActiveModalRequest("reject", true);
+      postponeActiveModalRequest();
     }
   });
 }
@@ -4518,10 +4741,12 @@ if (kickSupervisorDeniedModal) {
   });
 }
 
-openMyProfileBtn.addEventListener("click", () => {
-  sfx("click");
-  openProfileModal(me);
-});
+if (openMyProfileBtn) {
+  openMyProfileBtn.addEventListener("click", () => {
+    sfx("click");
+    openProfileModal(me);
+  });
+}
 
 profileCloseBtn.addEventListener("click", () => {
   sfx("click");
@@ -4551,6 +4776,7 @@ profileAvatarInput.addEventListener("change", async (event) => {
     selectedAvatarDataUrl = dataUrl;
     profileAvatar.src = dataUrl;
   } catch (error) {
+    profileAvatarInput.value = "";
     showToast(error.message);
   }
 });
@@ -4776,9 +5002,16 @@ if (videoPlayPauseBtn) {
     revealRoomVideoControls();
     if (isYouTubeRoomVideo(roomVideoState)) {
       if (!youTubePlayerReady || !youTubePlayer) {
+        if (isRoomLeader()) {
+          youTubeLeaderPlayPending = true;
+          const youtubeId = parseYouTubeVideoId(roomVideoState?.youtubeId) || parseYouTubeVideoId(roomVideoState?.src);
+          if (youtubeId) {
+            ensureYouTubePlayer(youtubeId, { autoplay: true }).catch(() => {});
+          }
+        }
         return;
       }
-      const current = clampVideoTime(getYouTubeCurrentTime(), getRoomVideoDuration());
+      const current = getSafeYouTubeCurrentTime(getRoomVideoDuration(), { keepMonotonicWhilePlaying: true });
       if (isYouTubePlaying()) {
         suppressYouTubeLeaderStateBroadcastTemporarily();
         if (typeof youTubePlayer.pauseVideo === "function") {
@@ -4853,10 +5086,10 @@ if (videoSeekRange) {
       if (youTubePlayerReady && youTubePlayer && typeof youTubePlayer.seekTo === "function") {
         youTubePlayer.seekTo(targetTime, true);
       }
-      sendRoomVideoSync("seek", { currentTimeOverride: targetTime });
+      sendRoomVideoSync("seek", { currentTimeOverride: targetTime, allowRewind: true });
     } else if (roomVideoPlayer) {
       roomVideoPlayer.currentTime = targetTime;
-      sendRoomVideoSync("seek", { currentTimeOverride: targetTime });
+      sendRoomVideoSync("seek", { currentTimeOverride: targetTime, allowRewind: true });
     }
     roomVideoSeekDragging = false;
     scheduleRoomVideoControlsAutoHide();
@@ -4927,6 +5160,9 @@ if (roomVideoPlayer) {
   });
 
   roomVideoPlayer.addEventListener("loadedmetadata", async () => {
+    if (isYouTubeRoomVideo(roomVideoState)) {
+      return;
+    }
     roomVideoMetadataReady = true;
     revealRoomVideoControls();
     updateRoomVideoControls();
@@ -4934,12 +5170,18 @@ if (roomVideoPlayer) {
   });
 
   roomVideoPlayer.addEventListener("play", () => {
+    if (isYouTubeRoomVideo(roomVideoState)) {
+      return;
+    }
     scheduleRoomVideoControlsAutoHide();
     updateRoomVideoControls();
     handleRoomVideoControlEvent("play");
   });
 
   roomVideoPlayer.addEventListener("pause", () => {
+    if (isYouTubeRoomVideo(roomVideoState)) {
+      return;
+    }
     revealRoomVideoControls();
     updateRoomVideoControls();
     if (roomVideoPlayer.ended) {
@@ -4949,16 +5191,25 @@ if (roomVideoPlayer) {
   });
 
   roomVideoPlayer.addEventListener("seeked", () => {
+    if (isYouTubeRoomVideo(roomVideoState)) {
+      return;
+    }
     updateRoomVideoControls();
     handleRoomVideoControlEvent("seek");
   });
 
   roomVideoPlayer.addEventListener("ratechange", () => {
+    if (isYouTubeRoomVideo(roomVideoState)) {
+      return;
+    }
     updateRoomVideoControls();
     handleRoomVideoControlEvent("rate");
   });
 
   roomVideoPlayer.addEventListener("timeupdate", () => {
+    if (isYouTubeRoomVideo(roomVideoState)) {
+      return;
+    }
     const duration = getRoomVideoDuration();
     const current = Number(roomVideoPlayer.currentTime);
     if (Number.isFinite(current) && current >= 0) {
@@ -4970,9 +5221,12 @@ if (roomVideoPlayer) {
   });
 
   roomVideoPlayer.addEventListener("ended", () => {
+    if (isYouTubeRoomVideo(roomVideoState)) {
+      return;
+    }
     revealRoomVideoControls();
     updateRoomVideoControls();
-    if (!roomVideoState || isYouTubeRoomVideo(roomVideoState)) {
+    if (!roomVideoState) {
       handleRoomVideoControlEvent("stop");
       return;
     }
@@ -5013,7 +5267,7 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   if (event.key === "Escape" && joinRequestModal && !joinRequestModal.classList.contains("hidden")) {
-    dismissActiveModalRequest("reject", true);
+    postponeActiveModalRequest();
     return;
   }
   if (event.key === "Escape" && profileModal && !profileModal.classList.contains("hidden")) {
@@ -5041,6 +5295,15 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+const markInteractionForRoomVideoAudio = () => {
+  markRoomVideoUserInteracted();
+  attemptMobileRoomVideoResume({ fromGesture: true });
+  tryUnlockYouTubeAudioFromGesture();
+};
+
+document.addEventListener("pointerdown", markInteractionForRoomVideoAudio, { passive: true });
+document.addEventListener("touchstart", markInteractionForRoomVideoAudio, { passive: true });
+
 if (roomMobileLayoutQuery && typeof roomMobileLayoutQuery.addEventListener === "function") {
   roomMobileLayoutQuery.addEventListener("change", () => {
     syncPlayersDrawerMode();
@@ -5048,6 +5311,7 @@ if (roomMobileLayoutQuery && typeof roomMobileLayoutQuery.addEventListener === "
 }
 
 function leaveRoomToLobby() {
+  roomVideoPageLeaving = true;
   sfx("leave");
   leaveCurrentRoom({ keepalive: true }).catch(() => {});
   window.location.href = "/";
@@ -5152,6 +5416,7 @@ async function bootRoom() {
 }
 
 window.addEventListener("beforeunload", () => {
+  roomVideoPageLeaving = true;
   document.body.classList.remove("room-page");
   document.documentElement.classList.remove("room-page");
   leaveCurrentRoom({ keepalive: true });
@@ -5166,6 +5431,60 @@ window.addEventListener("beforeunload", () => {
   hideRoomVideoUploadOverlay();
   clearRoomVideoPlayer();
   unlockOrientationAfterFullscreen();
+});
+
+window.addEventListener("pagehide", () => {
+  roomVideoPageLeaving = true;
+  if (roomVideoSyncState?.playing) {
+    roomVideoResumePending = true;
+  }
+});
+
+window.addEventListener("pageshow", () => {
+  roomVideoPageLeaving = false;
+  if (roomVideoSyncState?.playing) {
+    roomVideoResumePending = true;
+  }
+  if (roomVideoState && roomVideoSyncState) {
+    applyRoomVideoSyncToPlayer({ forceSeek: true });
+  }
+  setTimeout(() => {
+    attemptMobileRoomVideoResume({ fromGesture: false });
+  }, 90);
+});
+
+document.addEventListener("visibilitychange", () => {
+  const isVisible = document.visibilityState === "visible";
+  roomVideoPageLeaving = !isVisible;
+  if (!isVisible) {
+    if (roomVideoSyncState?.playing) {
+      roomVideoResumePending = true;
+    }
+    return;
+  }
+  if (roomVideoSyncState?.playing) {
+    roomVideoResumePending = true;
+  }
+  if (roomVideoState && roomVideoSyncState) {
+    if (!isYouTubeRoomVideo(roomVideoState) && roomVideoPlayer && roomVideoPlayer.readyState < 1) {
+      try {
+        roomVideoPlayer.load();
+      } catch (_error) {
+        // Ignore reload failures and apply sync using available state.
+      }
+    }
+    applyRoomVideoSyncToPlayer({ forceSeek: true });
+  }
+  if (roomVideoPlayer && roomVideoUserInteracted && roomVideoPlayer.muted) {
+    roomVideoPlayer.muted = false;
+  }
+  attemptMobileRoomVideoResume({ fromGesture: false });
+  youTubeAudioUnlockNeeded = true;
+  setTimeout(() => {
+    attemptMobileRoomVideoResume({ fromGesture: false });
+    tryUnlockYouTubeAudioFromGesture();
+  }, 120);
+  refreshMessages().catch(() => {});
 });
 
 updateRoomVideoControls();

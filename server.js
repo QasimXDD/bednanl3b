@@ -22,6 +22,7 @@ const ROOM_VIDEO_PUBLIC_PREFIX = "/uploads/room-videos/";
 const ROOM_VIDEO_UPLOAD_DIR_DEFAULT = path.join(UPLOADS_DIR, "room-videos");
 const ROOM_VIDEO_UPLOAD_DIR_FALLBACK = path.join(os.tmpdir(), "bednanl3b-room-videos");
 const USERS_FILE = path.join(DATA_DIR, "users.json");
+const USERS_BACKUP_FILE = path.join(DATA_DIR, "users.backup.json");
 const MODERATION_FILE = path.join(DATA_DIR, "moderation.json");
 const YOUTUBE_CACHE_FILE = path.join(DATA_DIR, "youtube-cache.json");
 const SUPERVISOR_USERNAME = "qasim";
@@ -35,6 +36,7 @@ const PASSWORD_MAX_LENGTH = 128;
 const ROOM_NAME_MAX_LENGTH = 40;
 const ROOM_EMPTY_DELETE_DELAY_MS = 10000;
 const USERNAME_ALLOWED_REGEX = /^[\p{L}\p{N}_-]+$/u;
+const REGISTERED_USERNAME_ALLOWED_REGEX = /^[a-z0-9]+$/;
 const CLIENT_MESSAGE_ID_MAX_LENGTH = 80;
 const CLIENT_MESSAGE_ID_REGEX = /^[A-Za-z0-9_-]+$/;
 const MESSAGE_DEDUP_TTL_MS = 1000 * 60 * 5;
@@ -45,6 +47,7 @@ const ROOM_VIDEO_MAX_BYTES = 1024 * 1024 * 1024;
 const ROOM_VIDEO_MULTIPART_OVERHEAD_BYTES = 8 * 1024 * 1024;
 const ROOM_VIDEO_MAX_DURATION_SEC = 60 * 60 * 8;
 const ROOM_VIDEO_MAX_FILENAME_LENGTH = 120;
+const ROOM_VIDEO_HEARTBEAT_REWIND_GUARD_SEC = 2.4;
 const YOUTUBE_SEARCH_TIMEOUT_MS = 9000;
 const YOUTUBE_DOWNLOAD_TIMEOUT_MS = 1000 * 60 * 4;
 const YOUTUBE_INPUT_MAX_LENGTH = 300;
@@ -110,6 +113,26 @@ function ensureDataDir() {
   }
 }
 
+function writeTextFileAtomic(filePath, text) {
+  const target = String(filePath || "").trim();
+  if (!target) {
+    throw new Error("Target file path is missing.");
+  }
+  const tempFile = `${target}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    fs.writeFileSync(tempFile, String(text || ""), "utf8");
+    fs.renameSync(tempFile, target);
+  } finally {
+    if (fs.existsSync(tempFile)) {
+      try {
+        fs.unlinkSync(tempFile);
+      } catch (_error) {
+        // Ignore temp cleanup errors.
+      }
+    }
+  }
+}
+
 function ensureUploadsDir() {
   const ensureWritableDir = (directoryPath) => {
     fs.mkdirSync(directoryPath, { recursive: true });
@@ -151,36 +174,58 @@ function removeFileIfExists(filePath) {
   }
 }
 
+function hydrateUsersFromList(list) {
+  users.clear();
+  list.forEach((item) => {
+    if (!item || typeof item.username !== "string" || typeof item.passwordHash !== "string") {
+      return;
+    }
+    const username = item.username.trim().toLowerCase();
+    if (!username) {
+      return;
+    }
+    users.set(username, {
+      passwordHash: item.passwordHash,
+      passwordSalt: typeof item.passwordSalt === "string" ? item.passwordSalt : "",
+      createdAt: Number(item.createdAt) || Date.now(),
+      displayName: normalizeDisplayName(item.displayName, username),
+      avatarDataUrl: typeof item.avatarDataUrl === "string" ? item.avatarDataUrl : ""
+    });
+  });
+}
+
 function loadUsers() {
+  ensureDataDir();
   try {
-    ensureDataDir();
     if (!fs.existsSync(USERS_FILE)) {
-      fs.writeFileSync(USERS_FILE, "[]", "utf8");
+      writeTextFileAtomic(USERS_FILE, "[]");
+      writeTextFileAtomic(USERS_BACKUP_FILE, "[]");
       return;
     }
     const raw = fs.readFileSync(USERS_FILE, "utf8");
     const list = parseJsonWithOptionalBom(raw);
     if (!Array.isArray(list)) {
-      return;
+      throw new Error("users.json must contain an array.");
     }
-    list.forEach((item) => {
-      if (!item || typeof item.username !== "string" || typeof item.passwordHash !== "string") {
-        return;
-      }
-      const username = item.username.trim().toLowerCase();
-      if (!username) {
-        return;
-      }
-      users.set(username, {
-        passwordHash: item.passwordHash,
-        passwordSalt: typeof item.passwordSalt === "string" ? item.passwordSalt : "",
-        createdAt: Number(item.createdAt) || Date.now(),
-        displayName: normalizeDisplayName(item.displayName, username),
-        avatarDataUrl: typeof item.avatarDataUrl === "string" ? item.avatarDataUrl : ""
-      });
-    });
+    hydrateUsersFromList(list);
+    writeTextFileAtomic(USERS_BACKUP_FILE, JSON.stringify(list, null, 2));
   } catch (error) {
-    console.error("Failed to load users:", error.message);
+    console.error("Failed to load users from primary file:", error.message);
+    try {
+      if (!fs.existsSync(USERS_BACKUP_FILE)) {
+        throw new Error("backup file not found.");
+      }
+      const backupRaw = fs.readFileSync(USERS_BACKUP_FILE, "utf8");
+      const backupList = parseJsonWithOptionalBom(backupRaw);
+      if (!Array.isArray(backupList)) {
+        throw new Error("backup users file must contain an array.");
+      }
+      hydrateUsersFromList(backupList);
+      writeTextFileAtomic(USERS_FILE, JSON.stringify(backupList, null, 2));
+      console.warn("Recovered users from backup file.");
+    } catch (backupError) {
+      console.error("Failed to recover users from backup:", backupError.message);
+    }
   }
 }
 
@@ -195,9 +240,13 @@ function saveUsers() {
       displayName: normalizeDisplayName(info.displayName, username),
       avatarDataUrl: info.avatarDataUrl || ""
     }));
-    fs.writeFileSync(USERS_FILE, JSON.stringify(list, null, 2), "utf8");
+    const serialized = JSON.stringify(list, null, 2);
+    writeTextFileAtomic(USERS_FILE, serialized);
+    writeTextFileAtomic(USERS_BACKUP_FILE, serialized);
+    return true;
   } catch (error) {
     console.error("Failed to save users:", error.message);
+    return false;
   }
 }
 
@@ -723,6 +772,7 @@ const I18N_AR_BY_EN = Object.freeze({
   "Unauthorized.": "غير مصرح.",
   "Unsupported video type. Use MP4, WebM or OGG.": "نوع الفيديو غير مدعوم. استخدم MP4 أو WebM أو OGG.",
   "User not found.": "المستخدم غير موجود.",
+  "Username must be 3-30 characters and use only English letters and numbers.": "اسم المستخدم يجب أن يكون من 3 إلى 30 حرفًا، ويحتوي فقط على أحرف إنجليزية وأرقام.",
   "Username is already in use.": "اسم المستخدم مستخدم بالفعل.",
   "Video file is too large (max 1GB).": "ملف الفيديو كبير جدًا (الحد الأقصى 1GB).",
   "Video stream link expired. Please set the video again.": "انتهت صلاحية رابط بث الفيديو. يرجى تعيين الفيديو مرة أخرى.",
@@ -790,7 +840,9 @@ function verifyPassword(username, user, password) {
   user.passwordSalt = next.passwordSalt;
   user.passwordHash = next.passwordHash;
   users.set(username, user);
-  saveUsers();
+  if (!saveUsers()) {
+    console.warn("Password hash upgrade was not persisted for user:", username);
+  }
   return true;
 }
 
@@ -880,6 +932,15 @@ function isValidUsername(username) {
     username.length >= USERNAME_MIN_LENGTH &&
     username.length <= USERNAME_MAX_LENGTH &&
     USERNAME_ALLOWED_REGEX.test(username)
+  );
+}
+
+function isValidRegisteredUsername(username) {
+  return (
+    typeof username === "string" &&
+    username.length >= USERNAME_MIN_LENGTH &&
+    username.length <= USERNAME_MAX_LENGTH &&
+    REGISTERED_USERNAME_ALLOWED_REGEX.test(username)
   );
 }
 
@@ -1554,22 +1615,16 @@ function scheduleRoomDeletionIfEmpty(room) {
 
 function joinUserToRoom(room, username) {
   cancelRoomDeletionTimer(room.code);
-  const hadHistoryFloor = room.messageFloorByUser.has(username);
   room.members.add(username);
   room.approvedUsers.add(username);
   room.joinRequests.delete(username);
-  if (!room.messageFloorByUser.has(username)) {
-    room.messageFloorByUser.set(username, 0);
-  }
+  room.messageFloorByUser.set(username, 0);
   pushSystemMessage(room, "room_joined", { user: username });
   if (room.pendingHostRestore === username && room.host !== username) {
     const previous = room.host;
     room.host = username;
     room.pendingHostRestore = null;
     pushSystemMessage(room, "host_changed", { user: username, previous });
-  }
-  if (hadHistoryFloor) {
-    room.messageFloorByUser.set(username, room.nextMessageId - 1);
   }
 }
 
@@ -1586,8 +1641,6 @@ function parseRoomPath(pathname) {
 
 function removeMemberFromRoom(room, username) {
   ensureRoomRuntimeState(room);
-  // When a player leaves, hide old chat history for their next join.
-  room.messageFloorByUser.set(username, room.nextMessageId - 1);
   room.members.delete(username);
   room.joinRequests.delete(username);
 
@@ -2492,7 +2545,9 @@ function serveStatic(pathname, req, res) {
     const ext = path.extname(filePath).toLowerCase();
     const contentType = MIME_TYPES[ext] || "application/octet-stream";
     const cacheControl =
-      ext === ".html" ? "no-store" : "public, max-age=300, must-revalidate";
+      ext === ".html" || ext === ".js" || ext === ".css"
+        ? "no-store"
+        : "public, max-age=300, must-revalidate";
     const isVideo = contentType.startsWith("video/");
     const rangeHeader = String(req.headers.range || "").trim();
 
@@ -2630,12 +2685,12 @@ async function handleApi(req, res) {
     const cleanUser = normalizeUsername(username);
     const cleanPass = String(password || "");
 
-    if (!isValidUsername(cleanUser)) {
+    if (!isValidRegisteredUsername(cleanUser)) {
       sendJson(res, 400, {
         error: i18n(
           req,
           "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ 3 أ¯طںآ½ 30 أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½/أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½.",
-          "Username must be 3-30 characters and use only letters, numbers, _ or -."
+          "Username must be 3-30 characters and use only English letters and numbers."
         )
       });
       return;
@@ -2665,7 +2720,17 @@ async function handleApi(req, res) {
       displayName: cleanUser,
       avatarDataUrl: ""
     });
-    saveUsers();
+    if (!saveUsers()) {
+      users.delete(cleanUser);
+      sendJson(res, 500, {
+        error: i18n(
+          req,
+          "Failed to persist account data. Please try again.",
+          "Failed to persist account data. Please try again."
+        )
+      });
+      return;
+    }
     const token = createSession(cleanUser);
     sendJson(res, 201, { token, username: cleanUser, announcement: getLiveSiteAnnouncement() });
     return;
@@ -3085,6 +3150,7 @@ async function handleApi(req, res) {
     }
     const { displayName, avatarDataUrl } = await parseBody(req);
     const user = isRegistered ? users.get(username) : guestUsers.get(username);
+    const previousRegisteredUser = isRegistered ? { ...user } : null;
 
     if (displayName !== undefined) {
       const cleanName = String(displayName || "").trim();
@@ -3115,7 +3181,17 @@ async function handleApi(req, res) {
 
     if (isRegistered) {
       users.set(username, user);
-      saveUsers();
+      if (!saveUsers()) {
+        users.set(username, previousRegisteredUser);
+        sendJson(res, 500, {
+          error: i18n(
+            req,
+            "Failed to persist profile changes. Please try again.",
+            "Failed to persist profile changes. Please try again."
+          )
+        });
+        return;
+      }
     } else {
       guestUsers.set(username, user);
     }
@@ -3307,6 +3383,16 @@ async function handleApi(req, res) {
     const room = rooms.get(roomPath.code);
     ensureRoomRuntimeState(room);
     if (req.method === "POST" && roomPath.action === "request-join") {
+      const payload = await parseBody(req);
+      const cleanAction = String(payload?.action || "").trim().toLowerCase();
+      if (cleanAction === "cancel") {
+        room.joinRequests.delete(username);
+        sendJson(res, 200, {
+          ok: true,
+          status: "cancelled"
+        });
+        return;
+      }
       if (room.members.has(username)) {
         sendJson(res, 200, {
           ok: true,
@@ -3379,8 +3465,7 @@ async function handleApi(req, res) {
     if (req.method === "GET" && roomPath.action === "messages") {
       const rawSince = Number(fullUrl.searchParams.get("since"));
       const since = Number.isFinite(rawSince) && rawSince > 0 ? Math.floor(rawSince) : 0;
-      const floor = room.messageFloorByUser.get(username) || 0;
-      const fromId = Math.max(since, floor);
+      const fromId = since;
       const messages = room.messages.filter((msg) => msg.id > fromId);
       sendJson(res, 200, { room: formatRoom(room, username), messages, announcement: getLiveSiteAnnouncement() });
       return;
@@ -3429,9 +3514,7 @@ async function handleApi(req, res) {
       room.joinRequests.delete(target);
       if (cleanAction === "approve") {
         room.approvedUsers.add(target);
-        if (!room.messageFloorByUser.has(target)) {
-          room.messageFloorByUser.set(target, 0);
-        }
+        room.messageFloorByUser.set(target, 0);
         const wasMember = room.members.has(target);
         room.members.add(target);
         if (!wasMember) {
@@ -3580,7 +3663,11 @@ async function handleApi(req, res) {
         });
         return;
       }
+      const hadVideo = Boolean(room.video && room.video.src);
       removeRoomVideoAsset(room);
+      if (hadVideo) {
+        pushSystemMessage(room, "room_video_removed", { user: username });
+      }
       sendJson(res, 200, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });
       return;
     }
@@ -3599,7 +3686,11 @@ async function handleApi(req, res) {
         const { action } = await parseBody(req);
         const clearAction = String(action || "").trim().toLowerCase();
         if (clearAction === "clear" || clearAction === "remove" || clearAction === "delete") {
+          const hadVideo = Boolean(room.video && room.video.src);
           removeRoomVideoAsset(room);
+          if (hadVideo) {
+            pushSystemMessage(room, "room_video_removed", { user: username });
+          }
           sendJson(res, 200, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });
           return;
         }
@@ -3694,6 +3785,10 @@ async function handleApi(req, res) {
         clientNow: 0,
         clientSeq: 0
       };
+      pushSystemMessage(room, "room_video_set", {
+        user: username,
+        name: String(room.video.filename || "video")
+      });
 
       sendJson(res, 201, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });
       return;
@@ -3737,6 +3832,10 @@ async function handleApi(req, res) {
         return;
       }
       setRoomVideoFromYouTubeEmbed(room, resolved.videoId, username, resolved.label);
+      pushSystemMessage(room, "room_video_set", {
+        user: username,
+        name: String(room.video?.filename || resolved.label || "video")
+      });
       sendJson(res, 201, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });
       return;
     }
@@ -3769,7 +3868,18 @@ async function handleApi(req, res) {
         };
       }
 
-      const { action, currentTime, playbackRate, duration, videoId, playing, clientNow, clientSeq } = await parseBody(req);
+      const {
+        action,
+        currentTime,
+        playbackRate,
+        duration,
+        videoId,
+        playing,
+        heartbeat,
+        allowRewind,
+        clientNow,
+        clientSeq
+      } = await parseBody(req);
       const cleanAction = String(action || "").trim().toLowerCase();
       if (!["play", "pause", "seek", "rate", "stop"].includes(cleanAction)) {
         sendJson(res, 400, {
@@ -3816,9 +3926,25 @@ async function handleApi(req, res) {
       const nextRate = normalizeRoomVideoPlaybackRate(
         playbackRate !== undefined ? playbackRate : room.videoSync.playbackRate
       );
-      const nextTime = currentTime !== undefined ? clampRoomVideoTime(room, currentTime) : effective;
+      const requestedTime = currentTime !== undefined ? clampRoomVideoTime(room, currentTime) : effective;
       const hasPlaying = playing !== undefined;
       const nextPlaying = Boolean(playing);
+      const isHeartbeat = Boolean(heartbeat);
+      const canRewind = Boolean(allowRewind);
+      let nextTime = requestedTime;
+      const actionCanAdvanceTimeline =
+        cleanAction === "play" || cleanAction === "pause" || cleanAction === "seek";
+      const shouldIgnoreUnexpectedRewind =
+        actionCanAdvanceTimeline &&
+        !canRewind &&
+        requestedTime + ROOM_VIDEO_HEARTBEAT_REWIND_GUARD_SEC < effective;
+      const shouldIgnoreHeartbeatRewind =
+        cleanAction === "seek" &&
+        isHeartbeat &&
+        requestedTime + ROOM_VIDEO_HEARTBEAT_REWIND_GUARD_SEC < effective;
+      if (shouldIgnoreUnexpectedRewind || shouldIgnoreHeartbeatRewind) {
+        nextTime = effective;
+      }
       const normalizedDuration = normalizeRoomVideoDuration(duration);
       if (normalizedDuration > 0) {
         room.video.duration = normalizedDuration;
@@ -3911,7 +4037,6 @@ async function handleApi(req, res) {
 
       room.members.delete(target);
       room.approvedUsers.delete(target);
-      room.messageFloorByUser.set(target, room.nextMessageId - 1);
       if (room.pendingHostRestore === target) {
         room.pendingHostRestore = null;
       }
@@ -3933,17 +4058,18 @@ async function handleApi(req, res) {
 }
 
 const server = http.createServer(async (req, res) => {
+  let requestPathname = "";
   try {
     const parsedUrl = new URL(req.url, "http://localhost");
-    const pathname = parsedUrl.pathname;
-    if (pathname.startsWith("/api/")) {
+    requestPathname = parsedUrl.pathname;
+    if (requestPathname.startsWith("/api/")) {
       await handleApi(req, res);
       return;
     }
-    serveStatic(pathname, req, res);
+    serveStatic(requestPathname, req, res);
   } catch (error) {
     if (error.message === "Payload too large") {
-      const roomPath = parseRoomPath(pathname);
+      const roomPath = parseRoomPath(requestPathname);
       const contentType = String(req.headers["content-type"] || "").toLowerCase();
       if (
         req.method === "POST"

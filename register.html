@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>إنشاء حساب - SawaWatch</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Changa:wght@600;700;800&family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css?v=20260225b">
+</head>
+<body>
+  <div class="top-controls">
+    <label for="langSelect" id="langLabel">اللغة</label>
+    <select id="langSelect">
+      <option value="ar">العربية</option>
+      <option value="en">English</option>
+    </select>
+  </div>
+
+  <main class="guest-page-wrap">
+    <section class="panel auth-panel guest-panel">
+      <h2 id="registerTitle">إنشاء حساب</h2>
+      <p class="muted" id="registerDesc">أكمل البيانات لإنشاء حساب جديد.</p>
+
+      <form id="registerForm" class="form" novalidate>
+        <label for="registerUsername" id="registerUsernameLabel">اسم المستخدم</label>
+        <input id="registerUsername" name="registerUsername" type="text" minlength="3" maxlength="30" pattern="[A-Za-z0-9]+" inputmode="latin" aria-describedby="registerUsernameError" required>
+        <p id="registerUsernameError" class="form-inline-error hidden" role="alert" aria-live="polite"></p>
+
+        <label for="registerPassword" id="registerPasswordLabel">كلمة المرور</label>
+        <input id="registerPassword" name="registerPassword" type="password" minlength="4" maxlength="128" required>
+
+        <label for="registerDisplayName" id="registerDisplayNameLabel">اسم الحساب</label>
+        <input id="registerDisplayName" name="registerDisplayName" type="text" minlength="2" maxlength="30" required>
+
+        <label for="registerAvatarInput" id="registerAvatarLabel">الصورة الشخصية (اختياري)</label>
+        <input id="registerAvatarInput" type="file" accept="image/png,image/jpeg,image/webp">
+
+        <div class="room-actions">
+          <button id="registerSubmitBtn" class="btn" type="submit">إنشاء حساب</button>
+          <button id="registerRemoveAvatarBtn" class="btn btn-ghost" type="button">إزالة الصورة</button>
+        </div>
+      </form>
+
+      <button id="backToLoginBtn" class="btn btn-ghost auth-guest-btn" type="button">العودة لتسجيل الدخول</button>
+    </section>
+  </main>
+
+  <div id="registerToastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
+  <script src="register.js?v=20260225c"></script>
+</body>
+</html>
