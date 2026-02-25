@@ -56,6 +56,14 @@ const YOUTUBE_CACHE_MAX_ITEMS = 180;
 const YOUTUBE_CACHE_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 30;
 const YOUTUBE_PROXY_TTL_MS = 1000 * 60 * 60 * 6;
 const YT_DLP_BINARY = String(process.env.YT_DLP_BINARY || "yt-dlp").trim() || "yt-dlp";
+const GITHUB_USERS_SYNC_TOKEN = String(process.env.GITHUB_USERS_SYNC_TOKEN || "").trim();
+const GITHUB_USERS_SYNC_REPO = String(process.env.GITHUB_USERS_SYNC_REPO || "").trim();
+const GITHUB_USERS_SYNC_BRANCH = String(process.env.GITHUB_USERS_SYNC_BRANCH || "main").trim() || "main";
+const GITHUB_USERS_SYNC_PATH = String(process.env.GITHUB_USERS_SYNC_PATH || "data/users.json")
+  .replace(/\\/g, "/")
+  .replace(/^\/+/, "")
+  .trim() || "data/users.json";
+const GITHUB_USERS_SYNC_TIMEOUT_MS = 15000;
 const ROOM_VIDEO_ALLOWED_MIME_TYPES = new Set([
   "video/mp4",
   "video/webm",
@@ -102,9 +110,191 @@ const youtubeProxyStreams = new Map();
 let siteAnnouncement = null;
 let activeRoomVideoUploadDir = ROOM_VIDEO_UPLOAD_DIR_DEFAULT;
 let ytDlpCommandOverride = null;
+let gitHubUsersSyncQueue = Promise.resolve();
+let gitHubUsersFileSha = "";
 
 function parseJsonWithOptionalBom(raw) {
   return JSON.parse(String(raw || "").replace(/^\uFEFF/, ""));
+}
+
+function getGitHubUsersRepoParts() {
+  const normalized = String(GITHUB_USERS_SYNC_REPO || "")
+    .replace(/^https?:\/\/github\.com\//i, "")
+    .replace(/\.git$/i, "")
+    .replace(/^\/+|\/+$/g, "");
+  const match = normalized.match(/^([^/\s]+)\/([^/\s]+)$/);
+  if (!match) {
+    return null;
+  }
+  return { owner: match[1], repo: match[2] };
+}
+
+function isGitHubUsersSyncEnabled() {
+  return Boolean(GITHUB_USERS_SYNC_TOKEN && getGitHubUsersRepoParts());
+}
+
+function getGitHubUsersContentApiPath(includeRef = false) {
+  const repoParts = getGitHubUsersRepoParts();
+  if (!repoParts) {
+    return "";
+  }
+  const encodedOwner = encodeURIComponent(repoParts.owner);
+  const encodedRepo = encodeURIComponent(repoParts.repo);
+  const encodedFilePath = GITHUB_USERS_SYNC_PATH
+    .split("/")
+    .filter(Boolean)
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+  if (!encodedFilePath) {
+    return "";
+  }
+  let apiPath = `/repos/${encodedOwner}/${encodedRepo}/contents/${encodedFilePath}`;
+  if (includeRef) {
+    apiPath += `?ref=${encodeURIComponent(GITHUB_USERS_SYNC_BRANCH)}`;
+  }
+  return apiPath;
+}
+
+function githubApiRequestJson(method, apiPath, payload = null) {
+  return new Promise((resolve, reject) => {
+    const body = payload === null ? "" : JSON.stringify(payload);
+    const req = https.request(
+      {
+        hostname: "api.github.com",
+        method,
+        path: apiPath,
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${GITHUB_USERS_SYNC_TOKEN}`,
+          "User-Agent": "sawawatch-users-sync",
+          "X-GitHub-Api-Version": "2022-11-28",
+          ...(body
+            ? {
+              "Content-Type": "application/json",
+              "Content-Length": Buffer.byteLength(body)
+            }
+            : {})
+        }
+      },
+      (res) => {
+        let raw = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => {
+          raw += chunk;
+        });
+        res.on("end", () => {
+          let parsed = null;
+          if (raw) {
+            try {
+              parsed = JSON.parse(raw);
+            } catch (_error) {
+              parsed = null;
+            }
+          }
+          resolve({
+            statusCode: Number(res.statusCode || 0),
+            body: raw,
+            json: parsed
+          });
+        });
+      }
+    );
+    req.setTimeout(GITHUB_USERS_SYNC_TIMEOUT_MS, () => {
+      req.destroy(new Error("GitHub API timeout"));
+    });
+    req.on("error", (error) => {
+      reject(error);
+    });
+    if (body) {
+      req.write(body);
+    }
+    req.end();
+  });
+}
+
+async function fetchUsersFromGitHub() {
+  if (!isGitHubUsersSyncEnabled()) {
+    return null;
+  }
+  const apiPath = getGitHubUsersContentApiPath(true);
+  if (!apiPath) {
+    return null;
+  }
+  const response = await githubApiRequestJson("GET", apiPath);
+  if (response.statusCode === 404) {
+    return null;
+  }
+  if (response.statusCode !== 200) {
+    const reason = response.json?.message || response.body || `status ${response.statusCode}`;
+    throw new Error(`GitHub users fetch failed: ${reason}`);
+  }
+  const encodedContent = String(response.json?.content || "").replace(/\s+/g, "");
+  if (!encodedContent) {
+    throw new Error("GitHub users file content is empty.");
+  }
+  const decodedContent = Buffer.from(encodedContent, "base64").toString("utf8");
+  const parsed = parseJsonWithOptionalBom(decodedContent);
+  if (!Array.isArray(parsed)) {
+    throw new Error("GitHub users file must contain a JSON array.");
+  }
+  const sha = typeof response.json?.sha === "string" ? response.json.sha : "";
+  return { list: parsed, sha };
+}
+
+async function fetchGitHubUsersFileSha() {
+  if (!isGitHubUsersSyncEnabled()) {
+    return "";
+  }
+  const apiPath = getGitHubUsersContentApiPath(true);
+  if (!apiPath) {
+    return "";
+  }
+  const response = await githubApiRequestJson("GET", apiPath);
+  if (response.statusCode === 404) {
+    return "";
+  }
+  if (response.statusCode !== 200) {
+    const reason = response.json?.message || response.body || `status ${response.statusCode}`;
+    throw new Error(`GitHub users sha fetch failed: ${reason}`);
+  }
+  return typeof response.json?.sha === "string" ? response.json.sha : "";
+}
+
+async function pushUsersToGitHub(serializedUsers) {
+  if (!isGitHubUsersSyncEnabled()) {
+    return;
+  }
+  const apiPath = getGitHubUsersContentApiPath(false);
+  if (!apiPath) {
+    return;
+  }
+  const sha = gitHubUsersFileSha || await fetchGitHubUsersFileSha();
+  const payload = {
+    message: `chore(data): sync users.json (${new Date().toISOString()})`,
+    content: Buffer.from(String(serializedUsers || ""), "utf8").toString("base64"),
+    branch: GITHUB_USERS_SYNC_BRANCH
+  };
+  if (sha) {
+    payload.sha = sha;
+  }
+  const response = await githubApiRequestJson("PUT", apiPath, payload);
+  if (response.statusCode !== 200 && response.statusCode !== 201) {
+    const reason = response.json?.message || response.body || `status ${response.statusCode}`;
+    throw new Error(`GitHub users sync failed: ${reason}`);
+  }
+  gitHubUsersFileSha = String(response.json?.content?.sha || payload.sha || "");
+}
+
+function queueUsersSyncToGitHub(serializedUsers) {
+  if (!isGitHubUsersSyncEnabled()) {
+    return;
+  }
+  gitHubUsersSyncQueue = gitHubUsersSyncQueue
+    .catch(() => undefined)
+    .then(() => pushUsersToGitHub(serializedUsers))
+    .catch((error) => {
+      console.error("Failed to sync users to GitHub:", error.message);
+    });
 }
 
 function ensureDataDir() {
@@ -194,8 +384,25 @@ function hydrateUsersFromList(list) {
   });
 }
 
-function loadUsers() {
+async function loadUsers() {
   ensureDataDir();
+  if (isGitHubUsersSyncEnabled()) {
+    try {
+      const remoteUsers = await fetchUsersFromGitHub();
+      if (remoteUsers && Array.isArray(remoteUsers.list)) {
+        hydrateUsersFromList(remoteUsers.list);
+        const serializedRemote = JSON.stringify(remoteUsers.list, null, 2);
+        writeTextFileAtomic(USERS_FILE, serializedRemote);
+        writeTextFileAtomic(USERS_BACKUP_FILE, serializedRemote);
+        gitHubUsersFileSha = String(remoteUsers.sha || "");
+        console.log(`Loaded ${remoteUsers.list.length} users from GitHub sync.`);
+        return;
+      }
+    } catch (error) {
+      console.error("Failed to load users from GitHub sync:", error.message);
+      console.warn("Falling back to local users files.");
+    }
+  }
   try {
     if (!fs.existsSync(USERS_FILE)) {
       writeTextFileAtomic(USERS_FILE, "[]");
@@ -243,6 +450,7 @@ function saveUsers() {
     const serialized = JSON.stringify(list, null, 2);
     writeTextFileAtomic(USERS_FILE, serialized);
     writeTextFileAtomic(USERS_BACKUP_FILE, serialized);
+    queueUsersSyncToGitHub(serialized);
     return true;
   } catch (error) {
     console.error("Failed to save users:", error.message);
@@ -4178,11 +4386,17 @@ const server = http.createServer(async (req, res) => {
 server.requestTimeout = 0;
 server.headersTimeout = 120000;
 
-loadUsers();
-loadModeration();
-ensureUploadsDir();
-loadYouTubeCache();
+async function bootstrap() {
+  await loadUsers();
+  loadModeration();
+  ensureUploadsDir();
+  loadYouTubeCache();
+  server.listen(PORT, () => {
+    console.log(`Server is running on http://localhost:${PORT}`);
+  });
+}
 
-server.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
+bootstrap().catch((error) => {
+  console.error("Failed to bootstrap server:", error.message);
+  process.exit(1);
 });

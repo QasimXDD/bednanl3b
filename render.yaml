@@ -18,3 +18,11 @@ services:
         value: /tmp/sawawatch/data
       - key: UPLOADS_DIR
         value: /tmp/sawawatch/uploads
+      - key: GITHUB_USERS_SYNC_REPO
+        value: ""
+      - key: GITHUB_USERS_SYNC_BRANCH
+        value: main
+      - key: GITHUB_USERS_SYNC_PATH
+        value: data/users.json
+      - key: GITHUB_USERS_SYNC_TOKEN
+        sync: false

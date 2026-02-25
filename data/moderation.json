@@ -1,9 +1,5 @@
 ﻿{
-    "bannedUsers":  [
-
-                    ],
-    "unbanRequests":  [
-
-                      ],
-    "siteAnnouncement":  null
+  "bannedUsers": [],
+  "unbanRequests": [],
+  "siteAnnouncement": null
 }
