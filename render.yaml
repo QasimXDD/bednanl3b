@@ -3,7 +3,7 @@ services:
     name: bednanl3b
     runtime: node
     plan: starter
-    autoDeploy: true
+    autoDeployTrigger: commit
     buildCommand: npm ci --omit=dev
     startCommand: npm start
     healthCheckPath: /api/health
