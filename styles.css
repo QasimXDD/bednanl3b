@@ -452,6 +452,7 @@ a.btn-ghost {
 .tab:focus-visible,
 .sound-toggle:focus-visible,
 .players-drawer-toggle:focus-visible,
+.player-action-btn:focus-visible,
 .kick-btn:focus-visible,
 .avatar-btn:focus-visible,
 input:focus-visible,
@@ -2285,6 +2286,23 @@ ul {
   min-width: 0;
 }
 
+.player-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.34rem;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.player-action-btn {
+  border-radius: 999px;
+  padding: 0.35rem 0.62rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.2s ease, transform 0.2s ease, color 0.2s ease;
+}
+
 .avatar-btn {
   width: 34px;
   height: 34px;
@@ -2320,19 +2338,38 @@ ul {
 
 .kick-btn {
   border: 1px solid rgba(255, 141, 154, 0.5);
-  border-radius: 999px;
-  padding: 0.35rem 0.62rem;
   color: #ffc5ce;
-  font-weight: 700;
-  cursor: pointer;
   background: rgba(255, 103, 118, 0.16);
-  transition: background 0.2s ease, transform 0.2s ease, color 0.2s ease;
 }
 
 .kick-btn:hover {
   transform: translateY(-1px);
   color: #ffe0e5;
   background: rgba(255, 103, 118, 0.24);
+}
+
+.transfer-leader-btn {
+  border: 1px solid rgba(133, 190, 255, 0.46);
+  color: #d5ebff;
+  background: rgba(87, 148, 255, 0.2);
+}
+
+.transfer-leader-btn:hover {
+  transform: translateY(-1px);
+  color: #eff8ff;
+  background: rgba(87, 148, 255, 0.31);
+}
+
+.claim-leader-btn {
+  border: 1px solid rgba(255, 208, 132, 0.55);
+  color: #ffe4b7;
+  background: rgba(181, 121, 26, 0.22);
+}
+
+.claim-leader-btn:hover {
+  transform: translateY(-1px);
+  color: #fff0d6;
+  background: rgba(201, 132, 28, 0.33);
 }
 
 .modal-overlay {
@@ -3232,7 +3269,7 @@ ul {
     height: 31px;
   }
 
-  .kick-btn {
+  .player-action-btn {
     padding: 0.3rem 0.5rem;
     font-size: 0.8rem;
   }

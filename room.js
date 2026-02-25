@@ -330,9 +330,17 @@ const I18N = {
     kickSupervisorDeniedOkBtn: "إغلاق",
     playerLeaderSuffix: "القائد",
     kickBtn: "طرد",
+    transferLeaderBtn: "نقل القيادة",
+    claimLeaderBtn: "امتلاك القيادة",
+    transferLeaderTitle: "نقل القيادة",
+    transferLeaderConfirm: "هل تريد نقل القيادة إلى {user}؟",
+    claimLeaderTitle: "امتلاك القيادة",
+    claimLeaderConfirm: "هل تريد امتلاك القيادة الآن؟",
     systemName: "النظام",
     toastRequestFailed: "فشل الطلب.",
     toastKickedOk: "تمت إزالة {player} من الغرفة.",
+    toastLeaderTransferred: "تم نقل القيادة إلى {user}.",
+    toastLeaderClaimed: "أصبحت قائد الغرفة الآن.",
     toastJoinApproved: "تم قبول {user}.",
     toastJoinRejected: "تم رفض {user}.",
     toastLoginFirst: "يرجى تسجيل الدخول أولًا.",
@@ -486,9 +494,17 @@ const I18N = {
     kickSupervisorDeniedOkBtn: "Close",
     playerLeaderSuffix: "Leader",
     kickBtn: "Kick",
+    transferLeaderBtn: "Transfer Leader",
+    claimLeaderBtn: "Claim Leader",
+    transferLeaderTitle: "Transfer Leadership",
+    transferLeaderConfirm: "Transfer leadership to {user}?",
+    claimLeaderTitle: "Claim Leadership",
+    claimLeaderConfirm: "Do you want to claim leadership now?",
     systemName: "System",
     toastRequestFailed: "Request failed.",
     toastKickedOk: "{player} was removed from the watch room.",
+    toastLeaderTransferred: "Leadership transferred to {user}.",
+    toastLeaderClaimed: "You are now the room leader.",
     toastJoinApproved: "{user} was approved.",
     toastJoinRejected: "{user} was rejected.",
     toastLoginFirst: "Please login first.",
@@ -4118,6 +4134,62 @@ async function handleRequestDecision(username, action, options = {}) {
   }
 }
 
+async function transferRoomLeadership(target) {
+  const cleanTarget = String(target || "").trim();
+  if (!cleanTarget || !isRoomLeader() || cleanTarget === host) {
+    return;
+  }
+  const confirmed = await openActionDialog({
+    title: t("transferLeaderTitle"),
+    message: fmt(t("transferLeaderConfirm"), { user: displayNameFor(cleanTarget) }),
+    confirmText: t("transferLeaderBtn"),
+    cancelText: t("closeBtn"),
+    confirmClass: "btn btn-approve"
+  });
+  if (!confirmed) {
+    return;
+  }
+  try {
+    await api(`/api/rooms/${encodedCode}/host`, {
+      method: "POST",
+      body: {
+        action: "transfer",
+        username: cleanTarget
+      }
+    });
+    showToast(fmt(t("toastLeaderTransferred"), { user: displayNameFor(cleanTarget) }), "success");
+    await refreshMessages();
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+async function claimRoomLeadership() {
+  if (!isSupervisor || !me || me === host) {
+    return;
+  }
+  const confirmed = await openActionDialog({
+    title: t("claimLeaderTitle"),
+    message: t("claimLeaderConfirm"),
+    confirmText: t("claimLeaderBtn"),
+    cancelText: t("closeBtn"),
+    confirmClass: "btn btn-approve"
+  });
+  if (!confirmed) {
+    return;
+  }
+  try {
+    await api(`/api/rooms/${encodedCode}/host`, {
+      method: "POST",
+      body: { action: "claim" }
+    });
+    showToast(t("toastLeaderClaimed"), "success");
+    await refreshMessages();
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
 function renderPlayers(members) {
   currentMembers = members.slice();
   playersList.innerHTML = "";
@@ -4144,9 +4216,22 @@ function renderPlayers(members) {
     info.appendChild(name);
     item.appendChild(info);
 
+    const actions = document.createElement("div");
+    actions.className = "player-actions";
+
     if (me === host && player !== host) {
+      const transferBtn = document.createElement("button");
+      transferBtn.className = "player-action-btn transfer-leader-btn";
+      transferBtn.type = "button";
+      transferBtn.textContent = t("transferLeaderBtn");
+      transferBtn.addEventListener("click", async () => {
+        sfx("click");
+        await transferRoomLeadership(player);
+      });
+      actions.appendChild(transferBtn);
+
       const kickBtn = document.createElement("button");
-      kickBtn.className = "kick-btn";
+      kickBtn.className = "player-action-btn kick-btn";
       kickBtn.type = "button";
       kickBtn.textContent = t("kickBtn");
       kickBtn.addEventListener("click", async () => {
@@ -4170,7 +4255,23 @@ function renderPlayers(members) {
           showToast(error.message);
         }
       });
-      item.appendChild(kickBtn);
+      actions.appendChild(kickBtn);
+    }
+
+    if (isSupervisor && me === player && me !== host) {
+      const claimBtn = document.createElement("button");
+      claimBtn.className = "player-action-btn claim-leader-btn";
+      claimBtn.type = "button";
+      claimBtn.textContent = t("claimLeaderBtn");
+      claimBtn.addEventListener("click", async () => {
+        sfx("click");
+        await claimRoomLeadership();
+      });
+      actions.appendChild(claimBtn);
+    }
+
+    if (actions.childElementCount > 0) {
+      item.appendChild(actions);
     }
 
     playersList.appendChild(item);

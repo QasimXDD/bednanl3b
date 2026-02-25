@@ -756,6 +756,8 @@ const I18N_AR_BY_EN = Object.freeze({
   "Only the room leader can upload videos.": "فقط قائد الغرفة يمكنه رفع الفيديو.",
   "Only the room leader can remove videos.": "فقط قائد الغرفة يمكنه حذف الفيديو.",
   "Only the room leader can view requests.": "فقط قائد الغرفة يمكنه عرض الطلبات.",
+  "Only the room leader can transfer leadership.": "فقط قائد الغرفة يمكنه نقل القيادة.",
+  "Only a supervisor in this room can claim leadership.": "فقط مشرف موجود داخل الغرفة يمكنه امتلاك القيادة.",
   "Payload is too large.": "حجم البيانات المرسلة كبير جدًا.",
   "Player is not in this room.": "اللاعب ليس في هذه الغرفة.",
   "Please choose a valid video file.": "يرجى اختيار ملف فيديو صالح.",
@@ -766,6 +768,7 @@ const I18N_AR_BY_EN = Object.freeze({
   "Supervisor account cannot be banned.": "لا يمكن حظر حساب المشرف.",
   "Supervisor account cannot be deleted.": "لا يمكن حذف حساب المشرف.",
   "Target username is required.": "اسم المستخدم المستهدف مطلوب.",
+  "Leader transfer target must be another member.": "يجب اختيار عضو آخر داخل الغرفة لنقل القيادة.",
   "This account is not banned.": "هذا الحساب غير محظور.",
   "This action is supervisor-only.": "هذا الإجراء مخصص للمشرف فقط.",
   "This video version is outdated. Refresh room data.": "إصدار الفيديو هذا قديم. حدّث بيانات الغرفة.",
@@ -1629,7 +1632,7 @@ function joinUserToRoom(room, username) {
 }
 
 function parseRoomPath(pathname) {
-  const match = pathname.match(/^\/api\/rooms\/([A-Za-z0-9]+)(?:\/(messages|kick|requests|request-join|leave|video|video-sync|video-source))?$/);
+  const match = pathname.match(/^\/api\/rooms\/([A-Za-z0-9]+)(?:\/(messages|kick|host|requests|request-join|leave|video|video-sync|video-source))?$/);
   if (!match) {
     return null;
   }
@@ -3996,6 +3999,72 @@ async function handleApi(req, res) {
       }
 
       sendJson(res, 200, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });
+      return;
+    }
+
+    if (req.method === "POST" && roomPath.action === "host") {
+      const {
+        action,
+        username: targetRaw
+      } = await parseBody(req);
+      const cleanAction = String(action || "transfer").trim().toLowerCase();
+
+      if (cleanAction === "claim") {
+        if (!isSupervisor(username) || !room.members.has(username)) {
+          sendJson(res, 403, {
+            code: "HOST_CLAIM_FORBIDDEN",
+            error: i18n(
+              req,
+              "فقط مشرف موجود داخل الغرفة يمكنه امتلاك القيادة.",
+              "Only a supervisor in this room can claim leadership."
+            )
+          });
+          return;
+        }
+        const previous = room.host;
+        room.host = username;
+        room.pendingHostRestore = null;
+        if (previous !== username) {
+          pushSystemMessage(room, "host_changed", { user: username, previous });
+        }
+        sendJson(res, 200, { ok: true, room: formatRoom(room, username) });
+        return;
+      }
+
+      if (room.host !== username) {
+        sendJson(res, 403, {
+          code: "HOST_TRANSFER_FORBIDDEN",
+          error: i18n(
+            req,
+            "فقط قائد الغرفة يمكنه نقل القيادة.",
+            "Only the room leader can transfer leadership."
+          )
+        });
+        return;
+      }
+
+      const target = normalizeUsername(targetRaw);
+      const targetValid =
+        isValidUsername(target) &&
+        target !== room.host &&
+        room.members.has(target);
+      if (!targetValid) {
+        sendJson(res, 400, {
+          code: "HOST_TRANSFER_TARGET_INVALID",
+          error: i18n(
+            req,
+            "يجب اختيار عضو آخر داخل الغرفة لنقل القيادة.",
+            "Leader transfer target must be another member."
+          )
+        });
+        return;
+      }
+
+      const previous = room.host;
+      room.host = target;
+      room.pendingHostRestore = null;
+      pushSystemMessage(room, "host_changed", { user: target, previous });
+      sendJson(res, 200, { ok: true, room: formatRoom(room, username) });
       return;
     }
 
