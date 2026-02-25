@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: bednanl3b
+    name: sawawatch
     runtime: node
     plan: free
     autoDeployTrigger: commit
@@ -15,6 +15,6 @@ services:
       - key: YTDL_NO_UPDATE
         value: "1"
       - key: DATA_DIR
-        value: /tmp/bednanl3b/data
+        value: /tmp/sawawatch/data
       - key: UPLOADS_DIR
-        value: /tmp/bednanl3b/uploads
+        value: /tmp/sawawatch/uploads
