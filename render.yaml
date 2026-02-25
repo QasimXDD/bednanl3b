@@ -2,7 +2,7 @@ services:
   - type: web
     name: bednanl3b
     runtime: node
-    plan: starter
+    plan: free
     autoDeployTrigger: commit
     buildCommand: npm ci --omit=dev
     startCommand: npm start
@@ -15,10 +15,6 @@ services:
       - key: YTDL_NO_UPDATE
         value: "1"
       - key: DATA_DIR
-        value: /var/data/data
+        value: /tmp/bednanl3b/data
       - key: UPLOADS_DIR
-        value: /var/data/uploads
-    disk:
-      name: bednanl3b-disk
-      mountPath: /var/data
-      sizeGB: 1
+        value: /tmp/bednanl3b/uploads
