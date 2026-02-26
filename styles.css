@@ -61,6 +61,10 @@ body.announcement-lock {
   overflow: hidden;
 }
 
+body.auth-mandatory-lock {
+  overflow: hidden;
+}
+
 body.room-video-upload-lock {
   overflow: hidden;
 }
@@ -2817,6 +2821,27 @@ ul {
 
 .forced-announcement-card .muted {
   color: #ffb9c4;
+}
+
+.auth-mandatory-overlay {
+  z-index: 1200;
+}
+
+.auth-mandatory-card {
+  border-color: rgba(255, 98, 120, 0.72);
+  box-shadow: 0 34px 70px rgba(52, 3, 10, 0.74);
+  background:
+    radial-gradient(circle at 18% 12%, rgba(255, 72, 108, 0.28), transparent 42%),
+    linear-gradient(160deg, rgba(74, 10, 24, 0.97), rgba(43, 7, 18, 0.98));
+}
+
+.auth-mandatory-card h3 {
+  color: #ffd6de;
+}
+
+.auth-mandatory-text {
+  color: #fff1f4;
+  font-weight: 800;
 }
 
 .profile-modal-card {

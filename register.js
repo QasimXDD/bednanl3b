@@ -13,6 +13,10 @@ const registerRemoveAvatarBtn = document.getElementById("registerRemoveAvatarBtn
 const backToLoginBtn = document.getElementById("backToLoginBtn");
 const langSelect = document.getElementById("langSelect");
 const toastContainer = document.getElementById("registerToastContainer");
+const AUTH_MANDATORY_NOTICE_MS = 5000;
+let authMandatoryOverlay = null;
+let authMandatoryTitle = null;
+let authMandatoryText = null;
 
 let selectedAvatarDataUrl = null;
 const REGISTERED_USERNAME_REGEX = /^[A-Za-z0-9]+$/;
@@ -37,6 +41,9 @@ const I18N = {
     backToLoginBtn: "العودة لتسجيل الدخول",
     toastInputInvalid: "اسم المستخدم يجب أن يكون 3-30 حرفًا إنجليزيًا/رقميًا فقط، وكلمة المرور 4+، واسم الحساب 2+ أحرف.",
     toastRegisterOk: "تم إنشاء الحساب بنجاح.",
+    authMandatoryTitle: "تنبيه",
+    authMandatoryLine1: "مرحبًا بك في سوا واتش، الموقع نسخة تجريبية ومن المحتمل مواجهة مشاكل.",
+    authMandatoryLine2: "شكرًا على تفهمكم.",
     toastFailed: "فشل الطلب.",
     toastNetworkError: "تعذر الاتصال بالخادم. تأكد من الإنترنت وحاول مرة أخرى.",
     toastAvatarReadFailed: "تعذر قراءة الصورة.",
@@ -58,6 +65,9 @@ const I18N = {
     backToLoginBtn: "Back to Login",
     toastInputInvalid: "Username must be 3-30 English letters/numbers only, password 4+, and account name 2+ chars.",
     toastRegisterOk: "Account created successfully.",
+    authMandatoryTitle: "Notice",
+    authMandatoryLine1: "Welcome to SawaWatch. This website is an experimental version and you may encounter issues.",
+    authMandatoryLine2: "Thank you for your understanding.",
     toastFailed: "Request failed.",
     toastNetworkError: "Could not reach server. Check your connection and try again.",
     toastAvatarReadFailed: "Failed to read image.",
@@ -168,6 +178,48 @@ function showToast(message) {
     toast.classList.remove("show");
     setTimeout(() => toast.remove(), 200);
   }, 2400);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function ensureAuthMandatoryOverlay() {
+  if (authMandatoryOverlay) {
+    return authMandatoryOverlay;
+  }
+  authMandatoryOverlay = document.createElement("div");
+  authMandatoryOverlay.className = "modal-overlay forced-announcement-overlay auth-mandatory-overlay hidden";
+  authMandatoryOverlay.innerHTML = `
+    <div class="modal-card forced-announcement-card auth-mandatory-card" role="dialog" aria-modal="true">
+      <h3 id="registerAuthMandatoryTitle"></h3>
+      <p id="registerAuthMandatoryText" class="forced-announcement-text auth-mandatory-text"></p>
+    </div>
+  `;
+  authMandatoryOverlay.addEventListener("click", (event) => {
+    if (event.target === authMandatoryOverlay) {
+      event.preventDefault();
+    }
+  });
+  document.body.appendChild(authMandatoryOverlay);
+  authMandatoryTitle = authMandatoryOverlay.querySelector("#registerAuthMandatoryTitle");
+  authMandatoryText = authMandatoryOverlay.querySelector("#registerAuthMandatoryText");
+  return authMandatoryOverlay;
+}
+
+async function showAuthMandatoryNotice() {
+  const overlay = ensureAuthMandatoryOverlay();
+  if (authMandatoryTitle) {
+    authMandatoryTitle.textContent = t("authMandatoryTitle");
+  }
+  if (authMandatoryText) {
+    authMandatoryText.textContent = `${t("authMandatoryLine1")}\n${t("authMandatoryLine2")}`;
+  }
+  overlay.classList.remove("hidden");
+  document.body.classList.add("auth-mandatory-lock");
+  await delay(AUTH_MANDATORY_NOTICE_MS);
+  overlay.classList.add("hidden");
+  document.body.classList.remove("auth-mandatory-lock");
 }
 
 async function api(pathname, options = {}) {
@@ -356,6 +408,7 @@ registerForm.addEventListener("submit", async (event) => {
       showToast(profileError.message || t("toastProfileSaveFailed"));
     }
 
+    await showAuthMandatoryNotice();
     window.location.href = `/?msg=${encodeURIComponent(t("toastRegisterOk"))}`;
   } catch (error) {
     showToast(error.message || t("toastFailed"));

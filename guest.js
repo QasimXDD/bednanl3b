@@ -8,6 +8,10 @@ const guestSubmitBtn = document.getElementById("guestSubmitBtn");
 const backToLoginBtn = document.getElementById("backToLoginBtn");
 const langSelect = document.getElementById("langSelect");
 const toastContainer = document.getElementById("guestToastContainer");
+const AUTH_MANDATORY_NOTICE_MS = 5000;
+let authMandatoryOverlay = null;
+let authMandatoryTitle = null;
+let authMandatoryText = null;
 
 const I18N = {
   ar: {
@@ -20,6 +24,9 @@ const I18N = {
     backToLoginBtn: "العودة لتسجيل الدخول",
     toastNameInvalid: "الاسم يجب أن يكون بين 2 و30 حرفًا.",
     toastGuestEnter: "تم الدخول كضيف.",
+    authMandatoryTitle: "تنبيه",
+    authMandatoryLine1: "مرحبًا بك في سوا واتش، الموقع نسخة تجريبية ومن المحتمل مواجهة مشاكل.",
+    authMandatoryLine2: "شكرًا على تفهمكم.",
     toastFailed: "فشل الطلب.",
     toastNetworkError: "تعذر الاتصال بالخادم. تأكد من الإنترنت وحاول مرة أخرى."
   },
@@ -33,6 +40,9 @@ const I18N = {
     backToLoginBtn: "Back to Login",
     toastNameInvalid: "Name must be 2-30 characters.",
     toastGuestEnter: "Entered as guest.",
+    authMandatoryTitle: "Notice",
+    authMandatoryLine1: "Welcome to SawaWatch. This website is an experimental version and you may encounter issues.",
+    authMandatoryLine2: "Thank you for your understanding.",
     toastFailed: "Request failed.",
     toastNetworkError: "Could not reach server. Check your connection and try again."
   }
@@ -122,6 +132,48 @@ function showToast(message) {
   }, 2400);
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function ensureAuthMandatoryOverlay() {
+  if (authMandatoryOverlay) {
+    return authMandatoryOverlay;
+  }
+  authMandatoryOverlay = document.createElement("div");
+  authMandatoryOverlay.className = "modal-overlay forced-announcement-overlay auth-mandatory-overlay hidden";
+  authMandatoryOverlay.innerHTML = `
+    <div class="modal-card forced-announcement-card auth-mandatory-card" role="dialog" aria-modal="true">
+      <h3 id="guestAuthMandatoryTitle"></h3>
+      <p id="guestAuthMandatoryText" class="forced-announcement-text auth-mandatory-text"></p>
+    </div>
+  `;
+  authMandatoryOverlay.addEventListener("click", (event) => {
+    if (event.target === authMandatoryOverlay) {
+      event.preventDefault();
+    }
+  });
+  document.body.appendChild(authMandatoryOverlay);
+  authMandatoryTitle = authMandatoryOverlay.querySelector("#guestAuthMandatoryTitle");
+  authMandatoryText = authMandatoryOverlay.querySelector("#guestAuthMandatoryText");
+  return authMandatoryOverlay;
+}
+
+async function showAuthMandatoryNotice() {
+  const overlay = ensureAuthMandatoryOverlay();
+  if (authMandatoryTitle) {
+    authMandatoryTitle.textContent = t("authMandatoryTitle");
+  }
+  if (authMandatoryText) {
+    authMandatoryText.textContent = `${t("authMandatoryLine1")}\n${t("authMandatoryLine2")}`;
+  }
+  overlay.classList.remove("hidden");
+  document.body.classList.add("auth-mandatory-lock");
+  await delay(AUTH_MANDATORY_NOTICE_MS);
+  overlay.classList.add("hidden");
+  document.body.classList.remove("auth-mandatory-lock");
+}
+
 async function api(pathname, options = {}) {
   let response;
   try {
@@ -175,6 +227,7 @@ guestForm.addEventListener("submit", async (event) => {
     });
     localStorage.setItem(TOKEN_KEY, result.token);
     localStorage.setItem(USER_KEY, result.username);
+    await showAuthMandatoryNotice();
     window.location.href = `/?msg=${encodeURIComponent(t("toastGuestEnter"))}`;
   } catch (error) {
     showToast(error.message || t("toastFailed"));

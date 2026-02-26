@@ -108,6 +108,10 @@ let globalAnnouncementCountdown = 0;
 let globalAnnouncementCountdownTimer = null;
 let activeAnnouncementId = "";
 let queuedAnnouncement = null;
+let authMandatoryOverlay = null;
+let authMandatoryTitle = null;
+let authMandatoryText = null;
+let authMandatoryNoticeInFlight = null;
 let roomActionOverlay = null;
 let roomActionTitle = null;
 let roomActionText = null;
@@ -117,6 +121,7 @@ let roomActionStartedAt = 0;
 let roomActionMode = "";
 let roomActionBusy = false;
 const ROOM_ACTION_MIN_MS = 2600;
+const AUTH_MANDATORY_NOTICE_MS = 5000;
 let pendingJoinOverlay = null;
 let pendingJoinTitle = null;
 let pendingJoinText = null;
@@ -249,6 +254,9 @@ const I18N = {
     toastRegisterOk: "تم إنشاء الحساب بنجاح.",
     toastLoginOk: "تم تسجيل الدخول بنجاح.",
     toastGuestEnter: "تم الدخول كضيف.",
+    authMandatoryTitle: "تنبيه",
+    authMandatoryLine1: "مرحبًا بك في سوا واتش، الموقع نسخة تجريبية ومن المحتمل مواجهة مشاكل.",
+    authMandatoryLine2: "شكرًا على تفهمكم.",
     toastLogoutOk: "تم تسجيل الخروج.",
     toastInvalidCode: "أدخل رمز غرفة صحيح.",
     toastJoinRequestSent: "تم إرسال طلب الانضمام.",
@@ -401,6 +409,9 @@ const I18N = {
     toastRegisterOk: "Account created successfully.",
     toastLoginOk: "Logged in successfully.",
     toastGuestEnter: "Entered as guest.",
+    authMandatoryTitle: "Notice",
+    authMandatoryLine1: "Welcome to SawaWatch. This website is an experimental version and you may encounter issues.",
+    authMandatoryLine2: "Thank you for your understanding.",
     toastLogoutOk: "Logged out successfully.",
     toastInvalidCode: "Enter a valid room code.",
     toastJoinRequestSent: "Join request sent.",
@@ -780,6 +791,7 @@ async function createAccountFromModal() {
   } catch (_) {
     isSupervisor = false;
   }
+  await showAuthMandatoryNotice();
   closeRegisterModal();
   showToast(t("toastRegisterOk"), "success");
   showLobby();
@@ -1044,6 +1056,7 @@ function clearSession() {
   closeRegisterModal();
   hidePendingJoinOverlay();
   hideGlobalAnnouncement();
+  hideAuthMandatoryNotice();
   closeRoomActionOverlay();
   queuedAnnouncement = null;
 }
@@ -1111,6 +1124,63 @@ function hideGlobalAnnouncement() {
   }
   document.body.classList.remove("announcement-lock");
   activeAnnouncementId = "";
+}
+
+function ensureAuthMandatoryOverlay() {
+  if (authMandatoryOverlay) {
+    return authMandatoryOverlay;
+  }
+  authMandatoryOverlay = document.createElement("div");
+  authMandatoryOverlay.className = "modal-overlay forced-announcement-overlay auth-mandatory-overlay hidden";
+  authMandatoryOverlay.innerHTML = `
+    <div class="modal-card forced-announcement-card auth-mandatory-card" role="dialog" aria-modal="true">
+      <h3 id="authMandatoryTitle"></h3>
+      <p id="authMandatoryText" class="forced-announcement-text auth-mandatory-text"></p>
+    </div>
+  `;
+  authMandatoryOverlay.addEventListener("click", (event) => {
+    if (event.target === authMandatoryOverlay) {
+      event.preventDefault();
+    }
+  });
+  document.body.appendChild(authMandatoryOverlay);
+  authMandatoryTitle = authMandatoryOverlay.querySelector("#authMandatoryTitle");
+  authMandatoryText = authMandatoryOverlay.querySelector("#authMandatoryText");
+  return authMandatoryOverlay;
+}
+
+function hideAuthMandatoryNotice() {
+  if (authMandatoryOverlay) {
+    authMandatoryOverlay.classList.add("hidden");
+  }
+  document.body.classList.remove("auth-mandatory-lock");
+}
+
+async function showAuthMandatoryNotice() {
+  if (authMandatoryNoticeInFlight) {
+    return authMandatoryNoticeInFlight;
+  }
+  authMandatoryNoticeInFlight = (async () => {
+    const overlay = ensureAuthMandatoryOverlay();
+    if (authMandatoryTitle) {
+      authMandatoryTitle.textContent = t("authMandatoryTitle");
+    }
+    if (authMandatoryText) {
+      authMandatoryText.textContent = `${t("authMandatoryLine1")}\n${t("authMandatoryLine2")}`;
+    }
+    overlay.classList.remove("hidden");
+    document.body.classList.add("auth-mandatory-lock");
+    sfx("notify");
+    await delay(AUTH_MANDATORY_NOTICE_MS);
+    hideAuthMandatoryNotice();
+  })()
+    .catch(() => {
+      hideAuthMandatoryNotice();
+    })
+    .finally(() => {
+      authMandatoryNoticeInFlight = null;
+    });
+  return authMandatoryNoticeInFlight;
 }
 
 function processGlobalAnnouncement(payload) {
@@ -2463,6 +2533,7 @@ authForm.addEventListener("submit", async (event) => {
     } catch (_) {
       isSupervisor = false;
     }
+    await showAuthMandatoryNotice();
     showToast(t("toastLoginOk"), "success");
     showLobby();
   } catch (error) {
