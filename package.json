@@ -9,6 +9,8 @@
   },
   "dependencies": {
     "@distube/ytdl-core": "^4.16.12",
-    "busboy": "^1.6.0"
+    "busboy": "^1.6.0",
+    "pg": "^8.19.0",
+    "ws": "^8.19.0"
   }
 }

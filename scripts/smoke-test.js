@@ -126,12 +126,12 @@ async function run() {
     const staticIndex = await fetch(`${baseUrl}/`);
     const indexHtml = await staticIndex.text();
     assert(staticIndex.status === 200, "Index page should return 200.");
-    assert(indexHtml.includes("id=\"soundToggle\""), "Index page should include sound toggle.");
+    assert(indexHtml.includes("id=\"langSelect\""), "Index page should include language selector.");
 
     const staticRoom = await fetch(`${baseUrl}/room.html`);
     const roomHtml = await staticRoom.text();
     assert(staticRoom.status === 200, "Room page should return 200.");
-    assert(roomHtml.includes("id=\"soundToggle\""), "Room page should include sound toggle.");
+    assert(roomHtml.includes("id=\"langSelect\""), "Room page should include language selector.");
 
     const staticGuest = await fetch(`${baseUrl}/guest.html`);
     const guestHtml = await staticGuest.text();

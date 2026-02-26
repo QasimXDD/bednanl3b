@@ -85,6 +85,56 @@ function t(key) {
   return I18N[lang][key] || I18N.ar[key] || key;
 }
 
+function normalizeCountryCode(value) {
+  const code = String(value || "").trim().toUpperCase();
+  return /^[A-Z]{2}$/.test(code) ? code : "";
+}
+
+function extractCountryCodeFromLocaleTag(rawTag) {
+  const tag = String(rawTag || "").trim();
+  if (!tag) {
+    return "";
+  }
+  const parts = tag.split(/[-_]/g);
+  if (parts.length < 2) {
+    return "";
+  }
+  for (let i = 1; i < parts.length; i += 1) {
+    const candidate = normalizeCountryCode(parts[i]);
+    if (candidate) {
+      return candidate;
+    }
+  }
+  return "";
+}
+
+function detectClientCountryCode() {
+  const localeCandidates = [];
+  if (typeof navigator !== "undefined") {
+    if (Array.isArray(navigator.languages)) {
+      localeCandidates.push(...navigator.languages);
+    }
+    if (typeof navigator.language === "string") {
+      localeCandidates.push(navigator.language);
+    }
+  }
+  try {
+    localeCandidates.push(Intl.DateTimeFormat().resolvedOptions().locale);
+  } catch (_error) {
+    // Ignore locale resolution failure and continue.
+  }
+
+  for (const locale of localeCandidates) {
+    const fromLocale = extractCountryCodeFromLocaleTag(locale);
+    if (fromLocale) {
+      return fromLocale;
+    }
+  }
+  return "";
+}
+
+const CLIENT_COUNTRY_CODE = detectClientCountryCode();
+
 function isValidRegisteredUsername(username) {
   const value = String(username || "").trim();
   return value.length >= 3 && value.length <= 30 && REGISTERED_USERNAME_REGEX.test(value);
@@ -128,6 +178,7 @@ async function api(pathname, options = {}) {
       headers: {
         "Content-Type": "application/json",
         "X-Lang": getLang(),
+        ...(CLIENT_COUNTRY_CODE ? { "X-Country": CLIENT_COUNTRY_CODE } : {}),
         ...(options.token ? { Authorization: `Bearer ${options.token}` } : {})
       },
       body: options.body ? JSON.stringify(options.body) : undefined

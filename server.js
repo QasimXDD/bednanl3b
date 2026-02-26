@@ -1,10 +1,12 @@
-const http = require("http");
+﻿const http = require("http");
 const fs = require("fs");
 const https = require("https");
 const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 const { spawn } = require("child_process");
+const { WebSocketServer } = require("ws");
+const { Client: PgClient } = require("pg");
 if (!process.env.YTDL_NO_DEBUG_FILE) {
   process.env.YTDL_NO_DEBUG_FILE = "1";
 }
@@ -25,6 +27,7 @@ const USERS_FILE = path.join(DATA_DIR, "users.json");
 const USERS_BACKUP_FILE = path.join(DATA_DIR, "users.backup.json");
 const MODERATION_FILE = path.join(DATA_DIR, "moderation.json");
 const YOUTUBE_CACHE_FILE = path.join(DATA_DIR, "youtube-cache.json");
+const AUDIT_LOG_FILE = path.join(DATA_DIR, "audit-log.jsonl");
 const SUPERVISOR_USERNAME = "qasim";
 const GUEST_USERNAME_PREFIX = "guest_";
 const SITE_ANNOUNCEMENT_LIVE_MS = 15000;
@@ -37,6 +40,7 @@ const ROOM_NAME_MAX_LENGTH = 40;
 const ROOM_EMPTY_DELETE_DELAY_MS = 10000;
 const USERNAME_ALLOWED_REGEX = /^[\p{L}\p{N}_-]+$/u;
 const REGISTERED_USERNAME_ALLOWED_REGEX = /^[a-z0-9]+$/;
+const COUNTRY_CODE_REGEX = /^[A-Z]{2}$/;
 const CLIENT_MESSAGE_ID_MAX_LENGTH = 80;
 const CLIENT_MESSAGE_ID_REGEX = /^[A-Za-z0-9_-]+$/;
 const MESSAGE_DEDUP_TTL_MS = 1000 * 60 * 5;
@@ -56,6 +60,12 @@ const YOUTUBE_CACHE_MAX_ITEMS = 180;
 const YOUTUBE_CACHE_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 30;
 const YOUTUBE_PROXY_TTL_MS = 1000 * 60 * 60 * 6;
 const YT_DLP_BINARY = String(process.env.YT_DLP_BINARY || "yt-dlp").trim() || "yt-dlp";
+const DATABASE_URL = String(process.env.DATABASE_URL || "").trim();
+const PG_RUNTIME_SNAPSHOT_DEBOUNCE_MS = 1200;
+const PG_RUNTIME_PERSIST_MAX_MESSAGES_PER_ROOM = 500;
+const WEBSOCKET_PATH = "/ws";
+const WS_PING_INTERVAL_MS = 30000;
+const WS_RETAINED_EVENT_WINDOW_MS = 15000;
 const GITHUB_USERS_SYNC_TOKEN = String(process.env.GITHUB_USERS_SYNC_TOKEN || "").trim();
 const GITHUB_USERS_SYNC_REPO = String(process.env.GITHUB_USERS_SYNC_REPO || "").trim();
 const GITHUB_USERS_SYNC_BRANCH = String(process.env.GITHUB_USERS_SYNC_BRANCH || "main").trim() || "main";
@@ -69,6 +79,7 @@ const ROOM_VIDEO_ALLOWED_MIME_TYPES = new Set([
   "video/webm",
   "video/ogg"
 ]);
+const NON_ISO_COUNTRY_CODES = new Set(["XX", "ZZ", "A1", "A2", "O1", "T1", "EU", "AP"]);
 const BLOCKED_STATIC_FILES = new Set([
   "server.js",
   "package.json",
@@ -79,6 +90,20 @@ const BLOCKED_STATIC_FILES = new Set([
   "agents.md"
 ]);
 const BLOCKED_STATIC_DIRS = new Set(["data", ".git", "node_modules"]);
+const RATE_LIMIT_MESSAGE = "Too many requests. Please wait and try again.";
+const RATE_LIMITS = Object.freeze({
+  REGISTER: { key: "register", max: 12, windowMs: 10 * 60 * 1000 },
+  LOGIN: { key: "login", max: 30, windowMs: 10 * 60 * 1000 },
+  GUEST_LOGIN: { key: "guest-login", max: 25, windowMs: 10 * 60 * 1000 },
+  BAN_APPEAL: { key: "ban-appeal", max: 8, windowMs: 10 * 60 * 1000 },
+  ROOMS_CREATE: { key: "rooms-create", max: 20, windowMs: 10 * 60 * 1000 },
+  ROOMS_JOIN: { key: "rooms-join", max: 60, windowMs: 10 * 60 * 1000 },
+  ROOMS_REQUEST_JOIN: { key: "rooms-request-join", max: 70, windowMs: 10 * 60 * 1000 },
+  ROOM_MESSAGE_POST: { key: "room-message-post", max: 180, windowMs: 10 * 60 * 1000 },
+  ROOM_VIDEO_UPLOAD: { key: "room-video-upload", max: 10, windowMs: 10 * 60 * 1000 },
+  ROOM_VIDEO_SOURCE: { key: "room-video-source", max: 30, windowMs: 10 * 60 * 1000 },
+  ADMIN_ACTION: { key: "admin-action", max: 120, windowMs: 10 * 60 * 1000 }
+});
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -107,14 +132,679 @@ const bannedUsers = new Map();
 const unbanRequests = new Map();
 const youtubeVideoCache = new Map();
 const youtubeProxyStreams = new Map();
+const roomSocketSubscribers = new Map();
+const wsClientMetadata = new WeakMap();
+const rateLimitBuckets = new Map();
 let siteAnnouncement = null;
 let activeRoomVideoUploadDir = ROOM_VIDEO_UPLOAD_DIR_DEFAULT;
 let ytDlpCommandOverride = null;
 let gitHubUsersSyncQueue = Promise.resolve();
 let gitHubUsersFileSha = "";
+let wsServer = null;
+let wsPingTimer = null;
+let pgClient = null;
+let pgRuntimeEnabled = false;
+let pgRuntimePersistTimer = null;
+let pgRuntimePersistInFlight = false;
+let pgRuntimePersistQueued = false;
 
 function parseJsonWithOptionalBom(raw) {
   return JSON.parse(String(raw || "").replace(/^\uFEFF/, ""));
+}
+
+function getClientIp(req) {
+  const forwarded = String(req?.headers?.["x-forwarded-for"] || "");
+  const forwardedPart = forwarded.split(",")[0]?.trim();
+  const socketIp = String(req?.socket?.remoteAddress || "").trim();
+  const raw = forwardedPart || socketIp || "unknown";
+  return raw.replace(/^::ffff:/i, "");
+}
+
+function getRateLimitBucketKey(req, key, scope = "") {
+  const ip = getClientIp(req);
+  return `${String(key || "global")}::${ip}::${String(scope || "")}`;
+}
+
+function enforceRateLimit(req, res, rule, scope = "") {
+  if (!rule || !Number.isFinite(rule.max) || !Number.isFinite(rule.windowMs)) {
+    return true;
+  }
+  const bucketKey = getRateLimitBucketKey(req, rule.key, scope);
+  const now = Date.now();
+  const windowMs = Math.max(1000, Number(rule.windowMs));
+  const maxHits = Math.max(1, Number(rule.max));
+  const bucket = rateLimitBuckets.get(bucketKey);
+  if (!bucket || now >= bucket.resetAt) {
+    rateLimitBuckets.set(bucketKey, {
+      count: 1,
+      resetAt: now + windowMs
+    });
+    return true;
+  }
+  if (bucket.count >= maxHits) {
+    const retryAfterMs = Math.max(0, bucket.resetAt - now);
+    const retryAfterSec = Math.max(1, Math.ceil(retryAfterMs / 1000));
+    sendJson(res, 429, {
+      code: "RATE_LIMITED",
+      error: i18n(req, RATE_LIMIT_MESSAGE, RATE_LIMIT_MESSAGE),
+      retryAfterSec
+    });
+    return false;
+  }
+  bucket.count += 1;
+  rateLimitBuckets.set(bucketKey, bucket);
+  return true;
+}
+
+function pruneRateLimitBuckets(now = Date.now()) {
+  rateLimitBuckets.forEach((bucket, key) => {
+    if (!bucket || Number(bucket.resetAt || 0) <= now) {
+      rateLimitBuckets.delete(key);
+    }
+  });
+}
+
+function sanitizeAuditValue(value, maxLength = 400) {
+  return String(value || "").trim().slice(0, maxLength);
+}
+
+function writeAuditEntryToFile(entry) {
+  try {
+    ensureDataDir();
+    fs.appendFileSync(AUDIT_LOG_FILE, `${JSON.stringify(entry)}\n`, "utf8");
+  } catch (error) {
+    console.error("Failed to write audit entry:", error.message);
+  }
+}
+
+function recordAudit(action, actor, target = "", details = {}) {
+  const entry = {
+    id: `${Date.now()}-${crypto.randomBytes(5).toString("hex")}`,
+    createdAt: Date.now(),
+    action: sanitizeAuditValue(action, 120) || "unknown_action",
+    actor: sanitizeAuditValue(actor, 120) || "system",
+    target: sanitizeAuditValue(target, 180),
+    details: details && typeof details === "object" ? details : {}
+  };
+  writeAuditEntryToFile(entry);
+  if (!pgRuntimeEnabled || !pgClient) {
+    return;
+  }
+  pgClient.query(
+    "INSERT INTO app_audit_log (created_at, action, actor, target, details) VALUES ($1, $2, $3, $4, $5::jsonb)",
+    [
+      Number(entry.createdAt),
+      entry.action,
+      entry.actor,
+      entry.target,
+      JSON.stringify(entry.details || {})
+    ]
+  ).catch((error) => {
+    console.error("Failed to persist audit entry:", error.message);
+  });
+}
+
+function normalizeRoomVideoCollections(room) {
+  if (!room) {
+    return;
+  }
+  if (!Array.isArray(room.videoQueue)) {
+    room.videoQueue = [];
+  }
+  if (!Array.isArray(room.videoHistory)) {
+    room.videoHistory = [];
+  }
+}
+
+function getRoomSubscriberSet(roomCode, create = false) {
+  const code = String(roomCode || "").trim().toUpperCase();
+  if (!code) {
+    return null;
+  }
+  const existing = roomSocketSubscribers.get(code);
+  if (existing) {
+    return existing;
+  }
+  if (!create) {
+    return null;
+  }
+  const set = new Set();
+  roomSocketSubscribers.set(code, set);
+  return set;
+}
+
+function sendWsJson(ws, payload) {
+  if (!ws || ws.readyState !== ws.OPEN) {
+    return;
+  }
+  try {
+    ws.send(JSON.stringify(payload));
+  } catch (_error) {
+    // Ignore transport errors; close handlers will clean up.
+  }
+}
+
+function removeWsSubscriber(ws) {
+  const meta = wsClientMetadata.get(ws);
+  if (!meta) {
+    return;
+  }
+  const subscribers = getRoomSubscriberSet(meta.roomCode, false);
+  if (subscribers) {
+    subscribers.delete(ws);
+    if (subscribers.size === 0) {
+      roomSocketSubscribers.delete(meta.roomCode);
+    }
+  }
+  wsClientMetadata.delete(ws);
+}
+
+function disconnectRoomMemberSockets(roomCode, username, reason = "membership_changed") {
+  const code = String(roomCode || "").trim().toUpperCase();
+  const user = normalizeUsername(username);
+  if (!code || !user) {
+    return;
+  }
+  const subscribers = getRoomSubscriberSet(code, false);
+  if (!subscribers || subscribers.size === 0) {
+    return;
+  }
+  Array.from(subscribers).forEach((ws) => {
+    const meta = wsClientMetadata.get(ws);
+    if (!meta || meta.username !== user) {
+      return;
+    }
+    sendWsJson(ws, {
+      type: "room_forbidden",
+      roomCode: code,
+      reason
+    });
+    try {
+      ws.close(4003, "room-membership-updated");
+    } catch (_error) {
+      // Ignore close errors.
+    }
+  });
+}
+
+function broadcastRoomEvent(roomCode, type, payload = {}) {
+  const code = String(roomCode || "").trim().toUpperCase();
+  if (!code || !type) {
+    return;
+  }
+  const subscribers = getRoomSubscriberSet(code, false);
+  if (!subscribers || subscribers.size === 0) {
+    return;
+  }
+  const packet = {
+    type: String(type),
+    roomCode: code,
+    timestamp: Date.now(),
+    ...payload
+  };
+  Array.from(subscribers).forEach((ws) => {
+    if (!ws || ws.readyState !== ws.OPEN) {
+      removeWsSubscriber(ws);
+      return;
+    }
+    sendWsJson(ws, packet);
+  });
+}
+
+function broadcastRoomTouch(room, reason, payload = {}) {
+  if (!room || !room.code) {
+    return;
+  }
+  broadcastRoomEvent(room.code, "room_changed", {
+    reason: String(reason || "updated"),
+    ...payload
+  });
+}
+
+function broadcastVideoSync(room) {
+  if (!room || !room.code) {
+    return;
+  }
+  broadcastRoomEvent(room.code, "video_sync", {
+    video: formatRoomVideo(room),
+    queue: formatRoomVideoQueue(room),
+    historyCount: Array.isArray(room.videoHistory) ? room.videoHistory.length : 0
+  });
+}
+
+async function ensurePgRuntimeSchema() {
+  if (!pgClient) {
+    return;
+  }
+  await pgClient.query(`
+    CREATE TABLE IF NOT EXISTS app_runtime_sessions (
+      token TEXT PRIMARY KEY,
+      username TEXT NOT NULL,
+      expires_at BIGINT NOT NULL,
+      is_guest BOOLEAN NOT NULL DEFAULT FALSE
+    );
+  `);
+  await pgClient.query(`
+    CREATE TABLE IF NOT EXISTS app_runtime_rooms (
+      code TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      host TEXT NOT NULL,
+      pending_host_restore TEXT,
+      created_at BIGINT NOT NULL,
+      next_message_id BIGINT NOT NULL,
+      video JSONB,
+      video_sync JSONB,
+      video_queue JSONB,
+      video_history JSONB
+    );
+  `);
+  await pgClient.query(`
+    CREATE TABLE IF NOT EXISTS app_runtime_room_members (
+      room_code TEXT NOT NULL,
+      username TEXT NOT NULL,
+      approved BOOLEAN NOT NULL DEFAULT TRUE,
+      PRIMARY KEY (room_code, username)
+    );
+  `);
+  await pgClient.query(`
+    CREATE TABLE IF NOT EXISTS app_runtime_room_join_requests (
+      room_code TEXT NOT NULL,
+      username TEXT NOT NULL,
+      PRIMARY KEY (room_code, username)
+    );
+  `);
+  await pgClient.query(`
+    CREATE TABLE IF NOT EXISTS app_runtime_room_messages (
+      room_code TEXT NOT NULL,
+      message_id BIGINT NOT NULL,
+      payload JSONB NOT NULL,
+      PRIMARY KEY (room_code, message_id)
+    );
+  `);
+  await pgClient.query(`
+    CREATE TABLE IF NOT EXISTS app_audit_log (
+      id BIGSERIAL PRIMARY KEY,
+      created_at BIGINT NOT NULL,
+      action TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      target TEXT NOT NULL,
+      details JSONB NOT NULL DEFAULT '{}'::jsonb
+    );
+  `);
+}
+
+async function initPgRuntime() {
+  if (!DATABASE_URL) {
+    return;
+  }
+  try {
+    pgClient = new PgClient({
+      connectionString: DATABASE_URL
+    });
+    await pgClient.connect();
+    await ensurePgRuntimeSchema();
+    pgRuntimeEnabled = true;
+    console.log("PostgreSQL runtime persistence is enabled.");
+  } catch (error) {
+    pgRuntimeEnabled = false;
+    pgClient = null;
+    console.error("Failed to initialize PostgreSQL runtime persistence:", error.message);
+  }
+}
+
+function buildRoomSnapshotForPg(room) {
+  normalizeRoomVideoCollections(room);
+  const approvedUsers = room.approvedUsers instanceof Set ? room.approvedUsers : room.members;
+  const members = Array.from(room.members).map((username) => ({
+    username,
+    approved: approvedUsers.has(username)
+  }));
+  const joinRequests = Array.from(room.joinRequests);
+  const sortedMessages = Array.isArray(room.messages)
+    ? room.messages
+      .slice(-PG_RUNTIME_PERSIST_MAX_MESSAGES_PER_ROOM)
+      .sort((a, b) => Number(a?.id || 0) - Number(b?.id || 0))
+    : [];
+  return {
+    room: {
+      code: room.code,
+      name: room.name,
+      host: room.host,
+      pendingHostRestore: room.pendingHostRestore || null,
+      createdAt: Number(room.createdAt) || Date.now(),
+      nextMessageId: Number(room.nextMessageId) || 1,
+      video: room.video || null,
+      videoSync: room.videoSync || null,
+      videoQueue: room.videoQueue || [],
+      videoHistory: room.videoHistory || []
+    },
+    members,
+    joinRequests,
+    messages: sortedMessages
+  };
+}
+
+async function loadRuntimeSnapshotFromPg() {
+  if (!pgRuntimeEnabled || !pgClient) {
+    return;
+  }
+  try {
+    const [sessionsRes, roomsRes, membersRes, requestsRes, messagesRes] = await Promise.all([
+      pgClient.query("SELECT token, username, expires_at, is_guest FROM app_runtime_sessions"),
+      pgClient.query("SELECT code, name, host, pending_host_restore, created_at, next_message_id, video, video_sync, video_queue, video_history FROM app_runtime_rooms"),
+      pgClient.query("SELECT room_code, username, approved FROM app_runtime_room_members"),
+      pgClient.query("SELECT room_code, username FROM app_runtime_room_join_requests"),
+      pgClient.query("SELECT room_code, message_id, payload FROM app_runtime_room_messages ORDER BY room_code ASC, message_id ASC")
+    ]);
+
+    sessions.clear();
+    rooms.clear();
+
+    sessionsRes.rows.forEach((row) => {
+      const token = String(row?.token || "").trim();
+      const username = normalizeUsername(row?.username);
+      if (!token || !username) {
+        return;
+      }
+      sessions.set(token, {
+        username,
+        expiresAt: Number(row?.expires_at) || Date.now() + SESSION_TTL_MS,
+        isGuest: Boolean(row?.is_guest)
+      });
+    });
+
+    const roomByCode = new Map();
+    roomsRes.rows.forEach((row) => {
+      const code = String(row?.code || "").trim().toUpperCase();
+      if (!code) {
+        return;
+      }
+      const room = {
+        code,
+        name: String(row?.name || "").trim() || "Room",
+        host: normalizeUsername(row?.host),
+        pendingHostRestore: normalizeUsername(row?.pending_host_restore),
+        members: new Set(),
+        approvedUsers: new Set(),
+        joinRequests: new Set(),
+        messageFloorByUser: new Map(),
+        clientMessageLog: new Map(),
+        messages: [],
+        nextMessageId: Math.max(1, Number(row?.next_message_id) || 1),
+        createdAt: Number(row?.created_at) || Date.now(),
+        video: row?.video || null,
+        videoSync: row?.video_sync || null,
+        videoQueue: Array.isArray(row?.video_queue) ? row.video_queue : [],
+        videoHistory: Array.isArray(row?.video_history) ? row.video_history : []
+      };
+      roomByCode.set(code, room);
+      rooms.set(code, room);
+    });
+
+    membersRes.rows.forEach((row) => {
+      const code = String(row?.room_code || "").trim().toUpperCase();
+      const username = normalizeUsername(row?.username);
+      const room = roomByCode.get(code);
+      if (!room || !username) {
+        return;
+      }
+      room.members.add(username);
+      if (Boolean(row?.approved)) {
+        room.approvedUsers.add(username);
+      }
+      room.messageFloorByUser.set(username, 0);
+    });
+
+    requestsRes.rows.forEach((row) => {
+      const code = String(row?.room_code || "").trim().toUpperCase();
+      const username = normalizeUsername(row?.username);
+      const room = roomByCode.get(code);
+      if (!room || !username) {
+        return;
+      }
+      room.joinRequests.add(username);
+    });
+
+    messagesRes.rows.forEach((row) => {
+      const code = String(row?.room_code || "").trim().toUpperCase();
+      const room = roomByCode.get(code);
+      if (!room) {
+        return;
+      }
+      const payload = row?.payload && typeof row.payload === "object"
+        ? row.payload
+        : null;
+      if (!payload) {
+        return;
+      }
+      const messageId = Number(payload.id || row?.message_id || 0);
+      if (!Number.isInteger(messageId) || messageId <= 0) {
+        return;
+      }
+      room.messages.push(payload);
+      if (messageId >= room.nextMessageId) {
+        room.nextMessageId = messageId + 1;
+      }
+    });
+
+    rooms.forEach((room) => {
+      ensureRoomRuntimeState(room);
+      if (!room.host || !room.members.has(room.host)) {
+        room.host = Array.from(room.members)[0] || "";
+      }
+      if (!room.host && room.members.size === 0) {
+        rooms.delete(room.code);
+      }
+    });
+    console.log(`Loaded runtime snapshot from PostgreSQL: ${rooms.size} rooms, ${sessions.size} sessions.`);
+  } catch (error) {
+    console.error("Failed to load runtime snapshot from PostgreSQL:", error.message);
+  }
+}
+
+async function persistRuntimeSnapshotToPg() {
+  if (!pgRuntimeEnabled || !pgClient) {
+    return;
+  }
+  if (pgRuntimePersistInFlight) {
+    pgRuntimePersistQueued = true;
+    return;
+  }
+  pgRuntimePersistInFlight = true;
+  try {
+    await pgClient.query("BEGIN");
+    await pgClient.query("TRUNCATE app_runtime_sessions, app_runtime_rooms, app_runtime_room_members, app_runtime_room_join_requests, app_runtime_room_messages");
+
+    for (const [token, sessionEntry] of sessions.entries()) {
+      const meta = getSessionMeta(sessionEntry);
+      if (!meta.username) {
+        continue;
+      }
+      await pgClient.query(
+        "INSERT INTO app_runtime_sessions (token, username, expires_at, is_guest) VALUES ($1, $2, $3, $4)",
+        [token, meta.username, Number(meta.expiresAt || 0), Boolean(meta.isGuest)]
+      );
+    }
+
+    for (const room of rooms.values()) {
+      ensureRoomRuntimeState(room);
+      const snapshot = buildRoomSnapshotForPg(room);
+      await pgClient.query(
+        "INSERT INTO app_runtime_rooms (code, name, host, pending_host_restore, created_at, next_message_id, video, video_sync, video_queue, video_history) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb)",
+        [
+          snapshot.room.code,
+          snapshot.room.name,
+          snapshot.room.host,
+          snapshot.room.pendingHostRestore || null,
+          snapshot.room.createdAt,
+          snapshot.room.nextMessageId,
+          JSON.stringify(snapshot.room.video || null),
+          JSON.stringify(snapshot.room.videoSync || null),
+          JSON.stringify(snapshot.room.videoQueue || []),
+          JSON.stringify(snapshot.room.videoHistory || [])
+        ]
+      );
+
+      for (const member of snapshot.members) {
+        await pgClient.query(
+          "INSERT INTO app_runtime_room_members (room_code, username, approved) VALUES ($1, $2, $3)",
+          [snapshot.room.code, member.username, Boolean(member.approved)]
+        );
+      }
+      for (const username of snapshot.joinRequests) {
+        await pgClient.query(
+          "INSERT INTO app_runtime_room_join_requests (room_code, username) VALUES ($1, $2)",
+          [snapshot.room.code, username]
+        );
+      }
+      for (const message of snapshot.messages) {
+        await pgClient.query(
+          "INSERT INTO app_runtime_room_messages (room_code, message_id, payload) VALUES ($1, $2, $3::jsonb)",
+          [snapshot.room.code, Number(message.id || 0), JSON.stringify(message)]
+        );
+      }
+    }
+    await pgClient.query("COMMIT");
+  } catch (error) {
+    try {
+      await pgClient.query("ROLLBACK");
+    } catch (_rollbackError) {
+      // Ignore rollback errors.
+    }
+    console.error("Failed to persist runtime snapshot to PostgreSQL:", error.message);
+  } finally {
+    pgRuntimePersistInFlight = false;
+    if (pgRuntimePersistQueued) {
+      pgRuntimePersistQueued = false;
+      setTimeout(() => {
+        persistRuntimeSnapshotToPg().catch(() => undefined);
+      }, 250);
+    }
+  }
+}
+
+function scheduleRuntimeSnapshotPersistence() {
+  if (!pgRuntimeEnabled) {
+    return;
+  }
+  if (pgRuntimePersistTimer) {
+    return;
+  }
+  pgRuntimePersistTimer = setTimeout(() => {
+    pgRuntimePersistTimer = null;
+    persistRuntimeSnapshotToPg().catch(() => undefined);
+  }, PG_RUNTIME_SNAPSHOT_DEBOUNCE_MS);
+}
+
+function setupWebSocketServer(server) {
+  wsServer = new WebSocketServer({ noServer: true });
+  wsServer.on("connection", (ws, req) => {
+    const username = normalizeUsername(req.wsUsername);
+    const roomCode = String(req.wsRoomCode || "").trim().toUpperCase();
+    if (!username || !roomCode) {
+      try {
+        ws.close(1008, "invalid-connection");
+      } catch (_error) {
+        // Ignore close errors.
+      }
+      return;
+    }
+    const room = rooms.get(roomCode);
+    if (!room || !room.members.has(username)) {
+      try {
+        ws.close(1008, "forbidden");
+      } catch (_error) {
+        // Ignore close errors.
+      }
+      return;
+    }
+    wsClientMetadata.set(ws, {
+      username,
+      roomCode,
+      joinedAt: Date.now(),
+      lastSeenAt: Date.now()
+    });
+    const subscribers = getRoomSubscriberSet(roomCode, true);
+    subscribers.add(ws);
+    sendWsJson(ws, {
+      type: "connected",
+      roomCode,
+      timestamp: Date.now()
+    });
+
+    ws.on("message", (chunk) => {
+      const raw = String(chunk || "").slice(0, 512);
+      const meta = wsClientMetadata.get(ws);
+      if (meta) {
+        meta.lastSeenAt = Date.now();
+      }
+      if (!raw) {
+        return;
+      }
+      if (raw === "ping") {
+        sendWsJson(ws, { type: "pong", timestamp: Date.now() });
+        return;
+      }
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed?.type === "ping") {
+          sendWsJson(ws, { type: "pong", timestamp: Date.now() });
+        }
+      } catch (_error) {
+        // Ignore malformed client packets.
+      }
+    });
+    ws.on("close", () => {
+      removeWsSubscriber(ws);
+    });
+    ws.on("error", () => {
+      removeWsSubscriber(ws);
+    });
+  });
+
+  server.on("upgrade", (req, socket, head) => {
+    const parsed = new URL(req.url, "http://localhost");
+    if (parsed.pathname !== WEBSOCKET_PATH) {
+      socket.destroy();
+      return;
+    }
+    const token = String(parsed.searchParams.get("token") || "").trim();
+    const roomCode = String(parsed.searchParams.get("room") || "").trim().toUpperCase();
+    const username = getSessionUsername(token);
+    if (!username || !roomCode || !rooms.has(roomCode)) {
+      socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+    const room = rooms.get(roomCode);
+    if (!room.members.has(username)) {
+      socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+    req.wsUsername = username;
+    req.wsRoomCode = roomCode;
+    wsServer.handleUpgrade(req, socket, head, (ws) => {
+      wsServer.emit("connection", ws, req);
+    });
+  });
+
+  wsPingTimer = setInterval(() => {
+    roomSocketSubscribers.forEach((subscribers) => {
+      Array.from(subscribers).forEach((ws) => {
+        if (!ws || ws.readyState !== ws.OPEN) {
+          removeWsSubscriber(ws);
+          return;
+        }
+        try {
+          ws.ping();
+        } catch (_error) {
+          removeWsSubscriber(ws);
+        }
+      });
+    });
+    pruneRateLimitBuckets();
+  }, WS_PING_INTERVAL_MS);
 }
 
 function getGitHubUsersRepoParts() {
@@ -379,7 +1069,8 @@ function hydrateUsersFromList(list) {
       passwordSalt: typeof item.passwordSalt === "string" ? item.passwordSalt : "",
       createdAt: Number(item.createdAt) || Date.now(),
       displayName: normalizeDisplayName(item.displayName, username),
-      avatarDataUrl: typeof item.avatarDataUrl === "string" ? item.avatarDataUrl : ""
+      avatarDataUrl: typeof item.avatarDataUrl === "string" ? item.avatarDataUrl : "",
+      countryCode: normalizeCountryCode(item.countryCode)
     });
   });
 }
@@ -445,7 +1136,8 @@ function saveUsers() {
       passwordSalt: typeof info.passwordSalt === "string" ? info.passwordSalt : "",
       createdAt: info.createdAt,
       displayName: normalizeDisplayName(info.displayName, username),
-      avatarDataUrl: info.avatarDataUrl || ""
+      avatarDataUrl: info.avatarDataUrl || "",
+      countryCode: normalizeCountryCode(info.countryCode)
     }));
     const serialized = JSON.stringify(list, null, 2);
     writeTextFileAtomic(USERS_FILE, serialized);
@@ -785,7 +1477,7 @@ function getYouTubeProxyStream(streamId) {
 async function serveYouTubeProxyStream(req, res, streamId) {
   const item = getYouTubeProxyStream(streamId);
   if (!item) {
-    sendJson(res, 404, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½. أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Video stream link expired. Please set the video again.") });
+    sendJson(res, 404, { error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½. ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Video stream link expired. Please set the video again.") });
     return;
   }
 
@@ -797,7 +1489,7 @@ async function serveYouTubeProxyStream(req, res, streamId) {
     info = await getYouTubeInfoRobust(item.videoId);
   } catch (error) {
     sendJson(res, 502, {
-      error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Could not proxy YouTube video right now.")
+      error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Could not proxy YouTube video right now.")
     });
     return;
   }
@@ -812,7 +1504,7 @@ async function serveYouTubeProxyStream(req, res, streamId) {
   }
   if (!format) {
     sendJson(res, 415, {
-      error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Could not find a compatible playable format.")
+      error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Could not find a compatible playable format.")
     });
     return;
   }
@@ -911,6 +1603,55 @@ function looksLikeMojibake(text) {
   return Boolean(suspicious && suspicious.length >= 3 && suspicious.length / text.length >= 0.12);
 }
 
+const WINDOWS_1256_CHAR_TO_BYTE = (() => {
+  try {
+    const decoder = new TextDecoder("windows-1256");
+    const map = new Map();
+    for (let byte = 0; byte < 256; byte += 1) {
+      const char = decoder.decode(Uint8Array.from([byte]));
+      if (!map.has(char)) {
+        map.set(char, byte);
+      }
+    }
+    return map;
+  } catch (_error) {
+    return null;
+  }
+})();
+
+const UTF8_TEXT_DECODER = (() => {
+  try {
+    return new TextDecoder("utf-8");
+  } catch (_error) {
+    return null;
+  }
+})();
+
+function repairArabicMojibake(text) {
+  const value = String(text || "");
+  if (!looksLikeMojibake(value) || !WINDOWS_1256_CHAR_TO_BYTE || !UTF8_TEXT_DECODER) {
+    return value;
+  }
+  const bytes = [];
+  for (const ch of value) {
+    const byte = WINDOWS_1256_CHAR_TO_BYTE.get(ch);
+    if (byte === undefined) {
+      return value;
+    }
+    bytes.push(byte);
+  }
+  let repaired = value;
+  try {
+    repaired = UTF8_TEXT_DECODER.decode(Uint8Array.from(bytes));
+  } catch (_error) {
+    return value;
+  }
+  if (!repaired || looksLikeMojibake(repaired)) {
+    return value;
+  }
+  return repaired;
+}
+
 function normalizeDisplayName(value, fallbackUsername = "") {
   const fallback = String(fallbackUsername || "").trim().toLowerCase().slice(0, 30);
   const clean = String(value || "").trim().slice(0, 30);
@@ -920,86 +1661,205 @@ function normalizeDisplayName(value, fallbackUsername = "") {
   return clean;
 }
 
+function normalizeCountryCode(value) {
+  const clean = String(value || "").trim().toUpperCase();
+  if (!COUNTRY_CODE_REGEX.test(clean) || NON_ISO_COUNTRY_CODES.has(clean)) {
+    return "";
+  }
+  return clean;
+}
+
+function extractCountryCodeFromLocaleTag(rawTag) {
+  const tag = String(rawTag || "").trim();
+  if (!tag) {
+    return "";
+  }
+  const subTags = tag.split(/[-_]/g);
+  if (subTags.length < 2) {
+    return "";
+  }
+  for (let i = 1; i < subTags.length; i += 1) {
+    const piece = String(subTags[i] || "").trim().toUpperCase();
+    if (!/^[A-Z]{2}$/.test(piece)) {
+      continue;
+    }
+    const normalized = normalizeCountryCode(piece);
+    if (normalized) {
+      return normalized;
+    }
+  }
+  return "";
+}
+
+function getCountryCodeFromAcceptLanguage(req) {
+  const rawHeader = req?.headers?.["accept-language"];
+  const headerValue = Array.isArray(rawHeader) ? rawHeader[0] : rawHeader;
+  const tokens = String(headerValue || "")
+    .split(",")
+    .map((part) => String(part || "").split(";")[0].trim())
+    .filter(Boolean);
+
+  for (const token of tokens) {
+    const fromTag = extractCountryCodeFromLocaleTag(token);
+    if (fromTag) {
+      return fromTag;
+    }
+  }
+  return "";
+}
+
+function getClientCountryCode(req) {
+  const candidates = [
+    req?.headers?.["cf-ipcountry"],
+    req?.headers?.["x-vercel-ip-country"],
+    req?.headers?.["cloudfront-viewer-country"],
+    req?.headers?.["x-country-code"],
+    req?.headers?.["x-country"],
+    req?.headers?.["x-appengine-country"],
+    req?.headers?.["x-geo-country"]
+  ];
+  for (const raw of candidates) {
+    const first = Array.isArray(raw) ? raw[0] : raw;
+    const token = String(first || "")
+      .split(",")[0]
+      .split(";")[0]
+      .trim()
+      .toUpperCase();
+    const normalized = normalizeCountryCode(token);
+    if (normalized) {
+      return normalized;
+    }
+  }
+  const acceptLanguageCountry = getCountryCodeFromAcceptLanguage(req);
+  if (acceptLanguageCountry) {
+    return acceptLanguageCountry;
+  }
+  return "";
+}
+
+function updateUserCountryFromRequest(username, req, { persistRegistered = false } = {}) {
+  const normalizedUsername = normalizeUsername(username);
+  if (!normalizedUsername) {
+    return "";
+  }
+  const countryCode = getClientCountryCode(req);
+  if (!countryCode) {
+    return "";
+  }
+
+  if (users.has(normalizedUsername)) {
+    const user = users.get(normalizedUsername);
+    if (normalizeCountryCode(user?.countryCode) === countryCode) {
+      return countryCode;
+    }
+    user.countryCode = countryCode;
+    users.set(normalizedUsername, user);
+    if (persistRegistered && !saveUsers()) {
+      console.warn(`Failed to persist country code update for ${normalizedUsername}.`);
+    }
+    return countryCode;
+  }
+
+  if (guestUsers.has(normalizedUsername)) {
+    const guest = guestUsers.get(normalizedUsername);
+    if (normalizeCountryCode(guest?.countryCode) === countryCode) {
+      return countryCode;
+    }
+    guest.countryCode = countryCode;
+    guestUsers.set(normalizedUsername, guest);
+    return countryCode;
+  }
+
+  return countryCode;
+}
+
 const I18N_AR_BY_EN = Object.freeze({
-  "A supervisor cannot be kicked from this room.": "لا يمكن طرد المشرف من هذه الغرفة.",
-  "Account not found.": "الحساب غير موجود.",
-  "Announcement is too long (max 500 chars).": "الرسالة العامة طويلة جدًا (الحد الأقصى 500 حرف).",
-  "Announcement text is required.": "نص الرسالة العامة مطلوب.",
-  "Appeal reason must be 8-500 characters.": "سبب طلب رفع الحظر يجب أن يكون بين 8 و500 حرف.",
-  "Avatar is invalid or too large.": "الصورة الشخصية غير صالحة أو حجمها كبير جدًا.",
-  "Ban reason must be 3-300 characters.": "سبب الحظر يجب أن يكون بين 3 و300 حرف.",
-  "Could not download this YouTube video right now. Try another one.": "تعذر تنزيل فيديو يوتيوب الآن. جرّب فيديو آخر.",
-  "Could not find a compatible playable format.": "تعذر العثور على صيغة تشغيل متوافقة.",
-  "Could not proxy YouTube video right now.": "تعذر تشغيل فيديو يوتيوب عبر الخادم الآن.",
-  "Could not reach YouTube right now. Try again.": "تعذر الاتصال بيوتيوب الآن. حاول مرة أخرى.",
-  "Display name must be 2 to 30 characters.": "الاسم الظاهر يجب أن يكون من 2 إلى 30 حرفًا.",
-  "Endpoint not found.": "نقطة الوصول غير موجودة.",
-  "Enter a YouTube URL or search text.": "أدخل رابط يوتيوب أو نص بحث.",
-  "Internal server error.": "حدث خطأ داخلي في الخادم.",
-  "Invalid JSON body.": "بيانات JSON غير صالحة.",
-  "Invalid action.": "الإجراء غير صالح.",
-  "Invalid login credentials.": "بيانات تسجيل الدخول غير صحيحة.",
-  "Invalid message identifier.": "معرّف الرسالة غير صالح.",
-  "Invalid reaction payload.": "بيانات التفاعل غير صالحة.",
-  "Invalid reply identifier.": "معرّف الرد غير صالح.",
-  "Invalid user identifier.": "معرّف المستخدم غير صالح.",
-  "Invalid video stream link.": "رابط بث الفيديو غير صالح.",
-  "Invalid video sync action.": "إجراء مزامنة الفيديو غير صالح.",
-  "Invalid video upload payload.": "بيانات رفع الفيديو غير صالحة.",
-  "Join this room first.": "انضم إلى هذه الغرفة أولًا.",
-  "Leader cannot kick themselves.": "لا يمكن للقائد طرد نفسه.",
-  "Message is empty.": "الرسالة فارغة.",
-  "Message is too long.": "الرسالة طويلة جدًا.",
-  "Name must be 2-30 characters.": "الاسم يجب أن يكون بين 2 و30 حرفًا.",
-  "New Room": "غرفة جديدة",
-  "No eligible message was found for reaction.": "لم يتم العثور على رسالة مناسبة للتفاعل.",
-  "No join request found for this player.": "لا يوجد طلب انضمام لهذا اللاعب.",
-  "No matching YouTube video was found.": "لم يتم العثور على فيديو يوتيوب مطابق.",
-  "No room video is available.": "لا يوجد فيديو متاح في الغرفة.",
-  "No supported downloadable video format was found.": "لم يتم العثور على صيغة فيديو قابلة للتنزيل ومدعومة.",
-  "Only the room leader can kick players.": "فقط قائد الغرفة يمكنه طرد اللاعبين.",
-  "Only the room leader can manage requests.": "فقط قائد الغرفة يمكنه إدارة الطلبات.",
-  "Only the room leader can set video source.": "فقط قائد الغرفة يمكنه تحديد مصدر الفيديو.",
-  "Only the room leader can sync the video.": "فقط قائد الغرفة يمكنه مزامنة الفيديو.",
-  "Only the room leader can upload videos.": "فقط قائد الغرفة يمكنه رفع الفيديو.",
-  "Only the room leader can remove videos.": "فقط قائد الغرفة يمكنه حذف الفيديو.",
-  "Only the room leader can view requests.": "فقط قائد الغرفة يمكنه عرض الطلبات.",
-  "Only the room leader can transfer leadership.": "فقط قائد الغرفة يمكنه نقل القيادة.",
-  "Only a supervisor in this room can claim leadership.": "فقط مشرف موجود داخل الغرفة يمكنه امتلاك القيادة.",
-  "Payload is too large.": "حجم البيانات المرسلة كبير جدًا.",
-  "Player is not in this room.": "اللاعب ليس في هذه الغرفة.",
-  "Please choose a valid video file.": "يرجى اختيار ملف فيديو صالح.",
-  "Request not found.": "الطلب غير موجود.",
-  "Room endpoint not found.": "نقطة وصول الغرفة غير موجودة.",
-  "Room not found.": "الغرفة غير موجودة.",
-  "Server storage is unavailable right now.": "مساحة تخزين الخادم غير متاحة حاليًا.",
-  "Supervisor account cannot be banned.": "لا يمكن حظر حساب المشرف.",
-  "Supervisor account cannot be deleted.": "لا يمكن حذف حساب المشرف.",
-  "Target username is required.": "اسم المستخدم المستهدف مطلوب.",
-  "Leader transfer target must be another member.": "يجب اختيار عضو آخر داخل الغرفة لنقل القيادة.",
-  "This account is not banned.": "هذا الحساب غير محظور.",
-  "This action is supervisor-only.": "هذا الإجراء مخصص للمشرف فقط.",
-  "This video version is outdated. Refresh room data.": "إصدار الفيديو هذا قديم. حدّث بيانات الغرفة.",
-  "Unauthorized.": "غير مصرح.",
-  "Unsupported video type. Use MP4, WebM or OGG.": "نوع الفيديو غير مدعوم. استخدم MP4 أو WebM أو OGG.",
-  "User not found.": "المستخدم غير موجود.",
-  "Username must be 3-30 characters and use only English letters and numbers.": "اسم المستخدم يجب أن يكون من 3 إلى 30 حرفًا، ويحتوي فقط على أحرف إنجليزية وأرقام.",
-  "Username is already in use.": "اسم المستخدم مستخدم بالفعل.",
-  "Video file is too large (max 1GB).": "ملف الفيديو كبير جدًا (الحد الأقصى 1GB).",
-  "Video stream link expired. Please set the video again.": "انتهت صلاحية رابط بث الفيديو. يرجى تعيين الفيديو مرة أخرى.",
-  "You cannot join until the leader approves your request.": "لا يمكنك الانضمام حتى يوافق القائد على طلبك.",
-  "YouTube video is too large (max 1GB).": "فيديو يوتيوب كبير جدًا (الحد الأقصى 1GB).",
-  "Your join request is still pending.": "طلب انضمامك ما يزال قيد الانتظار."
+  "A supervisor cannot be kicked from this room.": "ظ„ط§ ظٹظ…ظƒظ† ط·ط±ط¯ ط§ظ„ظ…ط´ط±ظپ ظ…ظ† ظ‡ط°ظ‡ ط§ظ„ط؛ط±ظپط©.",
+  "Account not found.": "ط§ظ„ط­ط³ط§ط¨ ط؛ظٹط± ظ…ظˆط¬ظˆط¯.",
+  "Announcement is too long (max 500 chars).": "ط§ظ„ط±ط³ط§ظ„ط© ط§ظ„ط¹ط§ظ…ط© ط·ظˆظٹظ„ط© ط¬ط¯ظ‹ط§ (ط§ظ„ط­ط¯ ط§ظ„ط£ظ‚طµظ‰ 500 ط­ط±ظپ).",
+  "Announcement text is required.": "ظ†طµ ط§ظ„ط±ط³ط§ظ„ط© ط§ظ„ط¹ط§ظ…ط© ظ…ط·ظ„ظˆط¨.",
+  "Appeal reason must be 8-500 characters.": "ط³ط¨ط¨ ط·ظ„ط¨ ط±ظپط¹ ط§ظ„ط­ط¸ط± ظٹط¬ط¨ ط£ظ† ظٹظƒظˆظ† ط¨ظٹظ† 8 ظˆ500 ط­ط±ظپ.",
+  "Avatar is invalid or too large.": "ط§ظ„طµظˆط±ط© ط§ظ„ط´ط®طµظٹط© ط؛ظٹط± طµط§ظ„ط­ط© ط£ظˆ ط­ط¬ظ…ظ‡ط§ ظƒط¨ظٹط± ط¬ط¯ظ‹ط§.",
+  "Ban reason must be 3-300 characters.": "ط³ط¨ط¨ ط§ظ„ط­ط¸ط± ظٹط¬ط¨ ط£ظ† ظٹظƒظˆظ† ط¨ظٹظ† 3 ظˆ300 ط­ط±ظپ.",
+  "Could not download this YouTube video right now. Try another one.": "طھط¹ط°ط± طھظ†ط²ظٹظ„ ظپظٹط¯ظٹظˆ ظٹظˆطھظٹظˆط¨ ط§ظ„ط¢ظ†. ط¬ط±ظ‘ط¨ ظپظٹط¯ظٹظˆ ط¢ط®ط±.",
+  "Could not find a compatible playable format.": "طھط¹ط°ط± ط§ظ„ط¹ط«ظˆط± ط¹ظ„ظ‰ طµظٹط؛ط© طھط´ط؛ظٹظ„ ظ…طھظˆط§ظپظ‚ط©.",
+  "Could not proxy YouTube video right now.": "طھط¹ط°ط± طھط´ط؛ظٹظ„ ظپظٹط¯ظٹظˆ ظٹظˆطھظٹظˆط¨ ط¹ط¨ط± ط§ظ„ط®ط§ط¯ظ… ط§ظ„ط¢ظ†.",
+  "Could not reach YouTube right now. Try again.": "طھط¹ط°ط± ط§ظ„ط§طھطµط§ظ„ ط¨ظٹظˆطھظٹظˆط¨ ط§ظ„ط¢ظ†. ط­ط§ظˆظ„ ظ…ط±ط© ط£ط®ط±ظ‰.",
+  "Display name must be 2 to 30 characters.": "ط§ظ„ط§ط³ظ… ط§ظ„ط¸ط§ظ‡ط± ظٹط¬ط¨ ط£ظ† ظٹظƒظˆظ† ظ…ظ† 2 ط¥ظ„ظ‰ 30 ط­ط±ظپظ‹ط§.",
+  "Endpoint not found.": "ظ†ظ‚ط·ط© ط§ظ„ظˆطµظˆظ„ ط؛ظٹط± ظ…ظˆط¬ظˆط¯ط©.",
+  "Enter a YouTube URL or search text.": "ط£ط¯ط®ظ„ ط±ط§ط¨ط· ظٹظˆطھظٹظˆط¨ ط£ظˆ ظ†طµ ط¨ط­ط«.",
+  "Internal server error.": "ط­ط¯ط« ط®ط·ط£ ط¯ط§ط®ظ„ظٹ ظپظٹ ط§ظ„ط®ط§ط¯ظ….",
+  "Invalid JSON body.": "ط¨ظٹط§ظ†ط§طھ JSON ط؛ظٹط± طµط§ظ„ط­ط©.",
+  "Invalid action.": "ط§ظ„ط¥ط¬ط±ط§ط، ط؛ظٹط± طµط§ظ„ط­.",
+  "Invalid login credentials.": "ط¨ظٹط§ظ†ط§طھ طھط³ط¬ظٹظ„ ط§ظ„ط¯ط®ظˆظ„ ط؛ظٹط± طµط­ظٹط­ط©.",
+  "Invalid message identifier.": "ظ…ط¹ط±ظ‘ظپ ط§ظ„ط±ط³ط§ظ„ط© ط؛ظٹط± طµط§ظ„ط­.",
+  "Invalid reaction payload.": "ط¨ظٹط§ظ†ط§طھ ط§ظ„طھظپط§ط¹ظ„ ط؛ظٹط± طµط§ظ„ط­ط©.",
+  "Invalid reply identifier.": "ظ…ط¹ط±ظ‘ظپ ط§ظ„ط±ط¯ ط؛ظٹط± طµط§ظ„ط­.",
+  "Invalid user identifier.": "ظ…ط¹ط±ظ‘ظپ ط§ظ„ظ…ط³طھط®ط¯ظ… ط؛ظٹط± طµط§ظ„ط­.",
+  "Invalid video stream link.": "ط±ط§ط¨ط· ط¨ط« ط§ظ„ظپظٹط¯ظٹظˆ ط؛ظٹط± طµط§ظ„ط­.",
+  "Invalid video sync action.": "ط¥ط¬ط±ط§ط، ظ…ط²ط§ظ…ظ†ط© ط§ظ„ظپظٹط¯ظٹظˆ ط؛ظٹط± طµط§ظ„ط­.",
+  "Invalid video upload payload.": "ط¨ظٹط§ظ†ط§طھ ط±ظپط¹ ط§ظ„ظپظٹط¯ظٹظˆ ط؛ظٹط± طµط§ظ„ط­ط©.",
+  "Join this room first.": "ط§ظ†ط¶ظ… ط¥ظ„ظ‰ ظ‡ط°ظ‡ ط§ظ„ط؛ط±ظپط© ط£ظˆظ„ظ‹ط§.",
+  "Leader cannot kick themselves.": "ظ„ط§ ظٹظ…ظƒظ† ظ„ظ„ظ‚ط§ط¦ط¯ ط·ط±ط¯ ظ†ظپط³ظ‡.",
+  "Message is empty.": "ط§ظ„ط±ط³ط§ظ„ط© ظپط§ط±ط؛ط©.",
+  "Message is too long.": "ط§ظ„ط±ط³ط§ظ„ط© ط·ظˆظٹظ„ط© ط¬ط¯ظ‹ط§.",
+  "Name must be 2-30 characters.": "ط§ظ„ط§ط³ظ… ظٹط¬ط¨ ط£ظ† ظٹظƒظˆظ† ط¨ظٹظ† 2 ظˆ30 ط­ط±ظپظ‹ط§.",
+  "New Room": "ط؛ط±ظپط© ط¬ط¯ظٹط¯ط©",
+  "No eligible message was found for reaction.": "ظ„ظ… ظٹطھظ… ط§ظ„ط¹ط«ظˆط± ط¹ظ„ظ‰ ط±ط³ط§ظ„ط© ظ…ظ†ط§ط³ط¨ط© ظ„ظ„طھظپط§ط¹ظ„.",
+  "No join request found for this player.": "ظ„ط§ ظٹظˆط¬ط¯ ط·ظ„ط¨ ط§ظ†ط¶ظ…ط§ظ… ظ„ظ‡ط°ط§ ط§ظ„ظ„ط§ط¹ط¨.",
+  "No matching YouTube video was found.": "ظ„ظ… ظٹطھظ… ط§ظ„ط¹ط«ظˆط± ط¹ظ„ظ‰ ظپظٹط¯ظٹظˆ ظٹظˆطھظٹظˆط¨ ظ…ط·ط§ط¨ظ‚.",
+  "No room video is available.": "ظ„ط§ ظٹظˆط¬ط¯ ظپظٹط¯ظٹظˆ ظ…طھط§ط­ ظپظٹ ط§ظ„ط؛ط±ظپط©.",
+  "No supported downloadable video format was found.": "ظ„ظ… ظٹطھظ… ط§ظ„ط¹ط«ظˆط± ط¹ظ„ظ‰ طµظٹط؛ط© ظپظٹط¯ظٹظˆ ظ‚ط§ط¨ظ„ط© ظ„ظ„طھظ†ط²ظٹظ„ ظˆظ…ط¯ط¹ظˆظ…ط©.",
+  "Only the room leader can kick players.": "ظپظ‚ط· ظ‚ط§ط¦ط¯ ط§ظ„ط؛ط±ظپط© ظٹظ…ظƒظ†ظ‡ ط·ط±ط¯ ط§ظ„ظ„ط§ط¹ط¨ظٹظ†.",
+  "Only the room leader can manage requests.": "ظپظ‚ط· ظ‚ط§ط¦ط¯ ط§ظ„ط؛ط±ظپط© ظٹظ…ظƒظ†ظ‡ ط¥ط¯ط§ط±ط© ط§ظ„ط·ظ„ط¨ط§طھ.",
+  "Only the room leader can set video source.": "ظپظ‚ط· ظ‚ط§ط¦ط¯ ط§ظ„ط؛ط±ظپط© ظٹظ…ظƒظ†ظ‡ طھط­ط¯ظٹط¯ ظ…طµط¯ط± ط§ظ„ظپظٹط¯ظٹظˆ.",
+  "Only the room leader can sync the video.": "ظپظ‚ط· ظ‚ط§ط¦ط¯ ط§ظ„ط؛ط±ظپط© ظٹظ…ظƒظ†ظ‡ ظ…ط²ط§ظ…ظ†ط© ط§ظ„ظپظٹط¯ظٹظˆ.",
+  "Only the room leader can upload videos.": "ظپظ‚ط· ظ‚ط§ط¦ط¯ ط§ظ„ط؛ط±ظپط© ظٹظ…ظƒظ†ظ‡ ط±ظپط¹ ط§ظ„ظپظٹط¯ظٹظˆ.",
+  "Only the room leader can remove videos.": "ظپظ‚ط· ظ‚ط§ط¦ط¯ ط§ظ„ط؛ط±ظپط© ظٹظ…ظƒظ†ظ‡ ط­ط°ظپ ط§ظ„ظپظٹط¯ظٹظˆ.",
+  "Only the room leader can view requests.": "ظپظ‚ط· ظ‚ط§ط¦ط¯ ط§ظ„ط؛ط±ظپط© ظٹظ…ظƒظ†ظ‡ ط¹ط±ط¶ ط§ظ„ط·ظ„ط¨ط§طھ.",
+  "Only the room leader can transfer leadership.": "ظپظ‚ط· ظ‚ط§ط¦ط¯ ط§ظ„ط؛ط±ظپط© ظٹظ…ظƒظ†ظ‡ ظ†ظ‚ظ„ ط§ظ„ظ‚ظٹط§ط¯ط©.",
+  "Only a supervisor in this room can claim leadership.": "ظپظ‚ط· ظ…ط´ط±ظپ ظ…ظˆط¬ظˆط¯ ط¯ط§ط®ظ„ ط§ظ„ط؛ط±ظپط© ظٹظ…ظƒظ†ظ‡ ط§ظ…طھظ„ط§ظƒ ط§ظ„ظ‚ظٹط§ط¯ط©.",
+  "Payload is too large.": "ط­ط¬ظ… ط§ظ„ط¨ظٹط§ظ†ط§طھ ط§ظ„ظ…ط±ط³ظ„ط© ظƒط¨ظٹط± ط¬ط¯ظ‹ط§.",
+  "Player is not in this room.": "ط§ظ„ظ„ط§ط¹ط¨ ظ„ظٹط³ ظپظٹ ظ‡ط°ظ‡ ط§ظ„ط؛ط±ظپط©.",
+  "Please choose a valid video file.": "ظٹط±ط¬ظ‰ ط§ط®طھظٹط§ط± ظ…ظ„ظپ ظپظٹط¯ظٹظˆ طµط§ظ„ط­.",
+  "Request not found.": "ط§ظ„ط·ظ„ط¨ ط؛ظٹط± ظ…ظˆط¬ظˆط¯.",
+  "Room endpoint not found.": "ظ†ظ‚ط·ط© ظˆطµظˆظ„ ط§ظ„ط؛ط±ظپط© ط؛ظٹط± ظ…ظˆط¬ظˆط¯ط©.",
+  "Room not found.": "ط§ظ„ط؛ط±ظپط© ط؛ظٹط± ظ…ظˆط¬ظˆط¯ط©.",
+  "Server storage is unavailable right now.": "ظ…ط³ط§ط­ط© طھط®ط²ظٹظ† ط§ظ„ط®ط§ط¯ظ… ط؛ظٹط± ظ…طھط§ط­ط© ط­ط§ظ„ظٹظ‹ط§.",
+  "Supervisor account cannot be banned.": "ظ„ط§ ظٹظ…ظƒظ† ط­ط¸ط± ط­ط³ط§ط¨ ط§ظ„ظ…ط´ط±ظپ.",
+  "Supervisor account cannot be deleted.": "ظ„ط§ ظٹظ…ظƒظ† ط­ط°ظپ ط­ط³ط§ط¨ ط§ظ„ظ…ط´ط±ظپ.",
+  "Target username is required.": "ط§ط³ظ… ط§ظ„ظ…ط³طھط®ط¯ظ… ط§ظ„ظ…ط³طھظ‡ط¯ظپ ظ…ط·ظ„ظˆط¨.",
+  "Leader transfer target must be another member.": "ظٹط¬ط¨ ط§ط®طھظٹط§ط± ط¹ط¶ظˆ ط¢ط®ط± ط¯ط§ط®ظ„ ط§ظ„ط؛ط±ظپط© ظ„ظ†ظ‚ظ„ ط§ظ„ظ‚ظٹط§ط¯ط©.",
+  "This account is not banned.": "ظ‡ط°ط§ ط§ظ„ط­ط³ط§ط¨ ط؛ظٹط± ظ…ط­ط¸ظˆط±.",
+  "This action is supervisor-only.": "ظ‡ط°ط§ ط§ظ„ط¥ط¬ط±ط§ط، ظ…ط®طµطµ ظ„ظ„ظ…ط´ط±ظپ ظپظ‚ط·.",
+  "This video version is outdated. Refresh room data.": "ط¥طµط¯ط§ط± ط§ظ„ظپظٹط¯ظٹظˆ ظ‡ط°ط§ ظ‚ط¯ظٹظ…. ط­ط¯ظ‘ط« ط¨ظٹط§ظ†ط§طھ ط§ظ„ط؛ط±ظپط©.",
+  "Unauthorized.": "ط؛ظٹط± ظ…طµط±ط­.",
+  "Unsupported video type. Use MP4, WebM or OGG.": "ظ†ظˆط¹ ط§ظ„ظپظٹط¯ظٹظˆ ط؛ظٹط± ظ…ط¯ط¹ظˆظ…. ط§ط³طھط®ط¯ظ… MP4 ط£ظˆ WebM ط£ظˆ OGG.",
+  "User not found.": "ط§ظ„ظ…ط³طھط®ط¯ظ… ط؛ظٹط± ظ…ظˆط¬ظˆط¯.",
+  "Username must be 3-30 characters and use only English letters and numbers.": "ط§ط³ظ… ط§ظ„ظ…ط³طھط®ط¯ظ… ظٹط¬ط¨ ط£ظ† ظٹظƒظˆظ† ظ…ظ† 3 ط¥ظ„ظ‰ 30 ط­ط±ظپظ‹ط§طŒ ظˆظٹط­طھظˆظٹ ظپظ‚ط· ط¹ظ„ظ‰ ط£ط­ط±ظپ ط¥ظ†ط¬ظ„ظٹط²ظٹط© ظˆط£ط±ظ‚ط§ظ….",
+  "Username is already in use.": "ط§ط³ظ… ط§ظ„ظ…ط³طھط®ط¯ظ… ظ…ط³طھط®ط¯ظ… ط¨ط§ظ„ظپط¹ظ„.",
+  "Video file is too large (max 1GB).": "ظ…ظ„ظپ ط§ظ„ظپظٹط¯ظٹظˆ ظƒط¨ظٹط± ط¬ط¯ظ‹ط§ (ط§ظ„ط­ط¯ ط§ظ„ط£ظ‚طµظ‰ 1GB).",
+  "Video stream link expired. Please set the video again.": "ط§ظ†طھظ‡طھ طµظ„ط§ط­ظٹط© ط±ط§ط¨ط· ط¨ط« ط§ظ„ظپظٹط¯ظٹظˆ. ظٹط±ط¬ظ‰ طھط¹ظٹظٹظ† ط§ظ„ظپظٹط¯ظٹظˆ ظ…ط±ط© ط£ط®ط±ظ‰.",
+  "You cannot join until the leader approves your request.": "ظ„ط§ ظٹظ…ظƒظ†ظƒ ط§ظ„ط§ظ†ط¶ظ…ط§ظ… ط­طھظ‰ ظٹظˆط§ظپظ‚ ط§ظ„ظ‚ط§ط¦ط¯ ط¹ظ„ظ‰ ط·ظ„ط¨ظƒ.",
+  "YouTube video is too large (max 1GB).": "ظپظٹط¯ظٹظˆ ظٹظˆطھظٹظˆط¨ ظƒط¨ظٹط± ط¬ط¯ظ‹ط§ (ط§ظ„ط­ط¯ ط§ظ„ط£ظ‚طµظ‰ 1GB).",
+  "Your join request is still pending.": "ط·ظ„ط¨ ط§ظ†ط¶ظ…ط§ظ…ظƒ ظ…ط§ ظٹط²ط§ظ„ ظ‚ظٹط¯ ط§ظ„ط§ظ†طھط¸ط§ط±."
 });
+
+const I18N_AR_BY_EN_REPAIRED = Object.freeze(
+  Object.fromEntries(
+    Object.entries(I18N_AR_BY_EN).map(([en, arText]) => [en, repairArabicMojibake(arText)])
+  )
+);
 
 function i18n(req, ar, en) {
   if (getLang(req) === "en") {
     return en;
   }
-  if (Object.prototype.hasOwnProperty.call(I18N_AR_BY_EN, en)) {
-    return I18N_AR_BY_EN[en];
+  if (Object.prototype.hasOwnProperty.call(I18N_AR_BY_EN_REPAIRED, en)) {
+    return I18N_AR_BY_EN_REPAIRED[en];
   }
-  return looksLikeMojibake(ar) ? en : ar;
+  const repairedAr = repairArabicMojibake(ar);
+  return looksLikeMojibake(repairedAr) ? en : repairedAr;
 }
 
 function securityHeaders(extra = {}) {
@@ -1135,6 +1995,7 @@ function cleanupGuestUser(username) {
   removeUserFromAllRooms(normalized);
   guestUsers.delete(normalized);
   userLastSeen.delete(normalized);
+  scheduleRuntimeSnapshotPersistence();
 }
 
 function isValidUsername(username) {
@@ -1242,7 +2103,7 @@ function sendBannedResponse(req, res, username) {
     code: "ACCOUNT_BANNED",
     error: i18n(
       req,
-      "أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½. أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.",
+      "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½. ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.",
       "This account is banned from the site. You can send an unban request to the supervisor."
     ),
     ban,
@@ -1257,7 +2118,7 @@ function assertSupervisor(req, res, username) {
   }
   sendJson(res, 403, {
     code: "SUPERVISOR_ONLY",
-    error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "This action is supervisor-only.")
+    error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "This action is supervisor-only.")
   });
   return false;
 }
@@ -1297,6 +2158,7 @@ function publicProfile(username) {
     username,
     displayName: normalizeDisplayName(info.displayName, username),
     avatarDataUrl: info.avatarDataUrl || "",
+    countryCode: normalizeCountryCode(info.countryCode),
     createdAt: info.createdAt,
     isOnline: isUserOnline(username),
     isSupervisor: isSupervisor(username),
@@ -1314,6 +2176,7 @@ function createSession(username, options = {}) {
     isGuest
   });
   touchUser(normalizedUsername);
+  scheduleRuntimeSnapshotPersistence();
   return token;
 }
 
@@ -1327,6 +2190,7 @@ function getSessionUsername(token) {
     : users.has(normalized.username);
   if (!normalized.username || !exists) {
     sessions.delete(token);
+    scheduleRuntimeSnapshotPersistence();
     return null;
   }
   if (normalized.expiresAt && normalized.expiresAt < Date.now()) {
@@ -1334,6 +2198,7 @@ function getSessionUsername(token) {
     if (normalized.isGuest && !hasActiveSessionForUser(normalized.username, token)) {
       cleanupGuestUser(normalized.username);
     }
+    scheduleRuntimeSnapshotPersistence();
     return null;
   }
 
@@ -1343,15 +2208,21 @@ function getSessionUsername(token) {
 }
 
 function removeUserSessions(username) {
+  let touched = false;
   sessions.forEach((entry, token) => {
     const sessionUser = getSessionMeta(entry).username;
     if (sessionUser === username) {
       sessions.delete(token);
+      touched = true;
     }
   });
+  if (touched) {
+    scheduleRuntimeSnapshotPersistence();
+  }
 }
 
 function removeUserFromAllRooms(username) {
+  let touched = false;
   rooms.forEach((room) => {
     let roomRef = room;
     if (roomRef.members.has(username)) {
@@ -1360,21 +2231,29 @@ function removeUserFromAllRooms(username) {
         return;
       }
       roomRef = result.room;
+      touched = true;
     }
 
     if (roomRef.joinRequests.has(username)) {
       roomRef.joinRequests.delete(username);
+      touched = true;
     }
     if (roomRef.approvedUsers instanceof Set) {
       roomRef.approvedUsers.delete(username);
+      touched = true;
     }
     if (roomRef.messageFloorByUser instanceof Map) {
       roomRef.messageFloorByUser.delete(username);
+      touched = true;
     }
     if (roomRef.pendingHostRestore === username) {
       roomRef.pendingHostRestore = null;
+      touched = true;
     }
   });
+  if (touched) {
+    scheduleRuntimeSnapshotPersistence();
+  }
 }
 
 function countOnlineUsers() {
@@ -1458,6 +2337,28 @@ function clampRoomVideoTime(room, value) {
   return numeric;
 }
 
+function parseBooleanFlag(value) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return value > 0;
+  }
+  const normalized = String(value || "").trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
+function shouldEnqueueVideo(value, mode = "") {
+  const normalizedMode = String(mode || "").trim().toLowerCase();
+  if (normalizedMode === "queue" || normalizedMode === "enqueue") {
+    return true;
+  }
+  if (normalizedMode === "replace" || normalizedMode === "play-now" || normalizedMode === "now") {
+    return false;
+  }
+  return parseBooleanFlag(value);
+}
+
 function roomVideoPublicToAbsolutePath(publicPath) {
   const storedFileName = getStoredFileNameFromPublicSrc(publicPath);
   if (!storedFileName) {
@@ -1472,16 +2373,72 @@ function roomVideoPublicToAbsolutePath(publicPath) {
   return absolute;
 }
 
-function removeRoomVideoAsset(room) {
-  if (!room || !room.video || !room.video.src) {
-    if (room) {
-      room.video = null;
-      room.videoSync = null;
-    }
+function createRoomVideoSyncState(videoId) {
+  return {
+    videoId: String(videoId || randomToken()),
+    playing: true,
+    baseTime: 0,
+    playbackRate: 1,
+    updatedAt: Date.now(),
+    clientNow: 0,
+    clientSeq: 0
+  };
+}
+
+function cloneRoomVideoEntry(entry) {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+  return {
+    id: String(entry.id || randomToken()),
+    sourceType: String(entry.sourceType || "file"),
+    youtubeId: String(entry.youtubeId || ""),
+    src: String(entry.src || ""),
+    filename: String(entry.filename || "video"),
+    mimeType: String(entry.mimeType || "video/mp4"),
+    size: Number(entry.size || 0),
+    uploadedBy: String(entry.uploadedBy || ""),
+    uploadedAt: Number(entry.uploadedAt || Date.now()),
+    duration: normalizeRoomVideoDuration(entry.duration),
+    isYouTubeCached: Boolean(entry.isYouTubeCached),
+    isYouTubeProxy: Boolean(entry.isYouTubeProxy)
+  };
+}
+
+function formatRoomVideoEntry(entry, room, syncState = null) {
+  if (!entry) {
+    return null;
+  }
+  const currentTime = syncState ? getRoomVideoEffectiveTime({ video: entry, videoSync: syncState }) : 0;
+  return {
+    id: String(entry.id || ""),
+    sourceType: String(entry.sourceType || "file"),
+    youtubeId: String(entry.youtubeId || ""),
+    src: String(entry.src || ""),
+    filename: String(entry.filename || "video"),
+    mimeType: String(entry.mimeType || "video/mp4"),
+    size: Number(entry.size || 0),
+    uploadedBy: String(entry.uploadedBy || room?.host || ""),
+    uploadedAt: Number(entry.uploadedAt || room?.createdAt || Date.now()),
+    duration: normalizeRoomVideoDuration(entry.duration),
+    sync: syncState ? {
+      videoId: String(syncState.videoId || ""),
+      playing: Boolean(syncState.playing),
+      currentTime,
+      playbackRate: normalizeRoomVideoPlaybackRate(syncState.playbackRate),
+      updatedAt: Number(syncState.updatedAt || Date.now()),
+      clientNow: Number(syncState.clientNow || 0),
+      clientSeq: Number(syncState.clientSeq || 0)
+    } : null
+  };
+}
+
+function cleanupRoomVideoEntryAsset(videoEntry) {
+  if (!videoEntry || !videoEntry.src) {
     return;
   }
-  const shouldPreserveCachedFile = Boolean(room.video.isYouTubeCached || isVideoSrcInYouTubeCache(room.video.src));
-  const absolutePath = shouldPreserveCachedFile ? null : roomVideoPublicToAbsolutePath(room.video.src);
+  const shouldPreserveCachedFile = Boolean(videoEntry.isYouTubeCached || isVideoSrcInYouTubeCache(videoEntry.src));
+  const absolutePath = shouldPreserveCachedFile ? null : roomVideoPublicToAbsolutePath(videoEntry.src);
   if (absolutePath && fs.existsSync(absolutePath)) {
     try {
       fs.unlinkSync(absolutePath);
@@ -1489,18 +2446,232 @@ function removeRoomVideoAsset(room) {
       // Ignore cleanup errors so room operations continue.
     }
   }
-  const proxyId = extractYouTubeProxyIdFromSrc(room.video.src);
+  const proxyId = extractYouTubeProxyIdFromSrc(videoEntry.src);
   if (proxyId) {
     youtubeProxyStreams.delete(proxyId);
   }
+}
+
+function trimRoomVideoCollections(room) {
+  normalizeRoomVideoCollections(room);
+  // Played videos are not retained: they are cleaned immediately.
+  const MAX_HISTORY = 0;
+  const MAX_QUEUE = 80;
+  if (room.videoHistory.length > MAX_HISTORY) {
+    const overflow = room.videoHistory.splice(0, room.videoHistory.length - MAX_HISTORY);
+    overflow.forEach((entry) => cleanupRoomVideoEntryAsset(entry));
+  }
+  if (room.videoQueue.length > MAX_QUEUE) {
+    const overflow = room.videoQueue.splice(MAX_QUEUE);
+    overflow.forEach((entry) => cleanupRoomVideoEntryAsset(entry));
+  }
+}
+
+function setRoomCurrentVideo(room, videoEntry, options = {}) {
+  if (!room) {
+    return null;
+  }
+  normalizeRoomVideoCollections(room);
+  const preserveCurrentInHistory = options.preserveCurrentInHistory !== false;
+  const nextEntry = cloneRoomVideoEntry(videoEntry);
+  if (!nextEntry) {
+    return null;
+  }
+  if (room.video) {
+    if (preserveCurrentInHistory) {
+      room.videoHistory.push(cloneRoomVideoEntry(room.video));
+    } else {
+      cleanupRoomVideoEntryAsset(room.video);
+    }
+  }
+  room.video = nextEntry;
+  room.videoSync = createRoomVideoSyncState(nextEntry.id);
+  trimRoomVideoCollections(room);
+  scheduleRuntimeSnapshotPersistence();
+  broadcastRoomTouch(room, "video_set");
+  return room.video;
+}
+
+function queueRoomVideoEntry(room, videoEntry) {
+  if (!room || !videoEntry) {
+    return null;
+  }
+  normalizeRoomVideoCollections(room);
+  const entry = cloneRoomVideoEntry(videoEntry);
+  if (!entry) {
+    return null;
+  }
+  room.videoQueue.push(entry);
+  trimRoomVideoCollections(room);
+  scheduleRuntimeSnapshotPersistence();
+  broadcastRoomTouch(room, "video_queue_updated");
+  return entry;
+}
+
+function playNextQueuedRoomVideo(room) {
+  if (!room) {
+    return null;
+  }
+  normalizeRoomVideoCollections(room);
+  if (room.videoQueue.length === 0) {
+    return null;
+  }
+  const next = room.videoQueue.shift();
+  if (room.video) {
+    room.videoHistory.push(cloneRoomVideoEntry(room.video));
+  }
+  room.video = cloneRoomVideoEntry(next);
+  room.videoSync = createRoomVideoSyncState(room.video.id);
+  // Keep next item anchored at zero until leader emits an explicit play sync.
+  room.videoSync.playing = false;
+  room.videoSync.baseTime = 0;
+  room.videoSync.updatedAt = Date.now();
+  trimRoomVideoCollections(room);
+  scheduleRuntimeSnapshotPersistence();
+  broadcastRoomTouch(room, "video_queue_next");
+  return room.video;
+}
+
+function playPreviousRoomVideo(room) {
+  if (!room) {
+    return null;
+  }
+  normalizeRoomVideoCollections(room);
+  if (room.videoHistory.length === 0) {
+    return null;
+  }
+  const previous = room.videoHistory.pop();
+  if (room.video) {
+    room.videoQueue.unshift(cloneRoomVideoEntry(room.video));
+  }
+  room.video = cloneRoomVideoEntry(previous);
+  room.videoSync = createRoomVideoSyncState(room.video.id);
+  trimRoomVideoCollections(room);
+  scheduleRuntimeSnapshotPersistence();
+  broadcastRoomTouch(room, "video_queue_prev");
+  return room.video;
+}
+
+function removeQueuedRoomVideoAt(room, index) {
+  if (!room) {
+    return null;
+  }
+  normalizeRoomVideoCollections(room);
+  if (!Number.isInteger(index) || index < 0 || index >= room.videoQueue.length) {
+    return null;
+  }
+  const [removed] = room.videoQueue.splice(index, 1);
+  cleanupRoomVideoEntryAsset(removed);
+  scheduleRuntimeSnapshotPersistence();
+  broadcastRoomTouch(room, "video_queue_updated");
+  return removed || null;
+}
+
+function clearRoomVideoQueue(room, { clearHistory = false } = {}) {
+  if (!room) {
+    return;
+  }
+  normalizeRoomVideoCollections(room);
+  room.videoQueue.forEach((entry) => cleanupRoomVideoEntryAsset(entry));
+  room.videoQueue = [];
+  if (clearHistory) {
+    room.videoHistory.forEach((entry) => cleanupRoomVideoEntryAsset(entry));
+    room.videoHistory = [];
+  }
+  scheduleRuntimeSnapshotPersistence();
+  broadcastRoomTouch(room, "video_queue_updated");
+}
+
+function removeRoomVideoAsset(room, options = {}) {
+  if (!room) {
+    return;
+  }
+  const clearQueue = Boolean(options.clearQueue);
+  const clearHistory = Boolean(options.clearHistory);
+  if (room.video) {
+    cleanupRoomVideoEntryAsset(room.video);
+  }
   room.video = null;
   room.videoSync = null;
+  if (clearQueue || clearHistory) {
+    clearRoomVideoQueue(room, { clearHistory });
+  }
+  scheduleRuntimeSnapshotPersistence();
+  broadcastRoomTouch(room, "video_removed");
+}
+
+function createRoomFileVideoEntry(room, {
+  storedFileName,
+  filename,
+  mimeType,
+  size,
+  uploadedBy,
+  duration = 0
+}) {
+  const cleanStoredFileName = String(storedFileName || "").trim();
+  if (!room?.code || !cleanStoredFileName) {
+    return null;
+  }
+  return {
+    id: randomToken(),
+    sourceType: "file",
+    youtubeId: "",
+    src: `${ROOM_VIDEO_PUBLIC_PREFIX}${cleanStoredFileName}`,
+    filename: sanitizeUploadedFilename(filename || cleanStoredFileName),
+    mimeType: String(mimeType || "video/mp4"),
+    size: Number(size || 0),
+    uploadedBy: normalizeUsername(uploadedBy),
+    uploadedAt: Date.now(),
+    duration: normalizeRoomVideoDuration(duration),
+    isYouTubeCached: false,
+    isYouTubeProxy: false
+  };
+}
+
+function createYouTubeEmbedVideoEntry(videoId, uploadedBy, label = "", duration = 0) {
+  const cleanVideoId = String(videoId || "").trim();
+  if (!cleanVideoId) {
+    return null;
+  }
+  return {
+    id: randomToken(),
+    sourceType: "youtube",
+    youtubeId: cleanVideoId,
+    src: `https://www.youtube.com/watch?v=${cleanVideoId}`,
+    filename: sanitizeUploadedFilename(label || `youtube-${cleanVideoId}`),
+    mimeType: "video/youtube",
+    size: 0,
+    uploadedBy: normalizeUsername(uploadedBy),
+    uploadedAt: Date.now(),
+    duration: normalizeRoomVideoDuration(duration),
+    isYouTubeCached: false,
+    isYouTubeProxy: false
+  };
+}
+
+function setOrQueueRoomVideo(room, videoEntry, { enqueue = false } = {}) {
+  if (!room || !videoEntry) {
+    return { queued: false, video: null, queuedEntry: null };
+  }
+  if (enqueue) {
+    const queuedEntry = queueRoomVideoEntry(room, videoEntry);
+    return {
+      queued: true,
+      video: room.video,
+      queuedEntry
+    };
+  }
+  const video = setRoomCurrentVideo(room, videoEntry);
+  return {
+    queued: false,
+    video,
+    queuedEntry: null
+  };
 }
 
 function setRoomVideoFromYouTubeProxy(room, videoId, direct, uploadedBy) {
   const proxy = registerYouTubeProxyStream(videoId, direct);
-  removeRoomVideoAsset(room);
-  room.video = {
+  return setRoomCurrentVideo(room, {
     id: randomToken(),
     sourceType: "file",
     youtubeId: videoId,
@@ -1513,44 +2684,15 @@ function setRoomVideoFromYouTubeProxy(room, videoId, direct, uploadedBy) {
     duration: direct.durationSec,
     isYouTubeCached: false,
     isYouTubeProxy: true
-  };
-  room.videoSync = {
-    videoId: room.video.id,
-    playing: false,
-    baseTime: 0,
-    playbackRate: 1,
-    updatedAt: Date.now(),
-    clientNow: 0,
-    clientSeq: 0
-  };
+  });
 }
 
 function setRoomVideoFromYouTubeEmbed(room, videoId, uploadedBy, label = "", duration = 0) {
-  const cleanVideoId = String(videoId || "").trim();
-  removeRoomVideoAsset(room);
-  room.video = {
-    id: randomToken(),
-    sourceType: "youtube",
-    youtubeId: cleanVideoId,
-    src: `https://www.youtube.com/watch?v=${cleanVideoId}`,
-    filename: sanitizeUploadedFilename(label || `youtube-${cleanVideoId}`),
-    mimeType: "video/youtube",
-    size: 0,
-    uploadedBy,
-    uploadedAt: Date.now(),
-    duration: normalizeRoomVideoDuration(duration),
-    isYouTubeCached: false,
-    isYouTubeProxy: false
-  };
-  room.videoSync = {
-    videoId: room.video.id,
-    playing: false,
-    baseTime: 0,
-    playbackRate: 1,
-    updatedAt: Date.now(),
-    clientNow: 0,
-    clientSeq: 0
-  };
+  const entry = createYouTubeEmbedVideoEntry(videoId, uploadedBy, label, duration);
+  if (!entry) {
+    return null;
+  }
+  return setRoomCurrentVideo(room, entry);
 }
 
 function ensureRoomVideoRuntimeState(room) {
@@ -1569,6 +2711,14 @@ function ensureRoomVideoRuntimeState(room) {
   if (!room.videoSync) {
     room.videoSync = null;
   }
+  normalizeRoomVideoCollections(room);
+  room.videoQueue = room.videoQueue
+    .map((entry) => cloneRoomVideoEntry(entry))
+    .filter((entry) => Boolean(entry?.src));
+  room.videoHistory = room.videoHistory
+    .map((entry) => cloneRoomVideoEntry(entry))
+    .filter((entry) => Boolean(entry?.src));
+  trimRoomVideoCollections(room);
 }
 
 function getRoomVideoEffectiveTime(room, atTimestamp = Date.now()) {
@@ -1590,29 +2740,18 @@ function formatRoomVideo(room) {
     return null;
   }
   ensureRoomVideoRuntimeState(room);
-  const sync = room.videoSync;
-  const currentTime = sync ? getRoomVideoEffectiveTime(room) : 0;
-  return {
-    id: String(room.video.id || ""),
-    sourceType: String(room.video.sourceType || "file"),
-    youtubeId: String(room.video.youtubeId || ""),
-    src: String(room.video.src || ""),
-    filename: String(room.video.filename || "video"),
-    mimeType: String(room.video.mimeType || "video/mp4"),
-    size: Number(room.video.size || 0),
-    uploadedBy: String(room.video.uploadedBy || room.host || ""),
-    uploadedAt: Number(room.video.uploadedAt || room.createdAt || Date.now()),
-    duration: normalizeRoomVideoDuration(room.video.duration),
-    sync: sync ? {
-      videoId: String(sync.videoId || ""),
-      playing: Boolean(sync.playing),
-      currentTime,
-      playbackRate: normalizeRoomVideoPlaybackRate(sync.playbackRate),
-      updatedAt: Number(sync.updatedAt || Date.now()),
-      clientNow: Number(sync.clientNow || 0),
-      clientSeq: Number(sync.clientSeq || 0)
-    } : null
-  };
+  return formatRoomVideoEntry(room.video, room, room.videoSync);
+}
+
+function formatRoomVideoQueue(room) {
+  if (!room) {
+    return [];
+  }
+  ensureRoomVideoRuntimeState(room);
+  return room.videoQueue.map((entry, index) => ({
+    ...formatRoomVideoEntry(entry, room, null),
+    queueIndex: index
+  }));
 }
 
 function formatRoom(room, viewer = null) {
@@ -1625,7 +2764,9 @@ function formatRoom(room, viewer = null) {
     createdAt: room.createdAt,
     pendingCount: room.joinRequests.size,
     hasPendingRequest: viewer ? room.joinRequests.has(viewer) : false,
-    video: formatRoomVideo(room)
+    video: formatRoomVideo(room),
+    videoQueue: formatRoomVideoQueue(room),
+    videoHistoryCount: Array.isArray(room.videoHistory) ? room.videoHistory.length : 0
   };
 }
 
@@ -1641,7 +2782,8 @@ function formatRoomSummary(room, viewer) {
     isMember: room.members.has(viewer),
     isApproved: approvedUsers.has(viewer),
     hasPendingRequest: room.joinRequests.has(viewer),
-    pendingRequests: room.host === viewer ? Array.from(room.joinRequests) : []
+    pendingRequests: room.host === viewer ? Array.from(room.joinRequests) : [],
+    hasVideoQueue: Array.isArray(room.videoQueue) ? room.videoQueue.length > 0 : false
   };
 }
 
@@ -1763,21 +2905,25 @@ function pruneClientMessageLog(room) {
 
 function pushSystemMessage(room, key, payload = {}) {
   const id = room.nextMessageId;
-  room.messages.push({
+  const message = {
     id,
     type: "system",
     key,
     payload,
     text: "",
     timestamp: Date.now()
-  });
+  };
+  room.messages.push(message);
   room.nextMessageId += 1;
+  scheduleRuntimeSnapshotPersistence();
+  broadcastRoomEvent(room.code, "chat_message", { message });
+  broadcastRoomTouch(room, "message_system", { messageId: id });
   return id;
 }
 
 function pushUserMessage(room, username, text, replyTo = null) {
   const id = room.nextMessageId;
-  room.messages.push({
+  const message = {
     id,
     type: "user",
     user: username,
@@ -1785,8 +2931,12 @@ function pushUserMessage(room, username, text, replyTo = null) {
     replyTo: replyTo ? { ...replyTo } : null,
     reactions: {},
     timestamp: Date.now()
-  });
+  };
+  room.messages.push(message);
   room.nextMessageId += 1;
+  scheduleRuntimeSnapshotPersistence();
+  broadcastRoomEvent(room.code, "chat_message", { message });
+  broadcastRoomTouch(room, "message_user", { messageId: id });
   return id;
 }
 
@@ -1818,8 +2968,10 @@ function scheduleRoomDeletionIfEmpty(room) {
     if (currentRoom.members.size > 0) {
       return;
     }
-    removeRoomVideoAsset(currentRoom);
+    removeRoomVideoAsset(currentRoom, { clearQueue: true, clearHistory: true });
+    broadcastRoomEvent(code, "room_closed", { reason: "empty" });
     rooms.delete(code);
+    scheduleRuntimeSnapshotPersistence();
   }, ROOM_EMPTY_DELETE_DELAY_MS);
   roomEmptyDeletionTimers.set(code, timer);
 }
@@ -1837,10 +2989,12 @@ function joinUserToRoom(room, username) {
     room.pendingHostRestore = null;
     pushSystemMessage(room, "host_changed", { user: username, previous });
   }
+  scheduleRuntimeSnapshotPersistence();
+  broadcastRoomTouch(room, "member_joined", { username });
 }
 
 function parseRoomPath(pathname) {
-  const match = pathname.match(/^\/api\/rooms\/([A-Za-z0-9]+)(?:\/(messages|kick|host|requests|request-join|leave|video|video-sync|video-source))?$/);
+  const match = pathname.match(/^\/api\/rooms\/([A-Za-z0-9]+)(?:\/(messages|kick|host|requests|request-join|leave|video|video-sync|video-source|video-queue))?$/);
   if (!match) {
     return null;
   }
@@ -1854,9 +3008,12 @@ function removeMemberFromRoom(room, username) {
   ensureRoomRuntimeState(room);
   room.members.delete(username);
   room.joinRequests.delete(username);
+  disconnectRoomMemberSockets(room.code, username, "removed_from_room");
 
   if (room.members.size === 0) {
     scheduleRoomDeletionIfEmpty(room);
+    scheduleRuntimeSnapshotPersistence();
+    broadcastRoomTouch(room, "member_left", { username });
     return { deleted: false, room };
   }
 
@@ -1870,6 +3027,8 @@ function removeMemberFromRoom(room, username) {
   }
 
   pushSystemMessage(room, "room_left", { user: username });
+  scheduleRuntimeSnapshotPersistence();
+  broadcastRoomTouch(room, "member_left", { username });
   return { deleted: false, room };
 }
 
@@ -2884,7 +4043,7 @@ async function handleApi(req, res) {
   if ((req.method === "GET" || req.method === "HEAD") && pathname.startsWith("/api/youtube-proxy/")) {
     const streamId = pathname.slice("/api/youtube-proxy/".length).split("/")[0];
     if (!/^[A-Za-z0-9]+$/.test(streamId)) {
-      sendJson(res, 404, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid video stream link.") });
+      sendJson(res, 404, { error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Invalid video stream link.") });
       return;
     }
     await serveYouTubeProxyStream(req, res, streamId);
@@ -2892,6 +4051,9 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "POST" && pathname === "/api/register") {
+    if (!enforceRateLimit(req, res, RATE_LIMITS.REGISTER)) {
+      return;
+    }
     const { username, password } = await parseBody(req);
     const cleanUser = normalizeUsername(username);
     const cleanPass = String(password || "");
@@ -2900,7 +4062,7 @@ async function handleApi(req, res) {
       sendJson(res, 400, {
         error: i18n(
           req,
-          "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ 3 أ¯طںآ½ 30 أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½/أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½.",
+          "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ 3 ط£آ¯ط·ع؛ط¢آ½ 30 ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½/ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.",
           "Username must be 3-30 characters and use only English letters and numbers."
         )
       });
@@ -2910,26 +4072,31 @@ async function handleApi(req, res) {
       sendJson(res, 400, {
         error: i18n(
           req,
-          "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ 4 أ¯طںآ½ 128 أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.",
+          "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ 4 ط£آ¯ط·ع؛ط¢آ½ 128 ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.",
           "Password must be 4-128 characters."
         )
       });
       return;
     }
     if (users.has(cleanUser)) {
+      recordAudit("auth_register_conflict", cleanUser || "anonymous", cleanUser, {
+        ip: getClientIp(req)
+      });
       sendJson(res, 409, {
-        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Username is already in use.")
+        error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Username is already in use.")
       });
       return;
     }
 
     const passwordRecord = createPasswordRecord(cleanPass);
+    const registerCountryCode = getClientCountryCode(req);
     users.set(cleanUser, {
       passwordHash: passwordRecord.passwordHash,
       passwordSalt: passwordRecord.passwordSalt,
       createdAt: Date.now(),
       displayName: cleanUser,
-      avatarDataUrl: ""
+      avatarDataUrl: "",
+      countryCode: registerCountryCode
     });
     if (!saveUsers()) {
       users.delete(cleanUser);
@@ -2943,32 +4110,50 @@ async function handleApi(req, res) {
       return;
     }
     const token = createSession(cleanUser);
+    recordAudit("auth_register_success", cleanUser, cleanUser, {
+      ip: getClientIp(req)
+    });
     sendJson(res, 201, { token, username: cleanUser, announcement: getLiveSiteAnnouncement() });
     return;
   }
 
   if (req.method === "POST" && pathname === "/api/login") {
+    if (!enforceRateLimit(req, res, RATE_LIMITS.LOGIN)) {
+      return;
+    }
     const { username, password } = await parseBody(req);
     const cleanUser = normalizeUsername(username);
     const cleanPass = String(password || "");
 
     if (!cleanUser || !cleanPass || cleanPass.length > PASSWORD_MAX_LENGTH) {
+      recordAudit("auth_login_failure", cleanUser || "anonymous", cleanUser || "", {
+        reason: "invalid_input",
+        ip: getClientIp(req)
+      });
       sendJson(res, 401, {
-        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid login credentials.")
+        error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Invalid login credentials.")
       });
       return;
     }
 
     if (!users.has(cleanUser)) {
+      recordAudit("auth_login_failure", cleanUser || "anonymous", cleanUser || "", {
+        reason: "unknown_user",
+        ip: getClientIp(req)
+      });
       sendJson(res, 401, {
-        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid login credentials.")
+        error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Invalid login credentials.")
       });
       return;
     }
     const user = users.get(cleanUser);
     if (!verifyPassword(cleanUser, user, cleanPass)) {
+      recordAudit("auth_login_failure", cleanUser, cleanUser, {
+        reason: "bad_password",
+        ip: getClientIp(req)
+      });
       sendJson(res, 401, {
-        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid login credentials.")
+        error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Invalid login credentials.")
       });
       return;
     }
@@ -2976,28 +4161,41 @@ async function handleApi(req, res) {
       sendBannedResponse(req, res, cleanUser);
       return;
     }
+    updateUserCountryFromRequest(cleanUser, req, { persistRegistered: true });
 
     const token = createSession(cleanUser);
+    recordAudit("auth_login_success", cleanUser, cleanUser, {
+      ip: getClientIp(req)
+    });
     sendJson(res, 200, { token, username: cleanUser, announcement: getLiveSiteAnnouncement() });
     return;
   }
 
   if (req.method === "POST" && pathname === "/api/guest-login") {
+    if (!enforceRateLimit(req, res, RATE_LIMITS.GUEST_LOGIN)) {
+      return;
+    }
     const { name } = await parseBody(req);
     const cleanName = sanitizeGuestDisplayName(name);
     if (cleanName.length < 2 || cleanName.length > 30) {
       sendJson(res, 400, {
-        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ 2 أ¯طںآ½ 30 أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Name must be 2-30 characters.")
+        error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ 2 ط£آ¯ط·ع؛ط¢آ½ 30 ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Name must be 2-30 characters.")
       });
       return;
     }
     const username = createGuestUsername(cleanName);
+    const guestCountryCode = getClientCountryCode(req);
     guestUsers.set(username, {
       createdAt: Date.now(),
       displayName: cleanName,
-      avatarDataUrl: ""
+      avatarDataUrl: "",
+      countryCode: guestCountryCode
     });
     const token = createSession(username, { isGuest: true });
+    recordAudit("auth_guest_login", username, username, {
+      ip: getClientIp(req),
+      displayName: cleanName
+    });
     sendJson(res, 200, {
       token,
       username,
@@ -3023,24 +4221,27 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "POST" && pathname === "/api/ban-appeals") {
+    if (!enforceRateLimit(req, res, RATE_LIMITS.BAN_APPEAL)) {
+      return;
+    }
     const { username: rawUsername, reason } = await parseBody(req);
     const username = normalizeUsername(rawUsername);
     const cleanReason = String(reason || "").trim();
     if (!isValidUsername(username) || !users.has(username)) {
       sendJson(res, 404, {
-        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Account not found.")
+        error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Account not found.")
       });
       return;
     }
     if (!isBanned(username)) {
       sendJson(res, 400, {
-        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "This account is not banned.")
+        error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "This account is not banned.")
       });
       return;
     }
     if (cleanReason.length < 8 || cleanReason.length > 500) {
       sendJson(res, 400, {
-        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ 8 أ¯طںآ½ 500 أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Appeal reason must be 8-500 characters.")
+        error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ 8 ط£آ¯ط·ع؛ط¢آ½ 500 ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Appeal reason must be 8-500 characters.")
       });
       return;
     }
@@ -3056,6 +4257,10 @@ async function handleApi(req, res) {
       reviewNote: ""
     });
     saveModeration();
+    recordAudit("ban_appeal_submitted", username, username, {
+      reasonLength: cleanReason.length,
+      ip: getClientIp(req)
+    });
     sendJson(res, 202, { ok: true, request: formatUnbanRequest(unbanRequests.get(username)) });
     return;
   }
@@ -3065,14 +4270,14 @@ async function handleApi(req, res) {
     const decodedUsername = safeDecodeURIComponent(pathname.slice(appealPrefix.length));
     if (decodedUsername === null) {
       sendJson(res, 400, {
-        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid user identifier.")
+        error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Invalid user identifier.")
       });
       return;
     }
     const username = normalizeUsername(decodedUsername);
     if (!isValidUsername(username) || !users.has(username)) {
       sendJson(res, 404, {
-        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Account not found.")
+        error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Account not found.")
       });
       return;
     }
@@ -3089,7 +4294,7 @@ async function handleApi(req, res) {
     const username = getUserFromRequest(req);
     if (!username) {
       sendJson(res, 401, {
-        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.")
+        error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Unauthorized.")
       });
       return;
     }
@@ -3108,7 +4313,7 @@ async function handleApi(req, res) {
   if (req.method === "GET" && pathname === "/api/admin/ban-appeals") {
     const username = getUserFromRequest(req);
     if (!username) {
-      sendJson(res, 401, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.") });
+      sendJson(res, 401, { error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Unauthorized.") });
       return;
     }
     if (!assertSupervisor(req, res, username)) {
@@ -3128,7 +4333,7 @@ async function handleApi(req, res) {
   if (req.method === "GET" && pathname === "/api/admin/users") {
     const username = getUserFromRequest(req);
     if (!username) {
-      sendJson(res, 401, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.") });
+      sendJson(res, 401, { error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Unauthorized.") });
       return;
     }
     if (!assertSupervisor(req, res, username)) {
@@ -3154,9 +4359,12 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "POST" && pathname === "/api/admin/site-announcement") {
+    if (!enforceRateLimit(req, res, RATE_LIMITS.ADMIN_ACTION)) {
+      return;
+    }
     const username = getUserFromRequest(req);
     if (!username) {
-      sendJson(res, 401, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.") });
+      sendJson(res, 401, { error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Unauthorized.") });
       return;
     }
     if (!assertSupervisor(req, res, username)) {
@@ -3166,13 +4374,13 @@ async function handleApi(req, res) {
     const cleanText = String(text || "").trim();
     if (!cleanText) {
       sendJson(res, 400, {
-        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Announcement text is required.")
+        error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Announcement text is required.")
       });
       return;
     }
     if (cleanText.length > 500) {
       sendJson(res, 400, {
-        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ (أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ 500 أ¯طںآ½أ¯طںآ½أ¯طںآ½).", "Announcement is too long (max 500 chars).")
+        error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ (ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ 500 ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½).", "Announcement is too long (max 500 chars).")
       });
       return;
     }
@@ -3184,14 +4392,20 @@ async function handleApi(req, res) {
       createdAt: now
     };
     saveModeration();
+    recordAudit("admin_site_announcement", username, "site", {
+      textLength: cleanText.length
+    });
     sendJson(res, 201, { ok: true, announcement: getLiveSiteAnnouncement() });
     return;
   }
 
   if (req.method === "POST" && pathname === "/api/admin/ban-user") {
+    if (!enforceRateLimit(req, res, RATE_LIMITS.ADMIN_ACTION)) {
+      return;
+    }
     const username = getUserFromRequest(req);
     if (!username) {
-      sendJson(res, 401, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.") });
+      sendJson(res, 401, { error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Unauthorized.") });
       return;
     }
     if (!assertSupervisor(req, res, username)) {
@@ -3201,15 +4415,15 @@ async function handleApi(req, res) {
     const target = normalizeUsername(rawTarget);
     const cleanReason = String(reason || "").trim();
     if (!isValidUsername(target) || !users.has(target)) {
-      sendJson(res, 404, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Account not found.") });
+      sendJson(res, 404, { error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Account not found.") });
       return;
     }
     if (isSupervisor(target)) {
-      sendJson(res, 400, { error: i18n(req, "أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Supervisor account cannot be banned.") });
+      sendJson(res, 400, { error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Supervisor account cannot be banned.") });
       return;
     }
     if (cleanReason.length < 3 || cleanReason.length > 300) {
-      sendJson(res, 400, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ 3 أ¯طںآ½ 300 أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Ban reason must be 3-300 characters.") });
+      sendJson(res, 400, { error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ 3 ط£آ¯ط·ع؛ط¢آ½ 300 ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Ban reason must be 3-300 characters.") });
       return;
     }
     bannedUsers.set(target, {
@@ -3220,14 +4434,20 @@ async function handleApi(req, res) {
     });
     removeUserFromAllRooms(target);
     saveModeration();
+    recordAudit("admin_ban_user", username, target, {
+      reasonLength: cleanReason.length
+    });
     sendJson(res, 200, { ok: true, ban: formatBanRecord(getBanRecord(target)) });
     return;
   }
 
   if (req.method === "POST" && pathname === "/api/admin/unban-user") {
+    if (!enforceRateLimit(req, res, RATE_LIMITS.ADMIN_ACTION)) {
+      return;
+    }
     const username = getUserFromRequest(req);
     if (!username) {
-      sendJson(res, 401, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.") });
+      sendJson(res, 401, { error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Unauthorized.") });
       return;
     }
     if (!assertSupervisor(req, res, username)) {
@@ -3237,7 +4457,7 @@ async function handleApi(req, res) {
     const target = normalizeUsername(rawTarget);
     const cleanNote = String(note || "").trim();
     if (!isValidUsername(target) || !users.has(target)) {
-      sendJson(res, 404, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Account not found.") });
+      sendJson(res, 404, { error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Account not found.") });
       return;
     }
     bannedUsers.delete(target);
@@ -3250,14 +4470,20 @@ async function handleApi(req, res) {
       unbanRequests.set(target, request);
     }
     saveModeration();
+    recordAudit("admin_unban_user", username, target, {
+      noteLength: cleanNote.length
+    });
     sendJson(res, 200, { ok: true, username: target });
     return;
   }
 
   if (req.method === "POST" && pathname === "/api/admin/delete-user") {
+    if (!enforceRateLimit(req, res, RATE_LIMITS.ADMIN_ACTION)) {
+      return;
+    }
     const username = getUserFromRequest(req);
     if (!username) {
-      sendJson(res, 401, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.") });
+      sendJson(res, 401, { error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Unauthorized.") });
       return;
     }
     if (!assertSupervisor(req, res, username)) {
@@ -3266,11 +4492,11 @@ async function handleApi(req, res) {
     const { username: rawTarget } = await parseBody(req);
     const target = normalizeUsername(rawTarget);
     if (!isValidUsername(target) || !users.has(target)) {
-      sendJson(res, 404, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Account not found.") });
+      sendJson(res, 404, { error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Account not found.") });
       return;
     }
     if (isSupervisor(target)) {
-      sendJson(res, 400, { error: i18n(req, "أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Supervisor account cannot be deleted.") });
+      sendJson(res, 400, { error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Supervisor account cannot be deleted.") });
       return;
     }
 
@@ -3282,14 +4508,18 @@ async function handleApi(req, res) {
     userLastSeen.delete(target);
     saveUsers();
     saveModeration();
+    recordAudit("admin_delete_user", username, target, {});
     sendJson(res, 200, { ok: true, username: target });
     return;
   }
 
   if (req.method === "POST" && pathname === "/api/admin/ban-appeals/decision") {
+    if (!enforceRateLimit(req, res, RATE_LIMITS.ADMIN_ACTION)) {
+      return;
+    }
     const username = getUserFromRequest(req);
     if (!username) {
-      sendJson(res, 401, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.") });
+      sendJson(res, 401, { error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Unauthorized.") });
       return;
     }
     if (!assertSupervisor(req, res, username)) {
@@ -3300,11 +4530,11 @@ async function handleApi(req, res) {
     const cleanAction = String(action || "").trim().toLowerCase();
     const cleanNote = String(note || "").trim();
     if (!isValidUsername(target) || !unbanRequests.has(target)) {
-      sendJson(res, 404, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Request not found.") });
+      sendJson(res, 404, { error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Request not found.") });
       return;
     }
     if (cleanAction !== "approve" && cleanAction !== "reject") {
-      sendJson(res, 400, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid action.") });
+      sendJson(res, 400, { error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Invalid action.") });
       return;
     }
     const request = unbanRequests.get(target);
@@ -3317,6 +4547,10 @@ async function handleApi(req, res) {
       bannedUsers.delete(target);
     }
     saveModeration();
+    recordAudit("admin_ban_appeal_decision", username, target, {
+      action: cleanAction,
+      noteLength: cleanNote.length
+    });
     sendJson(res, 200, { ok: true, request: formatUnbanRequest(request) });
     return;
   }
@@ -3324,12 +4558,13 @@ async function handleApi(req, res) {
   if (req.method === "GET" && pathname === "/api/profile") {
     const username = getUserFromRequest(req);
     if (!username) {
-      sendJson(res, 401, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.") });
+      sendJson(res, 401, { error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Unauthorized.") });
       return;
     }
     if (!assertNotBanned(req, res, username)) {
       return;
     }
+    updateUserCountryFromRequest(username, req, { persistRegistered: true });
     const profile = publicProfile(username);
     sendJson(res, 200, {
       profile,
@@ -3347,7 +4582,7 @@ async function handleApi(req, res) {
   if (req.method === "PATCH" && pathname === "/api/profile") {
     const username = getUserFromRequest(req);
     if (!username) {
-      sendJson(res, 401, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.") });
+      sendJson(res, 401, { error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Unauthorized.") });
       return;
     }
     if (!assertNotBanned(req, res, username)) {
@@ -3356,7 +4591,7 @@ async function handleApi(req, res) {
     const isRegistered = users.has(username);
     const isGuest = guestUsers.has(username);
     if (!isRegistered && !isGuest) {
-      sendJson(res, 404, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Account not found.") });
+      sendJson(res, 404, { error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Account not found.") });
       return;
     }
     const { displayName, avatarDataUrl } = await parseBody(req);
@@ -3367,7 +4602,7 @@ async function handleApi(req, res) {
       const cleanName = String(displayName || "").trim();
       if (cleanName.length < 2 || cleanName.length > 30) {
         sendJson(res, 400, {
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ 2 أ¯طںآ½ 30 أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Display name must be 2 to 30 characters.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ 2 ط£آ¯ط·ع؛ط¢آ½ 30 ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Display name must be 2 to 30 characters.")
         });
         return;
       }
@@ -3382,7 +4617,7 @@ async function handleApi(req, res) {
         const isAllowed = /^data:image\/(png|jpe?g|webp);base64,/i.test(rawAvatar);
         if (!isAllowed || rawAvatar.length > 300000) {
           sendJson(res, 400, {
-            error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Avatar is invalid or too large.")
+            error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Avatar is invalid or too large.")
           });
           return;
         }
@@ -3419,7 +4654,7 @@ async function handleApi(req, res) {
   ) {
     const viewer = getUserFromRequest(req);
     if (!viewer) {
-      sendJson(res, 401, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.") });
+      sendJson(res, 401, { error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Unauthorized.") });
       return;
     }
     if (!assertNotBanned(req, res, viewer)) {
@@ -3428,17 +4663,20 @@ async function handleApi(req, res) {
     const rawTarget = pathname.slice(userProfilePrefix.length, pathname.length - userProfileSuffix.length);
     const decodedTarget = safeDecodeURIComponent(String(rawTarget || ""));
     if (decodedTarget === null) {
-      sendJson(res, 400, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid user identifier.") });
+      sendJson(res, 400, { error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Invalid user identifier.") });
       return;
     }
     const target = normalizeUsername(decodedTarget);
     if (!isValidUsername(target)) {
-      sendJson(res, 400, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid user identifier.") });
+      sendJson(res, 400, { error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Invalid user identifier.") });
       return;
     }
     if (!users.has(target) && !guestUsers.has(target)) {
-      sendJson(res, 404, { error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "User not found.") });
+      sendJson(res, 404, { error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "User not found.") });
       return;
+    }
+    if (viewer === target) {
+      updateUserCountryFromRequest(viewer, req, { persistRegistered: true });
     }
     const allowModerationInfo = isSupervisor(viewer) || viewer === target;
     sendJson(res, 200, {
@@ -3457,11 +4695,14 @@ async function handleApi(req, res) {
     const username = getUserFromRequest(req);
     if (!username) {
       sendJson(res, 401, {
-        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.")
+        error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Unauthorized.")
       });
       return;
     }
     if (!assertNotBanned(req, res, username)) {
+      return;
+    }
+    if (!enforceRateLimit(req, res, RATE_LIMITS.ROOMS_CREATE, username)) {
       return;
     }
 
@@ -3471,7 +4712,7 @@ async function handleApi(req, res) {
       sendJson(res, 400, {
         error: i18n(
           req,
-          "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ (أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ 40 أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½).",
+          "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ (ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ 40 ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½).",
           "Room name is too long (max 40 characters)."
         )
       });
@@ -3484,7 +4725,7 @@ async function handleApi(req, res) {
 
     const room = {
       code,
-      name: cleanRoomName || i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½", "New Room"),
+      name: cleanRoomName || i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½", "New Room"),
       host: username,
       pendingHostRestore: null,
       members: new Set([username]),
@@ -3496,10 +4737,15 @@ async function handleApi(req, res) {
       nextMessageId: 1,
       createdAt: Date.now(),
       video: null,
-      videoSync: null
+      videoSync: null,
+      videoQueue: [],
+      videoHistory: []
     };
     pushSystemMessage(room, "room_created", { user: username });
     rooms.set(code, room);
+    recordAudit("room_created", username, code, {
+      roomName: room.name
+    });
     sendJson(res, 201, { room: formatRoom(room, username) });
     return;
   }
@@ -3508,7 +4754,7 @@ async function handleApi(req, res) {
     const username = getUserFromRequest(req);
     if (!username) {
       sendJson(res, 401, {
-        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.")
+        error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Unauthorized.")
       });
       return;
     }
@@ -3533,7 +4779,7 @@ async function handleApi(req, res) {
     const username = getUserFromRequest(req);
     if (!username) {
       sendJson(res, 401, {
-        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.")
+        error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Unauthorized.")
       });
       return;
     }
@@ -3543,9 +4789,12 @@ async function handleApi(req, res) {
 
     const { code } = await parseBody(req);
     const roomCode = String(code || "").trim().toUpperCase();
+    if (!enforceRateLimit(req, res, RATE_LIMITS.ROOMS_JOIN, roomCode || "unknown")) {
+      return;
+    }
     if (!roomCode || !rooms.has(roomCode)) {
       sendJson(res, 404, {
-        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Room not found.")
+        error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Room not found.")
       });
       return;
     }
@@ -3556,18 +4805,22 @@ async function handleApi(req, res) {
     if (!room.members.has(username)) {
       if (room.approvedUsers.has(username) || isSupervisor(username)) {
         joinUserToRoom(room, username);
+        recordAudit("room_joined", username, room.code, {
+          via: "join_endpoint"
+        });
       } else if (room.joinRequests.has(username)) {
         sendJson(res, 403, {
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Your join request is still pending.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Your join request is still pending.")
         });
         return;
       } else {
         sendJson(res, 403, {
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "You cannot join until the leader approves your request.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "You cannot join until the leader approves your request.")
         });
         return;
       }
     }
+    recordAudit("room_opened", username, room.code, {});
     sendJson(res, 200, { room: formatRoom(room, username) });
     return;
   }
@@ -3577,7 +4830,7 @@ async function handleApi(req, res) {
     const username = getUserFromRequest(req);
     if (!username) {
       sendJson(res, 401, {
-        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Unauthorized.")
+        error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Unauthorized.")
       });
       return;
     }
@@ -3587,17 +4840,22 @@ async function handleApi(req, res) {
 
     if (!rooms.has(roomPath.code)) {
       sendJson(res, 404, {
-        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Room not found.")
+        error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Room not found.")
       });
       return;
     }
     const room = rooms.get(roomPath.code);
     ensureRoomRuntimeState(room);
     if (req.method === "POST" && roomPath.action === "request-join") {
+      if (!enforceRateLimit(req, res, RATE_LIMITS.ROOMS_REQUEST_JOIN, room.code)) {
+        return;
+      }
       const payload = await parseBody(req);
       const cleanAction = String(payload?.action || "").trim().toLowerCase();
       if (cleanAction === "cancel") {
         room.joinRequests.delete(username);
+        scheduleRuntimeSnapshotPersistence();
+        recordAudit("room_join_request_cancelled", username, room.code, {});
         sendJson(res, 200, {
           ok: true,
           status: "cancelled"
@@ -3622,6 +4880,10 @@ async function handleApi(req, res) {
             return;
           }
           room.joinRequests.add(username);
+          scheduleRuntimeSnapshotPersistence();
+          recordAudit("room_join_requested", username, room.code, {
+            via: "supervisor_pending"
+          });
           sendJson(res, 202, {
             ok: true,
             status: "pending"
@@ -3629,6 +4891,9 @@ async function handleApi(req, res) {
           return;
         }
         joinUserToRoom(room, username);
+        recordAudit("room_joined", username, room.code, {
+          via: "request_join_approved"
+        });
         sendJson(res, 200, {
           ok: true,
           status: "already_member",
@@ -3644,6 +4909,8 @@ async function handleApi(req, res) {
         return;
       }
       room.joinRequests.add(username);
+      scheduleRuntimeSnapshotPersistence();
+      recordAudit("room_join_requested", username, room.code, {});
       sendJson(res, 202, {
         ok: true,
         status: "pending"
@@ -3653,13 +4920,14 @@ async function handleApi(req, res) {
 
     if (!room.members.has(username)) {
       sendJson(res, 403, {
-        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Join this room first.")
+        error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Join this room first.")
       });
       return;
     }
 
     if (req.method === "POST" && roomPath.action === "leave") {
       const result = removeMemberFromRoom(room, username);
+      recordAudit("room_left", username, room.code, {});
       sendJson(res, 200, {
         ok: true,
         deleted: result.deleted,
@@ -3685,7 +4953,7 @@ async function handleApi(req, res) {
     if (req.method === "GET" && roomPath.action === "requests") {
       if (room.host !== username) {
         sendJson(res, 403, {
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Only the room leader can view requests.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Only the room leader can view requests.")
         });
         return;
       }
@@ -3694,9 +4962,12 @@ async function handleApi(req, res) {
     }
 
     if (req.method === "POST" && roomPath.action === "requests") {
+      if (!enforceRateLimit(req, res, RATE_LIMITS.ROOMS_REQUEST_JOIN, room.code)) {
+        return;
+      }
       if (room.host !== username) {
         sendJson(res, 403, {
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Only the room leader can manage requests.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Only the room leader can manage requests.")
         });
         return;
       }
@@ -3705,24 +4976,25 @@ async function handleApi(req, res) {
       const cleanAction = String(action || "").trim().toLowerCase();
       if (!isValidUsername(target)) {
         sendJson(res, 400, {
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Target username is required.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Target username is required.")
         });
         return;
       }
       if (!room.joinRequests.has(target)) {
         sendJson(res, 404, {
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "No join request found for this player.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "No join request found for this player.")
         });
         return;
       }
       if (cleanAction !== "approve" && cleanAction !== "reject") {
         sendJson(res, 400, {
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid action.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Invalid action.")
         });
         return;
       }
 
       room.joinRequests.delete(target);
+      scheduleRuntimeSnapshotPersistence();
       if (cleanAction === "approve") {
         room.approvedUsers.add(target);
         room.messageFloorByUser.set(target, 0);
@@ -3731,16 +5003,25 @@ async function handleApi(req, res) {
         if (!wasMember) {
           pushSystemMessage(room, "room_joined", { user: target });
         }
+        recordAudit("room_join_request_approved", username, room.code, {
+          target
+        });
         sendJson(res, 200, { ok: true, status: "approved", room: formatRoom(room, username) });
         return;
       }
       if (cleanAction === "reject") {
+        recordAudit("room_join_request_rejected", username, room.code, {
+          target
+        });
         sendJson(res, 200, { ok: true, status: "rejected", room: formatRoom(room, username) });
         return;
       }
     }
 
     if (req.method === "POST" && roomPath.action === "messages") {
+      if (!enforceRateLimit(req, res, RATE_LIMITS.ROOM_MESSAGE_POST, room.code)) {
+        return;
+      }
       const {
         text,
         clientMessageId,
@@ -3755,14 +5036,14 @@ async function handleApi(req, res) {
         const reactionEmoji = normalizeReactionEmoji(emoji);
         if (Number.isNaN(targetMessageId) || !targetMessageId || !reactionEmoji) {
           sendJson(res, 400, {
-            error: i18n(req, "بيانات التفاعل غير صالحة.", "Invalid reaction payload.")
+            error: i18n(req, "ط¨ظٹط§ظ†ط§طھ ط§ظ„طھظپط§ط¹ظ„ ط؛ظٹط± طµط§ظ„ط­ط©.", "Invalid reaction payload.")
           });
           return;
         }
         const targetMessage = findUserMessageById(room, targetMessageId);
         if (!targetMessage) {
           sendJson(res, 404, {
-            error: i18n(req, "لم يتم العثور على رسالة مناسبة للتفاعل.", "No eligible message was found for reaction.")
+            error: i18n(req, "ظ„ظ… ظٹطھظ… ط§ظ„ط¹ط«ظˆط± ط¹ظ„ظ‰ ط±ط³ط§ظ„ط© ظ…ظ†ط§ط³ط¨ط© ظ„ظ„طھظپط§ط¹ظ„.", "No eligible message was found for reaction.")
           });
           return;
         }
@@ -3803,13 +5084,13 @@ async function handleApi(req, res) {
       const messageText = String(text || "").trim();
       if (!messageText) {
         sendJson(res, 400, {
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Message is empty.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Message is empty.")
         });
         return;
       }
       if (messageText.length > 300) {
         sendJson(res, 400, {
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Message is too long.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Message is too long.")
         });
         return;
       }
@@ -3817,7 +5098,7 @@ async function handleApi(req, res) {
       const normalizedReplyToMessageId = normalizeReplyToMessageId(replyToMessageId);
       if (Number.isNaN(normalizedReplyToMessageId)) {
         sendJson(res, 400, {
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid reply identifier.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Invalid reply identifier.")
         });
         return;
       }
@@ -3828,7 +5109,7 @@ async function handleApi(req, res) {
           sendJson(res, 400, {
             error: i18n(
               req,
-              "أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.",
+              "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.",
               "You can only reply to an existing player message."
             )
           });
@@ -3839,7 +5120,7 @@ async function handleApi(req, res) {
       const normalizedClientMessageId = normalizeClientMessageId(clientMessageId);
       if (clientMessageId !== undefined && !normalizedClientMessageId) {
         sendJson(res, 400, {
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid message identifier.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Invalid message identifier.")
         });
         return;
       }
@@ -3867,10 +5148,13 @@ async function handleApi(req, res) {
     }
 
     if (req.method === "DELETE" && roomPath.action === "video") {
+      if (!enforceRateLimit(req, res, RATE_LIMITS.ROOM_VIDEO_SOURCE, room.code)) {
+        return;
+      }
       if (room.host !== username) {
         sendJson(res, 403, {
           code: "VIDEO_HOST_ONLY",
-          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Only the room leader can remove videos.")
+          error: i18n(req, "ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½ط·آ£ط¢آ¯ط·آ·ط¹ط›ط·آ¢ط¢آ½.", "Only the room leader can remove videos.")
         });
         return;
       }
@@ -3879,21 +5163,28 @@ async function handleApi(req, res) {
       if (hadVideo) {
         pushSystemMessage(room, "room_video_removed", { user: username });
       }
+      broadcastVideoSync(room);
+      recordAudit("room_video_removed", username, room.code, {
+        hadVideo
+      });
       sendJson(res, 200, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });
       return;
     }
 
     if (req.method === "POST" && roomPath.action === "video") {
-      if (room.host !== username) {
-        sendJson(res, 403, {
-          code: "VIDEO_HOST_ONLY",
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Only the room leader can upload videos.")
-        });
-        return;
-      }
-
+      const isRoomLeader = room.host === username;
       const contentType = String(req.headers["content-type"] || "").toLowerCase();
       if (contentType.includes("application/json")) {
+        if (!isRoomLeader) {
+          sendJson(res, 403, {
+            code: "VIDEO_HOST_ONLY",
+            error: i18n(req, "Only the room leader can remove videos.", "Only the room leader can remove videos.")
+          });
+          return;
+        }
+        if (!enforceRateLimit(req, res, RATE_LIMITS.ROOM_VIDEO_SOURCE, room.code)) {
+          return;
+        }
         const { action } = await parseBody(req);
         const clearAction = String(action || "").trim().toLowerCase();
         if (clearAction === "clear" || clearAction === "remove" || clearAction === "delete") {
@@ -3902,6 +5193,11 @@ async function handleApi(req, res) {
           if (hadVideo) {
             pushSystemMessage(room, "room_video_removed", { user: username });
           }
+          broadcastVideoSync(room);
+          recordAudit("room_video_removed", username, room.code, {
+            hadVideo,
+            via: "video_post"
+          });
           sendJson(res, 200, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });
           return;
         }
@@ -3911,11 +5207,14 @@ async function handleApi(req, res) {
         });
         return;
       }
+      if (!enforceRateLimit(req, res, RATE_LIMITS.ROOM_VIDEO_UPLOAD, room.code)) {
+        return;
+      }
 
       if (!ensureUploadsDir()) {
         sendJson(res, 503, {
           code: "VIDEO_STORAGE_UNAVAILABLE",
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Server storage is unavailable right now.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Server storage is unavailable right now.")
         });
         req.resume();
         return;
@@ -3935,7 +5234,7 @@ async function handleApi(req, res) {
         cleanupUploadedTemp();
         sendJson(res, 400, {
           code: "VIDEO_FILE_REQUIRED",
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Please choose a valid video file.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Please choose a valid video file.")
         });
         return;
       }
@@ -3943,7 +5242,7 @@ async function handleApi(req, res) {
         cleanupUploadedTemp();
         sendJson(res, 413, {
           code: "VIDEO_TOO_LARGE",
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ (أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ 1GB).", "Video file is too large (max 1GB).")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ (ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ 1GB).", "Video file is too large (max 1GB).")
         });
         return;
       }
@@ -3953,7 +5252,7 @@ async function handleApi(req, res) {
         cleanupUploadedTemp();
         sendJson(res, 415, {
           code: "VIDEO_INVALID_TYPE",
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½. أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ MP4 أ¯طںآ½أ¯طںآ½ WebM أ¯طںآ½أ¯طںآ½ OGG.", "Unsupported video type. Use MP4, WebM or OGG.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½. ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ MP4 ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ WebM ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ OGG.", "Unsupported video type. Use MP4, WebM or OGG.")
         });
         return;
       }
@@ -3967,59 +5266,77 @@ async function handleApi(req, res) {
         cleanupUploadedTemp();
         sendJson(res, 503, {
           code: "VIDEO_STORAGE_UNAVAILABLE",
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Server storage is unavailable right now.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Server storage is unavailable right now.")
         });
         return;
       }
 
       const normalizedDuration = normalizeRoomVideoDuration(multipart.fields.duration);
-      removeRoomVideoAsset(room);
-      room.video = {
-        id: randomToken(),
-        sourceType: "file",
-        youtubeId: "",
-        src: `${ROOM_VIDEO_PUBLIC_PREFIX}${storedFileName}`,
+      const enqueueRequested = true;
+      const videoEntry = createRoomFileVideoEntry(room, {
+        storedFileName,
         filename: cleanFileName,
         mimeType,
         size: Number(uploaded.size || 0),
         uploadedBy: username,
-        uploadedAt: Date.now(),
-        duration: normalizedDuration,
-        isYouTubeCached: false
-      };
-      room.videoSync = {
-        videoId: room.video.id,
-        playing: false,
-        baseTime: 0,
-        playbackRate: 1,
-        updatedAt: Date.now(),
-        clientNow: 0,
-        clientSeq: 0
-      };
+        duration: normalizedDuration
+      });
+      if (!videoEntry) {
+        removeFileIfExists(absolutePath);
+        sendJson(res, 500, {
+          code: "VIDEO_STORAGE_UNAVAILABLE",
+          error: i18n(req, "Server storage is unavailable right now.", "Server storage is unavailable right now.")
+        });
+        return;
+      }
+      const applyResult = setOrQueueRoomVideo(room, videoEntry, { enqueue: enqueueRequested });
+      const queueLength = Array.isArray(room.videoQueue) ? room.videoQueue.length : 0;
+      if (applyResult.queued) {
+        recordAudit("room_video_queued", username, room.code, {
+          fileName: cleanFileName,
+          queueLength
+        });
+        sendJson(res, 201, {
+          ok: true,
+          queued: true,
+          queueLength,
+          room: formatRoom(room, username),
+          video: formatRoomVideo(room),
+          queuedVideo: formatRoomVideoEntry(applyResult.queuedEntry, room)
+        });
+        return;
+      }
       pushSystemMessage(room, "room_video_set", {
         user: username,
-        name: String(room.video.filename || "video")
+        name: String(room.video?.filename || "video")
       });
-
-      sendJson(res, 201, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });
+      recordAudit("room_video_set", username, room.code, {
+        fileName: cleanFileName,
+        queueLength
+      });
+      broadcastVideoSync(room);
+      sendJson(res, 201, {
+        ok: true,
+        queued: false,
+        queueLength,
+        room: formatRoom(room, username),
+        video: formatRoomVideo(room)
+      });
       return;
     }
 
     if (req.method === "POST" && roomPath.action === "video-source") {
-      if (room.host !== username) {
-        sendJson(res, 403, {
-          code: "VIDEO_HOST_ONLY",
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Only the room leader can set video source.")
-        });
+      if (!enforceRateLimit(req, res, RATE_LIMITS.ROOM_VIDEO_SOURCE, room.code)) {
         return;
       }
 
       const { input } = await parseBody(req);
       const rawInput = String(input || "").trim();
+      const enqueueRequested = true;
       if (rawInput.length < 2) {
         sendJson(res, 400, {
           code: "YOUTUBE_INPUT_REQUIRED",
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Enter a YouTube URL or search text.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Enter a YouTube URL or search text.")
         });
         return;
       }
@@ -4030,7 +5347,7 @@ async function handleApi(req, res) {
       } catch (_error) {
         sendJson(res, 502, {
           code: "YOUTUBE_RESOLVE_FAILED",
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½. أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Could not reach YouTube right now. Try again.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½. ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Could not reach YouTube right now. Try again.")
         });
         return;
       }
@@ -4038,16 +5355,193 @@ async function handleApi(req, res) {
       if (!resolved?.videoId) {
         sendJson(res, 404, {
           code: "YOUTUBE_NOT_FOUND",
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "No matching YouTube video was found.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "No matching YouTube video was found.")
         });
         return;
       }
-      setRoomVideoFromYouTubeEmbed(room, resolved.videoId, username, resolved.label);
+      const videoEntry = createYouTubeEmbedVideoEntry(resolved.videoId, username, resolved.label);
+      if (!videoEntry) {
+        sendJson(res, 400, {
+          code: "YOUTUBE_INVALID_VIDEO",
+          error: i18n(req, "Invalid video action.", "Invalid video action.")
+        });
+        return;
+      }
+      const applyResult = setOrQueueRoomVideo(room, videoEntry, { enqueue: enqueueRequested });
+      const queueLength = Array.isArray(room.videoQueue) ? room.videoQueue.length : 0;
+      if (applyResult.queued) {
+        recordAudit("room_video_queued", username, room.code, {
+          source: "youtube",
+          youtubeId: resolved.videoId,
+          queueLength
+        });
+        sendJson(res, 201, {
+          ok: true,
+          queued: true,
+          queueLength,
+          room: formatRoom(room, username),
+          video: formatRoomVideo(room),
+          queuedVideo: formatRoomVideoEntry(applyResult.queuedEntry, room)
+        });
+        return;
+      }
       pushSystemMessage(room, "room_video_set", {
         user: username,
         name: String(room.video?.filename || resolved.label || "video")
       });
-      sendJson(res, 201, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });
+      recordAudit("room_video_set", username, room.code, {
+        source: "youtube",
+        youtubeId: resolved.videoId,
+        queueLength
+      });
+      broadcastVideoSync(room);
+      sendJson(res, 201, {
+        ok: true,
+        queued: false,
+        queueLength,
+        room: formatRoom(room, username),
+        video: formatRoomVideo(room)
+      });
+      return;
+    }
+
+    if (req.method === "GET" && roomPath.action === "video-queue") {
+      sendJson(res, 200, {
+        ok: true,
+        room: formatRoom(room, username),
+        video: formatRoomVideo(room),
+        queue: formatRoomVideoQueue(room),
+        queueLength: Array.isArray(room.videoQueue) ? room.videoQueue.length : 0,
+        historyCount: Array.isArray(room.videoHistory) ? room.videoHistory.length : 0
+      });
+      return;
+    }
+
+    if (req.method === "POST" && roomPath.action === "video-queue") {
+      if (!enforceRateLimit(req, res, RATE_LIMITS.ROOM_VIDEO_SOURCE, room.code)) {
+        return;
+      }
+      if (room.host !== username) {
+        sendJson(res, 403, {
+          code: "VIDEO_HOST_ONLY",
+          error: i18n(req, "Only the room leader can manage queue.", "Only the room leader can manage queue.")
+        });
+        return;
+      }
+      const payload = await parseBody(req);
+      const action = String(payload?.action || "").trim().toLowerCase();
+      if (!action) {
+        sendJson(res, 400, {
+          code: "VIDEO_QUEUE_ACTION_REQUIRED",
+          error: i18n(req, "Queue action is required.", "Queue action is required.")
+        });
+        return;
+      }
+      if (action === "next") {
+        const next = playNextQueuedRoomVideo(room);
+        if (!next) {
+          sendJson(res, 404, {
+            code: "VIDEO_QUEUE_EMPTY",
+            error: i18n(req, "Queue is empty.", "Queue is empty.")
+          });
+          return;
+        }
+        pushSystemMessage(room, "room_video_set", {
+          user: username,
+          name: String(next.filename || "video")
+        });
+        recordAudit("room_video_queue_next", username, room.code, {
+          queueLength: room.videoQueue.length
+        });
+        broadcastVideoSync(room);
+        sendJson(res, 200, {
+          ok: true,
+          action,
+          room: formatRoom(room, username),
+          video: formatRoomVideo(room),
+          queue: formatRoomVideoQueue(room),
+          queueLength: room.videoQueue.length,
+          historyCount: Array.isArray(room.videoHistory) ? room.videoHistory.length : 0
+        });
+        return;
+      }
+      if (action === "prev" || action === "previous") {
+        const previous = playPreviousRoomVideo(room);
+        if (!previous) {
+          sendJson(res, 404, {
+            code: "VIDEO_HISTORY_EMPTY",
+            error: i18n(req, "History is empty.", "History is empty.")
+          });
+          return;
+        }
+        pushSystemMessage(room, "room_video_set", {
+          user: username,
+          name: String(previous.filename || "video")
+        });
+        recordAudit("room_video_queue_previous", username, room.code, {
+          queueLength: room.videoQueue.length
+        });
+        broadcastVideoSync(room);
+        sendJson(res, 200, {
+          ok: true,
+          action,
+          room: formatRoom(room, username),
+          video: formatRoomVideo(room),
+          queue: formatRoomVideoQueue(room),
+          queueLength: room.videoQueue.length,
+          historyCount: Array.isArray(room.videoHistory) ? room.videoHistory.length : 0
+        });
+        return;
+      }
+      if (action === "remove") {
+        const rawIndex = Number(payload?.index ?? payload?.queueIndex);
+        const index = Number.isInteger(rawIndex) ? rawIndex : Math.floor(rawIndex);
+        const removed = removeQueuedRoomVideoAt(room, index);
+        if (!removed) {
+          sendJson(res, 404, {
+            code: "VIDEO_QUEUE_ITEM_NOT_FOUND",
+            error: i18n(req, "Queue item not found.", "Queue item not found.")
+          });
+          return;
+        }
+        recordAudit("room_video_queue_removed", username, room.code, {
+          index,
+          fileName: removed.filename || ""
+        });
+        broadcastVideoSync(room);
+        sendJson(res, 200, {
+          ok: true,
+          action,
+          room: formatRoom(room, username),
+          video: formatRoomVideo(room),
+          queue: formatRoomVideoQueue(room),
+          queueLength: room.videoQueue.length,
+          historyCount: Array.isArray(room.videoHistory) ? room.videoHistory.length : 0
+        });
+        return;
+      }
+      if (action === "clear") {
+        const clearHistory = parseBooleanFlag(payload?.clearHistory);
+        clearRoomVideoQueue(room, { clearHistory });
+        recordAudit("room_video_queue_cleared", username, room.code, {
+          clearHistory
+        });
+        broadcastVideoSync(room);
+        sendJson(res, 200, {
+          ok: true,
+          action,
+          room: formatRoom(room, username),
+          video: formatRoomVideo(room),
+          queue: formatRoomVideoQueue(room),
+          queueLength: room.videoQueue.length,
+          historyCount: Array.isArray(room.videoHistory) ? room.videoHistory.length : 0
+        });
+        return;
+      }
+      sendJson(res, 400, {
+        code: "VIDEO_QUEUE_ACTION_INVALID",
+        error: i18n(req, "Invalid action.", "Invalid action.")
+      });
       return;
     }
 
@@ -4055,14 +5549,14 @@ async function handleApi(req, res) {
       if (room.host !== username) {
         sendJson(res, 403, {
           code: "VIDEO_HOST_ONLY",
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Only the room leader can sync the video.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Only the room leader can sync the video.")
         });
         return;
       }
       if (!room.video) {
         sendJson(res, 404, {
           code: "VIDEO_NOT_FOUND",
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "No room video is available.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "No room video is available.")
         });
         return;
       }
@@ -4094,7 +5588,7 @@ async function handleApi(req, res) {
       const cleanAction = String(action || "").trim().toLowerCase();
       if (!["play", "pause", "seek", "rate", "stop"].includes(cleanAction)) {
         sendJson(res, 400, {
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid video sync action.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Invalid video sync action.")
         });
         return;
       }
@@ -4103,7 +5597,7 @@ async function handleApi(req, res) {
       if (clientVideoId && clientVideoId !== String(room.video.id || "")) {
         sendJson(res, 409, {
           code: "VIDEO_STALE",
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½. أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "This video version is outdated. Refresh room data.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½. ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "This video version is outdated. Refresh room data.")
         });
         return;
       }
@@ -4205,12 +5699,18 @@ async function handleApi(req, res) {
           ? Math.max(lastClientSeq, normalizedClientSeq)
           : lastClientSeq;
       }
-
+      if (!isHeartbeat) {
+        scheduleRuntimeSnapshotPersistence();
+      }
+      broadcastVideoSync(room);
       sendJson(res, 200, { ok: true, room: formatRoom(room, username), video: formatRoomVideo(room) });
       return;
     }
 
     if (req.method === "POST" && roomPath.action === "host") {
+      if (!enforceRateLimit(req, res, RATE_LIMITS.ADMIN_ACTION, room.code)) {
+        return;
+      }
       const {
         action,
         username: targetRaw
@@ -4223,7 +5723,7 @@ async function handleApi(req, res) {
             code: "HOST_CLAIM_FORBIDDEN",
             error: i18n(
               req,
-              "فقط مشرف موجود داخل الغرفة يمكنه امتلاك القيادة.",
+              "ظپظ‚ط· ظ…ط´ط±ظپ ظ…ظˆط¬ظˆط¯ ط¯ط§ط®ظ„ ط§ظ„ط؛ط±ظپط© ظٹظ…ظƒظ†ظ‡ ط§ظ…طھظ„ط§ظƒ ط§ظ„ظ‚ظٹط§ط¯ط©.",
               "Only a supervisor in this room can claim leadership."
             )
           });
@@ -4235,6 +5735,10 @@ async function handleApi(req, res) {
         if (previous !== username) {
           pushSystemMessage(room, "host_changed", { user: username, previous });
         }
+        scheduleRuntimeSnapshotPersistence();
+        recordAudit("room_host_claimed", username, room.code, {
+          previous
+        });
         sendJson(res, 200, { ok: true, room: formatRoom(room, username) });
         return;
       }
@@ -4244,7 +5748,7 @@ async function handleApi(req, res) {
           code: "HOST_TRANSFER_FORBIDDEN",
           error: i18n(
             req,
-            "فقط قائد الغرفة يمكنه نقل القيادة.",
+            "ظپظ‚ط· ظ‚ط§ط¦ط¯ ط§ظ„ط؛ط±ظپط© ظٹظ…ظƒظ†ظ‡ ظ†ظ‚ظ„ ط§ظ„ظ‚ظٹط§ط¯ط©.",
             "Only the room leader can transfer leadership."
           )
         });
@@ -4261,7 +5765,7 @@ async function handleApi(req, res) {
           code: "HOST_TRANSFER_TARGET_INVALID",
           error: i18n(
             req,
-            "يجب اختيار عضو آخر داخل الغرفة لنقل القيادة.",
+            "ظٹط¬ط¨ ط§ط®طھظٹط§ط± ط¹ط¶ظˆ ط¢ط®ط± ط¯ط§ط®ظ„ ط§ظ„ط؛ط±ظپط© ظ„ظ†ظ‚ظ„ ط§ظ„ظ‚ظٹط§ط¯ط©.",
             "Leader transfer target must be another member."
           )
         });
@@ -4272,14 +5776,21 @@ async function handleApi(req, res) {
       room.host = target;
       room.pendingHostRestore = null;
       pushSystemMessage(room, "host_changed", { user: target, previous });
+      recordAudit("room_host_transferred", username, room.code, {
+        previous,
+        target
+      });
       sendJson(res, 200, { ok: true, room: formatRoom(room, username) });
       return;
     }
 
     if (req.method === "POST" && roomPath.action === "kick") {
+      if (!enforceRateLimit(req, res, RATE_LIMITS.ADMIN_ACTION, room.code)) {
+        return;
+      }
       if (room.host !== username) {
         sendJson(res, 403, {
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Only the room leader can kick players.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Only the room leader can kick players.")
         });
         return;
       }
@@ -4288,26 +5799,26 @@ async function handleApi(req, res) {
       const target = normalizeUsername(targetRaw);
       if (!isValidUsername(target)) {
         sendJson(res, 400, {
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Target username is required.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Target username is required.")
         });
         return;
       }
       if (target === room.host) {
         sendJson(res, 400, {
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Leader cannot kick themselves.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Leader cannot kick themselves.")
         });
         return;
       }
       if (isSupervisor(target)) {
         sendJson(res, 403, {
           code: "SUPERVISOR_KICK_FORBIDDEN",
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "A supervisor cannot be kicked from this room.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "A supervisor cannot be kicked from this room.")
         });
         return;
       }
       if (!room.members.has(target)) {
         sendJson(res, 404, {
-          error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Player is not in this room.")
+          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Player is not in this room.")
         });
         return;
       }
@@ -4319,18 +5830,24 @@ async function handleApi(req, res) {
       }
       room.joinRequests.delete(target);
       pushSystemMessage(room, "player_kicked", { user: target });
+      disconnectRoomMemberSockets(room.code, target, "kicked");
+      scheduleRuntimeSnapshotPersistence();
+      broadcastRoomTouch(room, "member_kicked", { username: target });
+      recordAudit("room_member_kicked", username, room.code, {
+        target
+      });
       sendJson(res, 200, { room: formatRoom(room, username) });
       return;
     }
 
     sendJson(res, 404, {
-      error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Room endpoint not found.")
+      error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Room endpoint not found.")
     });
     return;
   }
 
   sendJson(res, 404, {
-    error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Endpoint not found.")
+    error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Endpoint not found.")
   });
 }
 
@@ -4360,24 +5877,24 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       sendJson(res, 413, {
-        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Payload is too large.")
+        error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Payload is too large.")
       });
       return;
     }
     if (error.message === "Invalid JSON") {
       sendJson(res, 400, {
-        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ JSON أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid JSON body.")
+        error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ JSON ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Invalid JSON body.")
       });
       return;
     }
     if (error.message === "Invalid multipart form data") {
       sendJson(res, 400, {
-        error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Invalid video upload payload.")
+        error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Invalid video upload payload.")
       });
       return;
     }
     sendJson(res, 500, {
-      error: i18n(req, "أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½ أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½أ¯طںآ½.", "Internal server error.")
+      error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Internal server error.")
     });
   }
 });
@@ -4385,12 +5902,17 @@ const server = http.createServer(async (req, res) => {
 // Large room-video uploads can exceed default Node request timeout.
 server.requestTimeout = 0;
 server.headersTimeout = 120000;
+setupWebSocketServer(server);
 
 async function bootstrap() {
   await loadUsers();
   loadModeration();
   ensureUploadsDir();
   loadYouTubeCache();
+  await initPgRuntime();
+  if (pgRuntimeEnabled) {
+    await loadRuntimeSnapshotFromPg();
+  }
   server.listen(PORT, () => {
     console.log(`Server is running on http://localhost:${PORT}`);
   });
@@ -4400,3 +5922,5 @@ bootstrap().catch((error) => {
   console.error("Failed to bootstrap server:", error.message);
   process.exit(1);
 });
+
+

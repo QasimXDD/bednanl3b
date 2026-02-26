@@ -2,6 +2,7 @@
 const USER_KEY = "bedna_user";
 const LANG_KEY = "bedna_lang";
 const ANNOUNCEMENT_SEEN_KEY = "bedna_seen_announcement_id";
+const ROOM_VIDEO_VOLUME_KEY = "bedna_room_video_volume";
 
 const roomName = document.getElementById("roomName");
 const roomCode = document.getElementById("roomCode");
@@ -42,6 +43,8 @@ const chatMessages = document.getElementById("chatMessages");
 const chatForm = document.getElementById("chatForm");
 const chatInput = document.getElementById("chatInput");
 const sendBtn = document.getElementById("sendBtn");
+const chatComposerOpenBtn = document.getElementById("chatComposerOpenBtn");
+const chatComposerCloseBtn = document.getElementById("chatComposerCloseBtn");
 const chatReplyDraft = document.getElementById("chatReplyDraft");
 const chatReplyDraftLabel = document.getElementById("chatReplyDraftLabel");
 const chatReplyDraftText = document.getElementById("chatReplyDraftText");
@@ -103,8 +106,12 @@ const videoYouTubeMask = document.getElementById("videoYouTubeMask");
 const videoEmptyNotice = document.getElementById("videoEmptyNotice");
 const videoEmptyNoticeLine1 = document.getElementById("videoEmptyNoticeLine1");
 const videoEmptyNoticeLine2 = document.getElementById("videoEmptyNoticeLine2");
+const videoQueueCountdownNotice = document.getElementById("videoQueueCountdownNotice");
 const videoControlsBar = document.getElementById("videoControlsBar");
 const videoPlayPauseBtn = document.getElementById("videoPlayPauseBtn");
+const videoVolumeWrap = document.getElementById("videoVolumeWrap");
+const videoVolumeBtn = document.getElementById("videoVolumeBtn");
+const videoVolumeRange = document.getElementById("videoVolumeRange");
 const videoSeekRange = document.getElementById("videoSeekRange");
 const videoTimeText = document.getElementById("videoTimeText");
 const videoFullscreenBtn = document.getElementById("videoFullscreenBtn");
@@ -122,6 +129,12 @@ const videoYoutubeInput = document.getElementById("videoYoutubeInput");
 const videoYoutubeBtn = document.getElementById("videoYoutubeBtn");
 const videoClearBtn = document.getElementById("videoClearBtn");
 const videoClearTopBtn = document.getElementById("videoClearTopBtn");
+const videoQueueTools = document.getElementById("videoQueueTools");
+const videoQueueTitle = document.getElementById("videoQueueTitle");
+const videoQueuePrevBtn = document.getElementById("videoQueuePrevBtn");
+const videoQueueNextBtn = document.getElementById("videoQueueNextBtn");
+const videoQueueEmpty = document.getElementById("videoQueueEmpty");
+const videoQueueList = document.getElementById("videoQueueList");
 
 const query = new URLSearchParams(window.location.search);
 const code = String(query.get("code") || "").trim().toUpperCase();
@@ -174,6 +187,7 @@ const AVATAR_QUALITY_STEPS = [0.86, 0.78, 0.7, 0.62, 0.54, 0.46, 0.38];
 let avatarWebpSupported = null;
 let retryableChatSend = null;
 let chatLastOutsidePointerAt = 0;
+let mobileChatComposerOpen = false;
 let activeReplyTarget = null;
 const renderedMessageIds = new Set();
 const CHAT_SEND_RETRY_WINDOW_MS = 30000;
@@ -192,16 +206,24 @@ const ROOM_VIDEO_SYNC_STALE_PAUSE_REWIND_SEC = 0.2;
 const ROOM_VIDEO_CONTROLS_HIDE_DELAY_MS = 2200;
 const ROOM_VIDEO_CONTROLS_AUTO_HIDE = true;
 const ROOM_VIDEO_EVENT_SUPPRESS_MS = 160;
+const ROOM_VIDEO_AUTO_NEXT_DELAY_SEC = 5;
+const ROOM_VIDEO_SOURCE_SWITCH_GUARD_MS = 2400;
+const ROOM_VIDEO_REWIND_ALLOW_MS = 2400;
+const ROOM_VIDEO_SEEK_RANGE_MAX = 10000;
+const ROOM_VIDEO_DEFAULT_VOLUME = 1;
 const FULLSCREEN_CHAT_NOTICE_TIMEOUT_MS = 2600;
 let roomVideoState = null;
 let roomVideoSyncState = null;
+let roomVideoQueueState = [];
 let activeRoomVideoId = "";
 let roomVideoMetadataReady = false;
 let suppressRoomVideoEvents = false;
 let isUploadingRoomVideo = false;
+let isManagingRoomVideoQueue = false;
 let roomVideoSyncToastUntil = 0;
 let roomVideoSeekDragging = false;
 let roomVideoControlsHideTimer = null;
+let roomVideoProgressAnimFrame = 0;
 let fullscreenChatNoticeEl = null;
 let fullscreenChatNoticeTimer = null;
 let youTubeApiReadyPromise = null;
@@ -220,8 +242,17 @@ let roomVideoSyncHeartbeatTimer = null;
 let roomVideoLeaderIgnoreSyncUntil = 0;
 let roomVideoSyncClientSeq = 0;
 let roomVideoLastKnownTime = 0;
+let roomVideoSourceChangedAt = 0;
+let roomVideoAllowRewindUntil = 0;
 let roomVideoPageLeaving = false;
 let roomVideoResumePending = false;
+let roomVideoEndTransitionInFlight = false;
+let roomVideoAutoNextCountdownTimer = null;
+let roomVideoAutoNextCountdownSeconds = 0;
+let roomVideoAutoNextVideoId = "";
+let roomVideoLocalVolume = ROOM_VIDEO_DEFAULT_VOLUME;
+let roomVideoLocalMuted = false;
+let roomVideoVolumeBeforeMute = ROOM_VIDEO_DEFAULT_VOLUME;
 let roomVideoUploadOverlay = null;
 let roomVideoUploadTitleEl = null;
 let roomVideoUploadHintEl = null;
@@ -257,10 +288,14 @@ const I18N = {
     chatTitle: "دردشة الغرفة",
     chatPlaceholder: "اكتب رسالتك...",
     sendBtn: "إرسال",
+    chatComposerOpen: "فتح الكتابة",
+    chatComposerClose: "إغلاق الكتابة",
     videoTitle: "فيديو الغرفة",
     videoNoVideo: "لا يوجد فيديو مرفوع بعد.",
     videoNowPlaying: "الفيديو الحالي: {name}",
-    videoHint: "قائد الغرفة فقط يمكنه رفع ومزامنة الفيديو.",
+    videoNowPlayingWithUser: "الفيديو الحالي: {name} • بواسطة {user}",
+    videoByUserInline: "• بواسطة {user}",
+    videoHint: "يمكن لكل الأعضاء إضافة فيديوهات، والتحكم بالمزامنة بيد قائد الغرفة.",
     videoEmptyLine1: "تم إنشاء هذا الموقع لتسهيل مشاهدة الأفلام والفيديوهات.",
     videoEmptyLine2: "صُمم هذا الموقع لتجربة مشاهدة جماعية مستقرة وسلسة.",
     videoToolsTitle: "أدوات الفيديو",
@@ -271,7 +306,7 @@ const I18N = {
     videoYoutubePlaceholder: "الصق رابط يوتيوب أو اكتب اسم الفيلم/الحلقة",
     videoUploadBtn: "رفع الفيديو",
     videoYoutubeBtn: "تشغيل من يوتيوب",
-    videoClearBtn: "حذف الفيديو الحالي",
+    videoClearBtn: "تخطي الفيديو",
     videoUploadBusy: "جارٍ رفع الفيديو...",
     videoYoutubeBusy: "جارٍ جلب الفيديو...",
     videoUploadNeedFile: "اختر ملف فيديو أولًا.",
@@ -280,7 +315,7 @@ const I18N = {
     videoYoutubeNotFound: "لم يتم العثور على نتيجة مناسبة في يوتيوب.",
     videoYoutubeResolveFail: "تعذر جلب نتائج يوتيوب الآن.",
     videoUploadSuccess: "تم رفع الفيديو وتحديث المزامنة.",
-    videoClearSuccess: "تم حذف الفيديو الحالي من الغرفة.",
+    videoClearSuccess: "تم تخطي الفيديو الحالي.",
     videoUploadTooLarge: "حجم الفيديو كبير جدًا (الحد 1GB).",
     videoUploadType: "نوع الفيديو غير مدعوم. استخدم MP4 أو WebM أو OGG.",
     videoUploadNetworkError: "تعذر رفع الفيديو بسبب مشكلة اتصال. تأكد من الإنترنت وحاول مرة أخرى.",
@@ -295,6 +330,23 @@ const I18N = {
     videoUploadModalUploading: "جاري رفع البيانات...",
     videoUploadModalProcessing: "تم رفع البيانات، جارٍ المعالجة...",
     videoUploadModalDone: "اكتمل رفع الفيديو.",
+    videoQueueTitle: "طابور الفيديو",
+    videoQueueHistoryText: "المشغّل سابقًا: {count}",
+    videoQueuePrevBtn: "السابق",
+    videoQueueNextBtn: "التالي",
+    videoQueueClearBtn: "تفريغ الطابور",
+    videoQueueEmpty: "الطابور فارغ.",
+    videoQueueQueuedUpload: "تمت إضافة الفيديو إلى الطابور.",
+    videoQueueQueuedYoutube: "تمت إضافة فيديو يوتيوب إلى الطابور.",
+    videoQueueNextDone: "تم تشغيل العنصر التالي.",
+    videoQueueAutoNextCountdown: "الفيديو القادم سيبدأ بعد {seconds} ثوانٍ",
+    videoQueuePrevDone: "تم الرجوع إلى الفيديو السابق.",
+    videoQueueClearDone: "تم تفريغ الطابور.",
+    videoQueueRemoveDone: "تم حذف العنصر من الطابور.",
+    videoQueueRemoveItem: "حذف من الطابور",
+    videoQueueErrorEmpty: "الطابور فارغ.",
+    videoQueueErrorHistoryEmpty: "لا يوجد سجل سابق.",
+    videoQueueErrorItemNotFound: "العنصر غير موجود.",
     requestNetworkError: "تعذر الاتصال بالخادم. تأكد من الإنترنت وحاول مرة أخرى.",
     videoHostOnly: "التحكم بالفيديو متاح لقائد الغرفة فقط.",
     videoSyncFailed: "تعذر مزامنة الفيديو.",
@@ -302,6 +354,9 @@ const I18N = {
     videoIncomingMessage: "رسالة جديدة من {user}",
     videoPlayBtn: "تشغيل",
     videoPauseBtn: "إيقاف",
+    videoMuteBtn: "كتم الصوت",
+    videoUnmuteBtn: "تشغيل الصوت",
+    videoVolumeLabel: "صوت الفيديو (محلي)",
     videoFullscreenBtn: "ملء الشاشة",
     videoExitFullscreenBtn: "خروج",
     replyBtn: "رد",
@@ -421,10 +476,14 @@ const I18N = {
     chatTitle: "Room Chat",
     chatPlaceholder: "Type your message...",
     sendBtn: "Send",
+    chatComposerOpen: "Open typing",
+    chatComposerClose: "Hide typing",
     videoTitle: "Room Video",
     videoNoVideo: "No video uploaded yet.",
     videoNowPlaying: "Current video: {name}",
-    videoHint: "Only the room leader can upload and sync video.",
+    videoNowPlayingWithUser: "Current video: {name} • by {user}",
+    videoByUserInline: "• by {user}",
+    videoHint: "All members can add videos, while sync controls stay with the room leader.",
     videoEmptyLine1: "This site was created to make watching movies and videos easier.",
     videoEmptyLine2: "Built for smooth and reliable group watching sessions.",
     videoToolsTitle: "Video Tools",
@@ -435,7 +494,7 @@ const I18N = {
     videoYoutubePlaceholder: "Paste a YouTube URL or type a movie/episode title",
     videoUploadBtn: "Upload Video",
     videoYoutubeBtn: "Play from YouTube",
-    videoClearBtn: "Remove Current Video",
+    videoClearBtn: "Skip Video",
     videoUploadBusy: "Uploading...",
     videoYoutubeBusy: "Resolving video...",
     videoUploadNeedFile: "Choose a video file first.",
@@ -444,7 +503,7 @@ const I18N = {
     videoYoutubeNotFound: "No suitable YouTube result was found.",
     videoYoutubeResolveFail: "Could not resolve YouTube right now.",
     videoUploadSuccess: "Video uploaded and sync updated.",
-    videoClearSuccess: "Current room video removed.",
+    videoClearSuccess: "Current video skipped.",
     videoUploadTooLarge: "Video is too large (max 1GB).",
     videoUploadType: "Unsupported video type. Use MP4, WebM, or OGG.",
     videoUploadNetworkError: "Video upload failed due to a network issue. Check your connection and try again.",
@@ -459,6 +518,23 @@ const I18N = {
     videoUploadModalUploading: "Uploading data...",
     videoUploadModalProcessing: "Upload complete, processing...",
     videoUploadModalDone: "Video upload completed.",
+    videoQueueTitle: "Video Queue",
+    videoQueueHistoryText: "Played before: {count}",
+    videoQueuePrevBtn: "Previous",
+    videoQueueNextBtn: "Next",
+    videoQueueClearBtn: "Clear Queue",
+    videoQueueEmpty: "Queue is empty.",
+    videoQueueQueuedUpload: "Video added to queue.",
+    videoQueueQueuedYoutube: "YouTube video added to queue.",
+    videoQueueNextDone: "Moved to next queued video.",
+    videoQueueAutoNextCountdown: "Next video starts in {seconds}s",
+    videoQueuePrevDone: "Returned to previous video.",
+    videoQueueClearDone: "Queue cleared.",
+    videoQueueRemoveDone: "Queue item removed.",
+    videoQueueRemoveItem: "Remove from queue",
+    videoQueueErrorEmpty: "Queue is empty.",
+    videoQueueErrorHistoryEmpty: "History is empty.",
+    videoQueueErrorItemNotFound: "Queue item was not found.",
     requestNetworkError: "Could not reach the server. Check your connection and try again.",
     videoHostOnly: "Video controls are leader-only.",
     videoSyncFailed: "Failed to sync video.",
@@ -466,6 +542,9 @@ const I18N = {
     videoIncomingMessage: "New message from {user}",
     videoPlayBtn: "Play",
     videoPauseBtn: "Pause",
+    videoMuteBtn: "Mute",
+    videoUnmuteBtn: "Unmute",
+    videoVolumeLabel: "Video volume (local)",
     videoFullscreenBtn: "Fullscreen",
     videoExitFullscreenBtn: "Exit",
     replyBtn: "Reply",
@@ -621,9 +700,11 @@ function renderSoundToggle() {
   if (!soundToggleBtn || !window.BednaSound) {
     return;
   }
-  const enabled = window.BednaSound.isEnabled();
-  soundToggleBtn.textContent = enabled ? t("soundOn") : t("soundOff");
-  soundToggleBtn.classList.toggle("off", !enabled);
+  soundToggleBtn.textContent = t("soundOn");
+  soundToggleBtn.classList.remove("off");
+  soundToggleBtn.disabled = true;
+  soundToggleBtn.setAttribute("aria-disabled", "true");
+  soundToggleBtn.title = t("soundOn");
 }
 
 function createClientMessageId() {
@@ -660,21 +741,21 @@ function setChatSendingState(sending) {
   }
 }
 
-function focusChatInputForContinuousTyping(submitStartedAt = 0) {
+function focusChatInputForContinuousTyping(submitStartedAt = 0, { force = false } = {}) {
   if (!chatInput || !chatForm) {
     return;
   }
-  if (Number(submitStartedAt) > 0 && chatLastOutsidePointerAt > Number(submitStartedAt)) {
+  if (!force && Number(submitStartedAt) > 0 && chatLastOutsidePointerAt > Number(submitStartedAt)) {
     return;
   }
   const active = document.activeElement;
-  if (
+  if (!force && (
     active &&
     active !== document.body &&
     active !== document.documentElement &&
     active !== chatInput &&
     !(chatForm.contains(active))
-  ) {
+  )) {
     return;
   }
   const runFocus = () => {
@@ -690,9 +771,58 @@ function focusChatInputForContinuousTyping(submitStartedAt = 0) {
   };
   if (typeof requestAnimationFrame === "function") {
     requestAnimationFrame(runFocus);
+  } else {
+    setTimeout(runFocus, 0);
+  }
+  if (!isRoomMobileLayout()) {
     return;
   }
-  setTimeout(runFocus, 0);
+  // Mobile keyboards may close on submit; retry focus briefly to keep typing flow.
+  [60, 150, 280].forEach((delayMs) => {
+    setTimeout(runFocus, delayMs);
+  });
+}
+
+function setMobileChatComposerOpen(open, { focusInput = false, blurInput = false } = {}) {
+  if (!chatForm || !chatInput) {
+    return;
+  }
+  const mobile = isRoomMobileLayout();
+  if (!mobile) {
+    mobileChatComposerOpen = true;
+    chatForm.classList.remove("mobile-chat-collapsed");
+    document.body.classList.remove("mobile-chat-composer-open");
+    if (chatComposerOpenBtn) {
+      chatComposerOpenBtn.classList.add("hidden");
+    }
+    if (chatComposerCloseBtn) {
+      chatComposerCloseBtn.classList.add("hidden");
+    }
+    return;
+  }
+
+  mobileChatComposerOpen = Boolean(open);
+  chatForm.classList.toggle("mobile-chat-collapsed", !mobileChatComposerOpen);
+  document.body.classList.toggle("mobile-chat-composer-open", mobileChatComposerOpen);
+  if (chatComposerOpenBtn) {
+    chatComposerOpenBtn.classList.toggle("hidden", mobileChatComposerOpen);
+  }
+  if (chatComposerCloseBtn) {
+    chatComposerCloseBtn.classList.toggle("hidden", !mobileChatComposerOpen);
+  }
+  if (!mobileChatComposerOpen && blurInput) {
+    chatInput.blur();
+  }
+  if (mobileChatComposerOpen && focusInput) {
+    focusChatInputForContinuousTyping(0, { force: true });
+  }
+}
+
+function closeMobileChatComposerFromUserAction() {
+  if (!isRoomMobileLayout()) {
+    return;
+  }
+  setMobileChatComposerOpen(false, { blurInput: true });
 }
 
 function shortenReplyText(text, max = 90) {
@@ -1000,9 +1130,112 @@ function formatChatTime(ts) {
   }).format(new Date(value));
 }
 
+function normalizeCountryCode(value) {
+  const code = String(value || "").trim().toUpperCase();
+  return /^[A-Z]{2}$/.test(code) ? code : "";
+}
+
+function extractCountryCodeFromLocaleTag(rawTag) {
+  const tag = String(rawTag || "").trim();
+  if (!tag) {
+    return "";
+  }
+  const parts = tag.split(/[-_]/g);
+  if (parts.length < 2) {
+    return "";
+  }
+  for (let i = 1; i < parts.length; i += 1) {
+    const candidate = normalizeCountryCode(parts[i]);
+    if (candidate) {
+      return candidate;
+    }
+  }
+  return "";
+}
+
+function detectClientCountryCode() {
+  const localeCandidates = [];
+  if (typeof navigator !== "undefined") {
+    if (Array.isArray(navigator.languages)) {
+      localeCandidates.push(...navigator.languages);
+    }
+    if (typeof navigator.language === "string") {
+      localeCandidates.push(navigator.language);
+    }
+  }
+  try {
+    localeCandidates.push(Intl.DateTimeFormat().resolvedOptions().locale);
+  } catch (_error) {
+    // Ignore locale resolution failure and continue.
+  }
+
+  for (const locale of localeCandidates) {
+    const fromLocale = extractCountryCodeFromLocaleTag(locale);
+    if (fromLocale) {
+      return fromLocale;
+    }
+  }
+  return "";
+}
+
+const CLIENT_COUNTRY_CODE = detectClientCountryCode();
+
+function countryCodeToFlagEmoji(countryCode) {
+  const code = normalizeCountryCode(countryCode);
+  if (!code) {
+    return "";
+  }
+  return String.fromCodePoint(...Array.from(code).map((ch) => ch.charCodeAt(0) + 127397));
+}
+
+function countryCodeToFlagIconUrl(countryCode) {
+  const code = normalizeCountryCode(countryCode);
+  if (!code) {
+    return "";
+  }
+  return `https://flagcdn.com/24x18/${code.toLowerCase()}.png`;
+}
+
+function createCountryFlagBadge(countryCode) {
+  const code = normalizeCountryCode(countryCode);
+  if (!code) {
+    return null;
+  }
+  const badge = document.createElement("span");
+  badge.className = "country-flag-badge";
+  badge.title = code;
+  badge.setAttribute("aria-label", code);
+  const img = document.createElement("img");
+  img.src = countryCodeToFlagIconUrl(code);
+  img.alt = code;
+  img.width = 24;
+  img.height = 18;
+  img.decoding = "async";
+  img.referrerPolicy = "no-referrer";
+  img.addEventListener(
+    "error",
+    () => {
+      const fallback = countryCodeToFlagEmoji(code);
+      badge.classList.add("is-fallback-text");
+      badge.textContent = fallback || code;
+    },
+    { once: true }
+  );
+  badge.appendChild(img);
+  return badge;
+}
+
 function displayNameFor(username) {
   const profile = profileCache.get(username);
   return profile?.displayName || username;
+}
+
+function videoUploaderName(username) {
+  const clean = String(username || "").trim();
+  if (!clean) {
+    return "";
+  }
+  return displayNameFor(clean);
 }
 
 function isSupervisorUser(username) {
@@ -1110,6 +1343,11 @@ async function openProfileModal(username) {
     const profileIdentity = document.createElement("span");
     profileIdentity.textContent = `@${profile.username} • ${profile.displayName || profile.username}`;
     profileUsername.appendChild(profileIdentity);
+    const profileCountryCode = profile.countryCode || (isSelf ? CLIENT_COUNTRY_CODE : "");
+    const countryFlagBadge = createCountryFlagBadge(profileCountryCode);
+    if (countryFlagBadge) {
+      profileUsername.appendChild(countryFlagBadge);
+    }
     if (profile.isSupervisor) {
       profileUsername.appendChild(createSupervisorBadge());
     }
@@ -1556,7 +1794,13 @@ function triggerAutoPlayForNewRoomVideo() {
       }
       youTubeLeaderPlayPending = false;
       started = true;
-      const current = getSafeYouTubeCurrentTime(getRoomVideoDuration(), { keepMonotonicWhilePlaying: true });
+      if (typeof youTubePlayer.seekTo === "function") {
+        try {
+          youTubePlayer.seekTo(0, true);
+        } catch (_error) {
+          // Ignore seek failures and continue sync request.
+        }
+      }
       if (typeof youTubePlayer.playVideo === "function") {
         try {
           youTubePlayer.playVideo();
@@ -1564,13 +1808,26 @@ function triggerAutoPlayForNewRoomVideo() {
           // Ignore and continue sync request.
         }
       }
-      sendRoomVideoSync("play", { currentTimeOverride: current, quietError: true });
+      sendRoomVideoSync("play", {
+        currentTimeOverride: 0,
+        allowRewind: true,
+        quietError: true
+      });
       return;
     }
     if (roomVideoPlayer) {
       started = true;
+      try {
+        roomVideoPlayer.currentTime = 0;
+      } catch (_error) {
+        // Ignore currentTime setter errors on not-ready media.
+      }
       roomVideoPlayer.play().catch(() => {});
-      sendRoomVideoSync("play");
+      sendRoomVideoSync("play", {
+        currentTimeOverride: 0,
+        allowRewind: true,
+        quietError: true
+      });
     }
   };
   run();
@@ -1581,7 +1838,7 @@ function triggerAutoPlayForNewRoomVideo() {
 function setVideoToolsDrawerOpen(open) {
   const mobile = isRoomMobileLayout();
   placeVideoToolsInBody(mobile);
-  const canControl = isRoomLeader();
+  const canControl = canUseVideoTools();
   const canOpen = mobile && canControl;
   const nextOpen = Boolean(open && canOpen);
   videoToolsOpen = nextOpen;
@@ -1637,7 +1894,7 @@ function syncPlayersDrawerMode() {
   if (!mobile) {
     playersDrawerOpen = false;
     videoToolsOpen = false;
-    const canControlVideo = isRoomLeader();
+    const canControlVideo = canUseVideoTools();
     if (playersDrawer) {
       playersDrawer.classList.remove("hidden", "is-open");
       playersDrawer.setAttribute("aria-hidden", "false");
@@ -1667,16 +1924,22 @@ function syncPlayersDrawerMode() {
       videoToolsToggleIcon.textContent = "+";
     }
     updateVideoClearButtonState();
+    setMobileChatComposerOpen(true);
     syncRoomBodyLock();
     return;
   }
   setPlayersDrawerOpen(playersDrawerOpen);
   setVideoToolsDrawerOpen(videoToolsOpen);
+  setMobileChatComposerOpen(mobileChatComposerOpen);
   updateVideoClearButtonState();
 }
 
 function isRoomLeader() {
   return Boolean(me && host && me === host);
+}
+
+function canUseVideoTools() {
+  return Boolean(me);
 }
 
 function parseYouTubeVideoId(value) {
@@ -1851,27 +2114,36 @@ function markRoomVideoUserInteracted() {
     return;
   }
   roomVideoUserInteracted = true;
-  if (roomVideoPlayer && roomVideoPlayer.muted) {
-    roomVideoPlayer.muted = false;
-    if (roomVideoSyncState?.playing && !isYouTubeRoomVideo(roomVideoState)) {
+  if (roomVideoPlayer) {
+    const effectiveVolume = getEffectiveRoomVideoVolume();
+    roomVideoPlayer.volume = effectiveVolume;
+    roomVideoPlayer.muted = effectiveVolume <= 0.001;
+    if (effectiveVolume > 0.001 && roomVideoSyncState?.playing && !isYouTubeRoomVideo(roomVideoState)) {
       roomVideoPlayer.play().catch(() => {});
     }
   }
+  applyLocalRoomVideoVolumeToPlayers();
 }
 
 function tryUnlockYouTubeAudioFromGesture() {
   if (!shouldUnlockYouTubeAudio()) {
     return false;
   }
+  const effectiveVolume = getEffectiveRoomVideoVolume();
+  const targetPercent = Math.round(clampRoomVideoVolume(effectiveVolume) * 100);
   try {
+    if (typeof youTubePlayer.setVolume === "function") {
+      youTubePlayer.setVolume(targetPercent);
+    }
+    if (targetPercent <= 0) {
+      if (typeof youTubePlayer.mute === "function") {
+        youTubePlayer.mute();
+      }
+      youTubeAudioUnlockNeeded = false;
+      return true;
+    }
     if (typeof youTubePlayer.unMute === "function") {
       youTubePlayer.unMute();
-    }
-    if (typeof youTubePlayer.setVolume === "function" && typeof youTubePlayer.getVolume === "function") {
-      const currentVolume = Number(youTubePlayer.getVolume());
-      if (!Number.isFinite(currentVolume) || currentVolume <= 0) {
-        youTubePlayer.setVolume(100);
-      }
     }
     if (roomVideoSyncState?.playing && typeof youTubePlayer.playVideo === "function") {
       youTubePlayer.playVideo();
@@ -1993,6 +2265,7 @@ async function ensureYouTubePlayer(videoId, { autoplay = true } = {}) {
           hardenYouTubeIframeUi();
           youTubeState = Number(event?.target?.getPlayerState?.() ?? -1);
           setYouTubeMaskVisible(youTubeState !== 1);
+          applyLocalRoomVideoVolumeToPlayers();
           updateRoomVideoControls();
           startYouTubeTick();
           if (autoplay && event?.target?.playVideo) {
@@ -2022,6 +2295,30 @@ async function ensureYouTubePlayer(videoId, { autoplay = true } = {}) {
             scheduleRoomVideoControlsAutoHide();
           } else {
             setRoomVideoControlsVisible(true);
+          }
+          if (youTubeState === 0 && roomVideoState && isYouTubeRoomVideo(roomVideoState)) {
+            const duration = getYouTubeDuration();
+            const current = getSafeYouTubeCurrentTime(duration);
+            if (duration > 2 && current < duration - 1.2) {
+              applyRoomVideoSyncToPlayer({ forceSeek: true });
+              return;
+            }
+            const endTime = duration > 0 && current >= duration - 0.35 ? duration : current;
+            roomVideoLastKnownTime = endTime;
+            const endedVideoId = String(activeRoomVideoId || roomVideoState?.id || "").trim();
+            if (roomVideoQueueState.length > 0) {
+              startRoomVideoAutoNextCountdown(endedVideoId);
+              if (isRoomLeader()) {
+                handleLeaderVideoEndedAutoAdvance(endTime);
+              }
+              return;
+            }
+            cancelRoomVideoAutoNextCountdown();
+            if (isRoomLeader()) {
+              handleLeaderVideoEndedAutoAdvance(endTime);
+              return;
+            }
+            applyRoomVideoSyncToPlayer({ forceSeek: true });
           }
           // Leader sync is sent only from explicit UI controls + heartbeat.
           // Avoid broadcasting browser-generated state changes on tab hide/show.
@@ -2228,6 +2525,38 @@ function revealRoomVideoControls() {
   scheduleRoomVideoControlsAutoHide();
 }
 
+function stopRoomVideoProgressAnimation() {
+  if (!roomVideoProgressAnimFrame || typeof cancelAnimationFrame !== "function") {
+    roomVideoProgressAnimFrame = 0;
+    return;
+  }
+  cancelAnimationFrame(roomVideoProgressAnimFrame);
+  roomVideoProgressAnimFrame = 0;
+}
+
+function shouldAnimateRoomVideoProgress() {
+  if (!roomVideoState || roomVideoSeekDragging || document.visibilityState === "hidden") {
+    return false;
+  }
+  if (isYouTubeRoomVideo(roomVideoState)) {
+    return Boolean(youTubePlayerReady && isYouTubePlaying());
+  }
+  return Boolean(roomVideoPlayer && !roomVideoPlayer.paused && !roomVideoPlayer.ended);
+}
+
+function scheduleRoomVideoProgressAnimation() {
+  if (roomVideoProgressAnimFrame || typeof requestAnimationFrame !== "function") {
+    return;
+  }
+  roomVideoProgressAnimFrame = requestAnimationFrame(() => {
+    roomVideoProgressAnimFrame = 0;
+    if (!shouldAnimateRoomVideoProgress()) {
+      return;
+    }
+    updateRoomVideoControls();
+  });
+}
+
 function updateRoomVideoControls({ previewTime = null } = {}) {
   const hasVideo = Boolean(roomVideoState && roomVideoState.src);
   const isYoutube = hasVideo && isYouTubeRoomVideo(roomVideoState);
@@ -2251,8 +2580,8 @@ function updateRoomVideoControls({ previewTime = null } = {}) {
 
   if (videoSeekRange) {
     if (!roomVideoSeekDragging || previewTime !== null || !hasVideo) {
-      const progress = duration > 0 ? Math.round((currentTime / duration) * 1000) : 0;
-      videoSeekRange.value = String(Math.max(0, Math.min(1000, progress)));
+      const progress = duration > 0 ? Math.round((currentTime / duration) * ROOM_VIDEO_SEEK_RANGE_MAX) : 0;
+      videoSeekRange.value = String(Math.max(0, Math.min(ROOM_VIDEO_SEEK_RANGE_MAX, progress)));
     }
     const progressPercent = duration > 0 ? Math.max(0, Math.min(100, (currentTime / duration) * 100)) : 0;
     videoSeekRange.style.setProperty("--video-progress", `${progressPercent}%`);
@@ -2278,10 +2607,16 @@ function updateRoomVideoControls({ previewTime = null } = {}) {
     videoFullscreenBtn.setAttribute("aria-label", isFullscreen ? t("videoExitFullscreenBtn") : t("videoFullscreenBtn"));
     videoFullscreenBtn.title = isFullscreen ? t("videoExitFullscreenBtn") : t("videoFullscreenBtn");
   }
+  updateRoomVideoVolumeUi();
 
   if (!canUseCustomControls || !shouldAutoHideRoomVideoControls()) {
     clearRoomVideoControlsHideTimer();
     setRoomVideoControlsVisible(true);
+  }
+  if (shouldAnimateRoomVideoProgress()) {
+    scheduleRoomVideoProgressAnimation();
+  } else {
+    stopRoomVideoProgressAnimation();
   }
   if (!isVideoFrameFullscreen()) {
     hideFullscreenChatNotice();
@@ -2296,6 +2631,110 @@ function normalizeVideoRate(value) {
   return Math.min(3, Math.max(0.25, numeric));
 }
 
+function clampRoomVideoVolume(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return ROOM_VIDEO_DEFAULT_VOLUME;
+  }
+  return Math.max(0, Math.min(1, numeric));
+}
+
+function getEffectiveRoomVideoVolume() {
+  return roomVideoLocalMuted ? 0 : clampRoomVideoVolume(roomVideoLocalVolume);
+}
+
+function loadRoomVideoVolumePreference() {
+  try {
+    const raw = localStorage.getItem(ROOM_VIDEO_VOLUME_KEY);
+    if (!raw) {
+      return;
+    }
+    const parsed = JSON.parse(raw);
+    const savedVolume = clampRoomVideoVolume(parsed?.volume);
+    const savedMuted = Boolean(parsed?.muted);
+    roomVideoLocalVolume = savedVolume;
+    roomVideoLocalMuted = savedMuted || savedVolume <= 0.001;
+    if (savedVolume > 0.001) {
+      roomVideoVolumeBeforeMute = savedVolume;
+    }
+  } catch (_error) {
+    // Ignore invalid local preference payloads.
+  }
+}
+
+function saveRoomVideoVolumePreference() {
+  try {
+    localStorage.setItem(
+      ROOM_VIDEO_VOLUME_KEY,
+      JSON.stringify({
+        volume: clampRoomVideoVolume(roomVideoLocalVolume),
+        muted: Boolean(roomVideoLocalMuted)
+      })
+    );
+  } catch (_error) {
+    // Ignore storage quota/private mode failures.
+  }
+}
+
+function applyLocalRoomVideoVolumeToPlayers() {
+  const volume = getEffectiveRoomVideoVolume();
+  if (roomVideoPlayer) {
+    roomVideoPlayer.volume = volume;
+    roomVideoPlayer.muted = volume <= 0.001;
+  }
+  if (youTubePlayer && youTubePlayerReady) {
+    const volumePercent = Math.round(volume * 100);
+    try {
+      if (typeof youTubePlayer.setVolume === "function") {
+        youTubePlayer.setVolume(volumePercent);
+      }
+      if (volumePercent <= 0) {
+        if (typeof youTubePlayer.mute === "function") {
+          youTubePlayer.mute();
+        }
+      } else if (roomVideoUserInteracted && typeof youTubePlayer.unMute === "function") {
+        youTubePlayer.unMute();
+      }
+    } catch (_error) {
+      // Ignore YouTube volume API failures.
+    }
+  }
+}
+
+function updateRoomVideoVolumeUi() {
+  if (!videoVolumeBtn || !videoVolumeRange || !videoVolumeWrap) {
+    return;
+  }
+  const hasVideo = Boolean(roomVideoState && roomVideoState.src);
+  const effectiveVolume = getEffectiveRoomVideoVolume();
+  const percent = Math.round(effectiveVolume * 100);
+  videoVolumeRange.value = String(percent);
+  videoVolumeRange.style.setProperty("--video-volume-progress", `${percent}%`);
+  videoVolumeBtn.textContent = percent <= 0 ? "🔇" : (percent < 50 ? "🔉" : "🔊");
+  const volumeActionLabel = percent <= 0 ? t("videoUnmuteBtn") : t("videoMuteBtn");
+  videoVolumeBtn.setAttribute("aria-label", volumeActionLabel);
+  videoVolumeBtn.title = volumeActionLabel;
+  videoVolumeRange.setAttribute("aria-label", t("videoVolumeLabel"));
+  videoVolumeWrap.setAttribute("aria-label", t("videoVolumeLabel"));
+  videoVolumeBtn.disabled = !hasVideo;
+  videoVolumeRange.disabled = !hasVideo;
+}
+
+function setRoomVideoVolume(nextVolume, { mute = null, persist = true } = {}) {
+  const clamped = clampRoomVideoVolume(nextVolume);
+  const nextMuted = mute === null ? clamped <= 0.001 : Boolean(mute);
+  roomVideoLocalVolume = clamped;
+  roomVideoLocalMuted = nextMuted;
+  if (clamped > 0.001) {
+    roomVideoVolumeBeforeMute = clamped;
+  }
+  applyLocalRoomVideoVolumeToPlayers();
+  updateRoomVideoVolumeUi();
+  if (persist) {
+    saveRoomVideoVolumePreference();
+  }
+}
+
 function clampVideoTime(value, duration = 0) {
   const numeric = Number(value);
   const safe = Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
@@ -2307,13 +2746,27 @@ function clampVideoTime(value, duration = 0) {
 
 function getSafeLocalVideoCurrentTime(duration = 0) {
   const raw = Number(roomVideoPlayer?.currentTime);
+  const switchedRecently = Date.now() - Number(roomVideoSourceChangedAt || 0) < ROOM_VIDEO_SOURCE_SWITCH_GUARD_MS;
+  const syncTarget = roomVideoSyncState
+    ? computeRoomVideoTargetTime(roomVideoSyncState, duration)
+    : 0;
   if (Number.isFinite(raw) && raw >= 0) {
+    if (
+      switchedRecently &&
+      raw > 0.25 &&
+      syncTarget <= 2 &&
+      raw > syncTarget + 2
+    ) {
+      roomVideoLastKnownTime = clampVideoTime(syncTarget, duration);
+      return roomVideoLastKnownTime;
+    }
     const clamped = clampVideoTime(raw, duration);
     const known = clampVideoTime(roomVideoLastKnownTime, duration);
     if (
       clamped <= 0.05 &&
       known > 0.25 &&
-      !roomVideoPlayer?.ended
+      !roomVideoPlayer?.ended &&
+      !switchedRecently
     ) {
       return known;
     }
@@ -2335,11 +2788,18 @@ function getSafeLocalVideoCurrentTime(duration = 0) {
 function getSafeYouTubeCurrentTime(duration = 0, { keepMonotonicWhilePlaying = false } = {}) {
   const current = clampVideoTime(getYouTubeCurrentTime(), duration);
   const known = clampVideoTime(roomVideoLastKnownTime, duration);
+  const rewindWindowActive = Date.now() < roomVideoAllowRewindUntil;
 
   if (current > 0.05) {
     // Guard against transient YouTube API regressions while playback is active.
-    if (keepMonotonicWhilePlaying && isYouTubePlaying() && current + 0.35 < known) {
-      return known;
+    if (keepMonotonicWhilePlaying && isYouTubePlaying()) {
+      // During intentional seek/rewind, keep UI on the target instead of stale API readings.
+      if (rewindWindowActive && known > 0.05 && Math.abs(current - known) > 0.75) {
+        return known;
+      }
+      if (!rewindWindowActive && current + 0.35 < known) {
+        return known;
+      }
     }
     roomVideoLastKnownTime = current;
     return current;
@@ -2769,6 +3229,187 @@ function setVideoUploadBusy(busy) {
     videoYoutubeInput.disabled = isUploadingRoomVideo;
   }
   updateVideoClearButtonState();
+  updateRoomVideoQueueUi();
+}
+
+function normalizeRoomVideoQueueItems(queue) {
+  if (!Array.isArray(queue)) {
+    return [];
+  }
+  return queue
+    .filter((item) => item && typeof item === "object" && String(item.src || "").trim())
+    .map((item, index) => ({
+      ...item,
+      queueIndex: Number.isInteger(item.queueIndex) ? item.queueIndex : index
+    }));
+}
+
+function syncRoomVideoQueueFromPayload(payload) {
+  if (payload && typeof payload === "object") {
+    if (Object.prototype.hasOwnProperty.call(payload, "videoQueue")) {
+      roomVideoQueueState = normalizeRoomVideoQueueItems(payload.videoQueue);
+    } else if (Object.prototype.hasOwnProperty.call(payload, "queue")) {
+      roomVideoQueueState = normalizeRoomVideoQueueItems(payload.queue);
+    }
+  }
+  if (roomVideoQueueState.length === 0) {
+    cancelRoomVideoAutoNextCountdown();
+  }
+  updateRoomVideoQueueUi();
+}
+
+function updateRoomVideoQueueUi() {
+  if (!videoQueueTools) {
+    return;
+  }
+  videoQueueTools.classList.remove("hidden");
+  const isLeader = isRoomLeader();
+  const queueSize = roomVideoQueueState.length;
+  if (queueSize === 0 && roomVideoAutoNextVideoId) {
+    cancelRoomVideoAutoNextCountdown();
+  }
+  const busy = isUploadingRoomVideo || isManagingRoomVideoQueue;
+  const canManage = isLeader && !busy;
+  const canGoNext = canManage && queueSize > 0;
+  if (videoQueueNextBtn) {
+    videoQueueNextBtn.classList.toggle("hidden", !isLeader);
+    videoQueueNextBtn.disabled = !canGoNext;
+  }
+  if (videoQueueList) {
+    videoQueueList.innerHTML = "";
+    roomVideoQueueState.forEach((item, index) => {
+      const li = document.createElement("li");
+      li.className = "video-queue-item";
+
+      const info = document.createElement("div");
+      info.className = "video-queue-item-info";
+
+      const order = document.createElement("span");
+      order.className = "video-queue-item-order";
+      order.textContent = `${index + 1}.`;
+      info.appendChild(order);
+
+      const title = document.createElement("span");
+      title.className = "video-queue-item-title";
+      const fileName = String(item.filename || "video");
+      const uploader = videoUploaderName(item.uploadedBy);
+      title.textContent = uploader
+        ? `${fileName} ${fmt(t("videoByUserInline"), { user: uploader })}`
+        : fileName;
+      info.appendChild(title);
+
+      li.appendChild(info);
+      if (isLeader) {
+        const removeBtn = document.createElement("button");
+        removeBtn.type = "button";
+        removeBtn.className = "btn btn-ghost video-queue-item-remove";
+        removeBtn.textContent = "X";
+        removeBtn.disabled = busy;
+        removeBtn.title = t("videoQueueRemoveItem");
+        removeBtn.setAttribute("aria-label", t("videoQueueRemoveItem"));
+        removeBtn.addEventListener("click", () => {
+          sfx("click");
+          removeRoomVideoQueueItem(Number(item.queueIndex ?? index));
+        });
+        li.appendChild(removeBtn);
+      }
+      videoQueueList.appendChild(li);
+    });
+  }
+  if (videoQueueEmpty) {
+    videoQueueEmpty.classList.toggle("hidden", queueSize > 0);
+    videoQueueEmpty.textContent = t("videoQueueEmpty");
+  }
+}
+
+function setRoomVideoQueueBusy(busy) {
+  isManagingRoomVideoQueue = Boolean(busy);
+  updateRoomVideoQueueUi();
+}
+
+function updateRoomVideoAutoNextCountdownText(seconds) {
+  if (!videoQueueCountdownNotice) {
+    return;
+  }
+  const safeSeconds = Math.max(1, Math.floor(Number(seconds) || 0));
+  videoQueueCountdownNotice.textContent = fmt(t("videoQueueAutoNextCountdown"), {
+    seconds: safeSeconds
+  });
+  videoQueueCountdownNotice.classList.remove("hidden");
+}
+
+function clearRoomVideoAutoNextCountdownTimer() {
+  if (!roomVideoAutoNextCountdownTimer) {
+    return;
+  }
+  clearInterval(roomVideoAutoNextCountdownTimer);
+  roomVideoAutoNextCountdownTimer = null;
+}
+
+function cancelRoomVideoAutoNextCountdown() {
+  clearRoomVideoAutoNextCountdownTimer();
+  roomVideoAutoNextCountdownSeconds = 0;
+  roomVideoAutoNextVideoId = "";
+  if (videoQueueCountdownNotice) {
+    videoQueueCountdownNotice.classList.add("hidden");
+    videoQueueCountdownNotice.textContent = "";
+  }
+}
+
+function startRoomVideoAutoNextCountdown(videoId) {
+  const targetVideoId = String(videoId || "").trim();
+  if (!targetVideoId || roomVideoQueueState.length === 0) {
+    return false;
+  }
+  const sameCountdown =
+    roomVideoAutoNextVideoId === targetVideoId &&
+    (roomVideoAutoNextCountdownTimer || roomVideoAutoNextCountdownSeconds > 0);
+  if (sameCountdown) {
+    return true;
+  }
+  cancelRoomVideoAutoNextCountdown();
+  roomVideoAutoNextVideoId = targetVideoId;
+  roomVideoAutoNextCountdownSeconds = ROOM_VIDEO_AUTO_NEXT_DELAY_SEC;
+  updateRoomVideoAutoNextCountdownText(roomVideoAutoNextCountdownSeconds);
+
+  roomVideoAutoNextCountdownTimer = setInterval(() => {
+    roomVideoAutoNextCountdownSeconds = Math.max(0, roomVideoAutoNextCountdownSeconds - 1);
+    if (roomVideoAutoNextCountdownSeconds > 0) {
+      updateRoomVideoAutoNextCountdownText(roomVideoAutoNextCountdownSeconds);
+      return;
+    }
+    clearRoomVideoAutoNextCountdownTimer();
+    if (!isRoomLeader()) {
+      cancelRoomVideoAutoNextCountdown();
+    }
+  }, 1000);
+  return true;
+}
+
+function markRoomVideoSourceChanged() {
+  roomVideoSourceChangedAt = Date.now();
+  roomVideoAllowRewindUntil = 0;
+}
+
+function allowRoomVideoRewindTemporarily(ms = ROOM_VIDEO_REWIND_ALLOW_MS) {
+  const ttl = Number(ms);
+  if (!Number.isFinite(ttl) || ttl <= 0) {
+    return;
+  }
+  roomVideoAllowRewindUntil = Math.max(roomVideoAllowRewindUntil, Date.now() + ttl);
+}
+
+function resetRoomVideoProgressUi() {
+  roomVideoSeekDragging = false;
+  roomVideoLastKnownTime = 0;
+  roomVideoAllowRewindUntil = 0;
+  if (videoSeekRange) {
+    videoSeekRange.value = "0";
+    videoSeekRange.style.setProperty("--video-progress", "0%");
+  }
+  if (videoTimeText) {
+    videoTimeText.textContent = `${formatVideoClock(0)} / ${formatVideoClock(0)}`;
+  }
 }
 
 function updateVideoClearButtonState() {
@@ -2813,7 +3454,9 @@ function clearRoomVideoPlayer() {
     return;
   }
   stopRoomVideoSyncHeartbeat();
-  roomVideoSeekDragging = false;
+  cancelRoomVideoAutoNextCountdown();
+  markRoomVideoSourceChanged();
+  resetRoomVideoProgressUi();
   clearRoomVideoControlsHideTimer();
   destroyYouTubePlayer();
   withSuppressedRoomVideoEvents(() => {
@@ -2830,14 +3473,16 @@ function clearRoomVideoPlayer() {
   roomVideoMetadataReady = false;
   roomVideoState = null;
   roomVideoSyncState = null;
-  roomVideoLastKnownTime = 0;
   roomVideoResumePending = false;
+  roomVideoEndTransitionInFlight = false;
   youTubeLeaderPlayPending = false;
   updateVideoEmptyNoticeState();
   setYouTubeMaskVisible(false);
   hideFullscreenChatNotice();
   setRoomVideoControlsVisible(true);
   updateRoomVideoControls();
+  updateVideoClearButtonState();
+  updateRoomVideoQueueUi();
 }
 
 async function applyRoomVideoSyncToPlayer({ forceSeek = false } = {}) {
@@ -2875,6 +3520,7 @@ async function applyRoomVideoSyncToPlayer({ forceSeek = false } = {}) {
       }
       if (forceSeek || drift > hardSeekThreshold) {
         if (typeof youTubePlayer.seekTo === "function") {
+          allowRoomVideoRewindTemporarily();
           youTubePlayer.seekTo(targetTime, true);
         }
       }
@@ -2935,8 +3581,8 @@ async function applyRoomVideoSyncToPlayer({ forceSeek = false } = {}) {
     if (roomVideoSyncState.playing) {
       if (!roomVideoUserInteracted) {
         roomVideoPlayer.muted = true;
-      } else if (roomVideoPlayer.muted) {
-        roomVideoPlayer.muted = false;
+      } else {
+        applyLocalRoomVideoVolumeToPlayers();
       }
       try {
         await roomVideoPlayer.play();
@@ -2958,8 +3604,9 @@ function renderRoomVideo(room) {
   if (!videoLeaderTools || !videoStatusText || !videoHintText || !roomVideoPlayer) {
     return;
   }
+  syncRoomVideoQueueFromPayload(room);
 
-  const canControl = isRoomLeader();
+  const canControl = canUseVideoTools();
   if (!isRoomMobileLayout()) {
     videoLeaderTools.classList.toggle("hidden", !canControl);
   }
@@ -2975,6 +3622,7 @@ function renderRoomVideo(room) {
     videoStatusText.textContent = t("videoNoVideo");
     clearRoomVideoPlayer();
     updateVideoClearButtonState();
+    updateRoomVideoQueueUi();
     return;
   }
 
@@ -2982,15 +3630,30 @@ function renderRoomVideo(room) {
   roomVideoState = nextVideo;
   updateVideoEmptyNoticeState();
   updateVideoClearButtonState();
+  updateRoomVideoQueueUi();
   const incomingDuration = Number(nextVideo.duration || 0);
   const incomingSyncState = normalizeIncomingRoomVideoSync(nextVideo.sync, incomingDuration);
   const nextVideoId = String(nextVideo.id || "");
   const isYoutube = isYouTubeRoomVideo(nextVideo);
   const sourceChanged = activeRoomVideoId !== nextVideoId;
+  if (sourceChanged) {
+    markRoomVideoSourceChanged();
+    resetRoomVideoProgressUi();
+  }
+  if (roomVideoAutoNextVideoId && roomVideoAutoNextVideoId !== nextVideoId) {
+    cancelRoomVideoAutoNextCountdown();
+  }
+  if (roomVideoAutoNextVideoId === nextVideoId && roomVideoQueueState.length === 0) {
+    cancelRoomVideoAutoNextCountdown();
+  }
   if (sourceChanged || !incomingSyncState) {
     roomVideoSyncState = incomingSyncState;
   } else if (shouldAcceptIncomingRoomVideoSync(incomingSyncState, roomVideoSyncState, incomingDuration)) {
     roomVideoSyncState = incomingSyncState;
+  }
+  if (sourceChanged && roomVideoSyncState) {
+    roomVideoSyncState.currentTime = 0;
+    roomVideoSyncState.snapshotAt = Date.now();
   }
   activeRoomVideoId = nextVideoId;
 
@@ -3006,7 +3669,6 @@ function renderRoomVideo(room) {
   if (isYoutube) {
     roomVideoMetadataReady = false;
     if (sourceChanged) {
-      roomVideoLastKnownTime = 0;
       youTubeLeaderPlayPending = false;
     }
     const shouldAutoplay = roomVideoSyncState ? Boolean(roomVideoSyncState.playing) : true;
@@ -3031,7 +3693,6 @@ function renderRoomVideo(room) {
   } else if (sourceChanged) {
     destroyYouTubePlayer();
     roomVideoMetadataReady = false;
-    roomVideoLastKnownTime = 0;
     withSuppressedRoomVideoEvents(() => {
       roomVideoPlayer.pause();
       roomVideoPlayer.src = nextVideo.src;
@@ -3043,7 +3704,13 @@ function renderRoomVideo(room) {
   }
 
   const fileLabel = String(nextVideo.filename || "video");
-  videoStatusText.textContent = fmt(t("videoNowPlaying"), { name: fileLabel });
+  const uploader = videoUploaderName(nextVideo.uploadedBy);
+  if (uploader) {
+    videoStatusText.textContent = fmt(t("videoNowPlayingWithUser"), { name: fileLabel, user: uploader });
+  } else {
+    videoStatusText.textContent = fmt(t("videoNowPlaying"), { name: fileLabel });
+  }
+  applyLocalRoomVideoVolumeToPlayers();
   updateRoomVideoControls();
   if (!roomVideoSyncState) {
     return;
@@ -3081,10 +3748,6 @@ async function readVideoDurationFromFile(file) {
 }
 
 async function uploadRoomVideo() {
-  if (!isRoomLeader()) {
-    showToast(t("videoHostOnly"));
-    return;
-  }
   const file = videoFileInput?.files?.[0];
   if (!file) {
     showToast(t("videoUploadNeedFile"));
@@ -3114,6 +3777,7 @@ async function uploadRoomVideo() {
   if (duration > 0) {
     formData.append("duration", String(duration));
   }
+  formData.append("enqueue", "true");
 
   setVideoUploadBusy(true);
   let uploadSucceeded = false;
@@ -3152,10 +3816,13 @@ async function uploadRoomVideo() {
     });
     uploadSucceeded = true;
     videoFileInput.value = "";
-    showToast(t("videoUploadSuccess"), "success");
+    const queued = Boolean(result?.queued);
+    showToast(queued ? t("videoQueueQueuedUpload") : t("videoUploadSuccess"), "success");
     if (result?.room) {
       renderRoomInfo(result.room);
-      triggerAutoPlayForNewRoomVideo();
+      if (!queued) {
+        triggerAutoPlayForNewRoomVideo();
+      }
     }
     await refreshMessages();
   } catch (error) {
@@ -3179,10 +3846,6 @@ async function uploadRoomVideo() {
 }
 
 async function setRoomYouTubeVideo() {
-  if (!isRoomLeader()) {
-    showToast(t("videoHostOnly"));
-    return;
-  }
   const input = String(videoYoutubeInput?.value || "").trim();
   if (input.length < 2) {
     showToast(t("videoYoutubeNeedInput"));
@@ -3193,15 +3856,21 @@ async function setRoomYouTubeVideo() {
   try {
     const result = await api(`/api/rooms/${encodedCode}/video-source`, {
       method: "POST",
-      body: { input }
+      body: {
+        input,
+        enqueue: true
+      }
     });
     if (videoYoutubeInput) {
       videoYoutubeInput.value = "";
     }
-    showToast(t("videoYoutubeSuccess"), "success");
+    const queued = Boolean(result?.queued);
+    showToast(queued ? t("videoQueueQueuedYoutube") : t("videoYoutubeSuccess"), "success");
     if (result?.room) {
       renderRoomInfo(result.room);
-      triggerAutoPlayForNewRoomVideo();
+      if (!queued) {
+        triggerAutoPlayForNewRoomVideo();
+      }
     }
     await refreshMessages();
   } catch (error) {
@@ -3219,13 +3888,22 @@ async function setRoomYouTubeVideo() {
   }
 }
 
-async function clearRoomVideo() {
+async function clearRoomVideo({ silentSuccessToast = false } = {}) {
   if (!isRoomLeader()) {
     showToast(t("videoHostOnly"));
     return;
   }
   if (!roomVideoState || !roomVideoState.src) {
     showToast(t("videoNoVideo"));
+    return;
+  }
+
+  if (roomVideoQueueState.length > 0) {
+    await runRoomVideoQueueAction("next", {}, {
+      successToastKey: "videoClearSuccess",
+      refreshChat: true
+    });
+    triggerAutoPlayForNewRoomVideo();
     return;
   }
 
@@ -3250,7 +3928,9 @@ async function clearRoomVideo() {
         body: { action: "clear" }
       });
     }
-    showToast(t("videoClearSuccess"), "success");
+    if (!silentSuccessToast) {
+      showToast(t("videoClearSuccess"), "success");
+    }
     if (result?.room) {
       renderRoomInfo(result.room);
     }
@@ -3259,6 +3939,68 @@ async function clearRoomVideo() {
     showToast(error.message || t("videoSyncFailed"));
   } finally {
     setVideoUploadBusy(false);
+  }
+}
+
+async function handleLeaderVideoEndedAutoAdvance(endTime = null) {
+  if (!isRoomLeader() || roomVideoEndTransitionInFlight || !roomVideoState) {
+    return;
+  }
+  const endedVideoId = String(activeRoomVideoId || roomVideoState?.id || "").trim();
+  if (!endedVideoId || roomVideoQueueState.length === 0) {
+    cancelRoomVideoAutoNextCountdown();
+    if (endedVideoId && roomVideoQueueState.length === 0) {
+      await clearRoomVideo({ silentSuccessToast: true });
+    }
+    return;
+  }
+  roomVideoEndTransitionInFlight = true;
+  try {
+    const safeEndTime = Number(endTime);
+    startRoomVideoAutoNextCountdown(endedVideoId);
+    await sendRoomVideoSync("pause", {
+      silent: true,
+      quietError: true,
+      allowRewind: true,
+      currentTimeOverride: Number.isFinite(safeEndTime) && safeEndTime >= 0 ? safeEndTime : undefined
+    });
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, ROOM_VIDEO_AUTO_NEXT_DELAY_SEC * 1000);
+    });
+
+    if (!isRoomLeader() || !roomVideoState) {
+      return;
+    }
+    const currentVideoId = String(activeRoomVideoId || roomVideoState?.id || "").trim();
+    if (!currentVideoId || currentVideoId !== endedVideoId) {
+      return;
+    }
+    if (roomVideoQueueState.length === 0) {
+      await clearRoomVideo({ silentSuccessToast: true });
+      return;
+    }
+
+    const nextResult = await api(`/api/rooms/${encodedCode}/video-queue`, {
+      method: "POST",
+      body: { action: "next" }
+    });
+    if (nextResult?.room) {
+      renderRoomInfo(nextResult.room);
+      triggerAutoPlayForNewRoomVideo();
+    } else {
+      syncRoomVideoQueueFromPayload(nextResult);
+    }
+    await refreshMessages();
+  } catch (error) {
+    if (error.code !== "VIDEO_QUEUE_EMPTY") {
+      showToast(error.message || t("videoSyncFailed"));
+    }
+  } finally {
+    cancelRoomVideoAutoNextCountdown();
+    setTimeout(() => {
+      roomVideoEndTransitionInFlight = false;
+    }, 160);
   }
 }
 
@@ -3610,6 +4352,7 @@ async function api(pathname, options = {}) {
   const isFormDataBody = typeof FormData !== "undefined" && options.body instanceof FormData;
   const headers = {
     "X-Lang": getLang(),
+    ...(CLIENT_COUNTRY_CODE ? { "X-Country": CLIENT_COUNTRY_CODE } : {}),
     ...(options.headers || {})
   };
   if (!isFormDataBody && options.body !== undefined) {
@@ -4134,6 +4877,78 @@ async function handleRequestDecision(username, action, options = {}) {
   }
 }
 
+async function runRoomVideoQueueAction(action, payload = {}, {
+  successToastKey = "",
+  refreshChat = false
+} = {}) {
+  if (!isRoomLeader()) {
+    showToast(t("videoHostOnly"));
+    return;
+  }
+  setRoomVideoQueueBusy(true);
+  try {
+    const result = await api(`/api/rooms/${encodedCode}/video-queue`, {
+      method: "POST",
+      body: {
+        action,
+        ...payload
+      }
+    });
+    if (result?.room) {
+      renderRoomInfo(result.room);
+    } else {
+      syncRoomVideoQueueFromPayload(result);
+    }
+    if (successToastKey) {
+      showToast(t(successToastKey), "success");
+    }
+    if (refreshChat) {
+      await refreshMessages();
+    }
+  } catch (error) {
+    if (error.code === "VIDEO_QUEUE_EMPTY") {
+      showToast(t("videoQueueErrorEmpty"));
+      return;
+    }
+    if (error.code === "VIDEO_HISTORY_EMPTY") {
+      showToast(t("videoQueueErrorHistoryEmpty"));
+      return;
+    }
+    if (error.code === "VIDEO_QUEUE_ITEM_NOT_FOUND") {
+      showToast(t("videoQueueErrorItemNotFound"));
+      return;
+    }
+    showToast(error.message || t("videoSyncFailed"));
+  } finally {
+    setRoomVideoQueueBusy(false);
+  }
+}
+
+function playNextRoomVideoFromQueue() {
+  return runRoomVideoQueueAction("next", {}, {
+    successToastKey: "videoQueueNextDone",
+    refreshChat: true
+  });
+}
+
+function playPreviousRoomVideoFromQueue() {
+  return runRoomVideoQueueAction("previous", {}, {
+    successToastKey: "videoQueuePrevDone",
+    refreshChat: true
+  });
+}
+
+function removeRoomVideoQueueItem(index) {
+  const queueIndex = Number(index);
+  if (!Number.isInteger(queueIndex) || queueIndex < 0) {
+    return Promise.resolve();
+  }
+  return runRoomVideoQueueAction("remove", { queueIndex }, {
+    successToastKey: "videoQueueRemoveDone",
+    refreshChat: false
+  });
+}
+
 async function transferRoomLeadership(target) {
   const cleanTarget = String(target || "").trim();
   if (!cleanTarget || !isRoomLeader() || cleanTarget === host) {
@@ -4610,6 +5425,16 @@ function applyTranslations() {
   document.getElementById("chatTitle").textContent = t("chatTitle");
   document.getElementById("chatInput").placeholder = t("chatPlaceholder");
   sendBtn.textContent = t("sendBtn");
+  if (chatComposerOpenBtn) {
+    chatComposerOpenBtn.textContent = "✎";
+    chatComposerOpenBtn.title = t("chatComposerOpen");
+    chatComposerOpenBtn.setAttribute("aria-label", t("chatComposerOpen"));
+  }
+  if (chatComposerCloseBtn) {
+    chatComposerCloseBtn.textContent = "⌄";
+    chatComposerCloseBtn.title = t("chatComposerClose");
+    chatComposerCloseBtn.setAttribute("aria-label", t("chatComposerClose"));
+  }
   videoTitle.textContent = t("videoTitle");
   videoHintText.textContent = t("videoHint");
   if (videoEmptyNoticeLine1) {
@@ -4628,13 +5453,37 @@ function applyTranslations() {
   if (videoYoutubeInput) {
     videoYoutubeInput.placeholder = t("videoYoutubePlaceholder");
   }
+  if (videoQueueTitle) {
+    videoQueueTitle.textContent = t("videoQueueTitle");
+  }
+  if (videoQueuePrevBtn) {
+    videoQueuePrevBtn.textContent = t("videoQueuePrevBtn");
+  }
+  if (videoQueueNextBtn) {
+    videoQueueNextBtn.textContent = t("videoQueueNextBtn");
+  }
+  if (videoQueueEmpty) {
+    videoQueueEmpty.textContent = t("videoQueueEmpty");
+  }
   if (roomVideoState && roomVideoState.filename) {
-    videoStatusText.textContent = fmt(t("videoNowPlaying"), { name: roomVideoState.filename });
+    const uploader = videoUploaderName(roomVideoState.uploadedBy);
+    if (uploader) {
+      videoStatusText.textContent = fmt(t("videoNowPlayingWithUser"), {
+        name: roomVideoState.filename,
+        user: uploader
+      });
+    } else {
+      videoStatusText.textContent = fmt(t("videoNowPlaying"), { name: roomVideoState.filename });
+    }
   } else {
     videoStatusText.textContent = t("videoNoVideo");
   }
   updateVideoEmptyNoticeState();
   setVideoUploadBusy(isUploadingRoomVideo);
+  updateRoomVideoQueueUi();
+  if (roomVideoAutoNextCountdownSeconds > 0 && roomVideoAutoNextVideoId) {
+    updateRoomVideoAutoNextCountdownText(roomVideoAutoNextCountdownSeconds);
+  }
   updateRoomVideoUploadOverlayText();
   updateRoomVideoControls();
   renderReplyDraft();
@@ -4751,20 +5600,6 @@ langSelect.addEventListener("change", (event) => {
   sfx("click");
   setLang(event.target.value);
 });
-
-if (soundToggleBtn) {
-  soundToggleBtn.addEventListener("click", () => {
-    if (!window.BednaSound) {
-      return;
-    }
-    const wasEnabled = window.BednaSound.isEnabled();
-    const next = window.BednaSound.toggle();
-    if (!wasEnabled && next) {
-      sfx("notify");
-    }
-    renderSoundToggle();
-  });
-}
 
 joinModalApprove.addEventListener("click", () => {
   sfx("click");
@@ -5066,6 +5901,20 @@ if (videoClearTopBtn) {
   });
 }
 
+if (videoQueueNextBtn) {
+  videoQueueNextBtn.addEventListener("click", () => {
+    sfx("click");
+    playNextRoomVideoFromQueue();
+  });
+}
+
+if (videoQueuePrevBtn) {
+  videoQueuePrevBtn.addEventListener("click", () => {
+    sfx("click");
+    playPreviousRoomVideoFromQueue();
+  });
+}
+
 if (videoYoutubeInput) {
   videoYoutubeInput.addEventListener("keydown", (event) => {
     if (event.key !== "Enter") {
@@ -5141,7 +5990,47 @@ if (videoPlayPauseBtn) {
   });
 }
 
+if (videoVolumeBtn) {
+  videoVolumeBtn.addEventListener("click", () => {
+    if (!roomVideoState) {
+      return;
+    }
+    sfx("click");
+    markRoomVideoUserInteracted();
+    revealRoomVideoControls();
+    const effectiveVolume = getEffectiveRoomVideoVolume();
+    if (effectiveVolume <= 0.001 || roomVideoLocalMuted) {
+      const restoreVolume = roomVideoVolumeBeforeMute > 0.001
+        ? roomVideoVolumeBeforeMute
+        : ROOM_VIDEO_DEFAULT_VOLUME;
+      setRoomVideoVolume(restoreVolume, { mute: false, persist: true });
+      tryUnlockYouTubeAudioFromGesture();
+      return;
+    }
+    roomVideoVolumeBeforeMute = effectiveVolume;
+    setRoomVideoVolume(effectiveVolume, { mute: true, persist: true });
+  });
+}
+
+if (videoVolumeRange) {
+  videoVolumeRange.addEventListener("input", () => {
+    if (!roomVideoState) {
+      return;
+    }
+    markRoomVideoUserInteracted();
+    revealRoomVideoControls();
+    const nextVolume = clampRoomVideoVolume(Number(videoVolumeRange.value || 0) / 100);
+    setRoomVideoVolume(nextVolume, { mute: nextVolume <= 0.001, persist: true });
+    if (nextVolume > 0.001) {
+      tryUnlockYouTubeAudioFromGesture();
+    }
+  });
+}
+
 if (videoSeekRange) {
+  videoSeekRange.max = String(ROOM_VIDEO_SEEK_RANGE_MAX);
+  videoSeekRange.step = "1";
+
   videoSeekRange.addEventListener("input", () => {
     if (!isRoomLeader()) {
       roomVideoSeekDragging = false;
@@ -5151,7 +6040,7 @@ if (videoSeekRange) {
     roomVideoSeekDragging = true;
     revealRoomVideoControls();
     const duration = getRoomVideoDuration();
-    const progress = Number(videoSeekRange.value || 0) / 1000;
+    const progress = Number(videoSeekRange.value || 0) / ROOM_VIDEO_SEEK_RANGE_MAX;
     const previewTime = duration > 0 ? progress * duration : 0;
     updateRoomVideoControls({ previewTime });
   });
@@ -5174,7 +6063,7 @@ if (videoSeekRange) {
       updateRoomVideoControls();
       return;
     }
-    const progress = Number(videoSeekRange.value || 0) / 1000;
+    const progress = Number(videoSeekRange.value || 0) / ROOM_VIDEO_SEEK_RANGE_MAX;
     const targetTime = clampVideoTime(progress * duration, duration);
     roomVideoLastKnownTime = targetTime;
     if (isYouTubeRoomVideo(roomVideoState)) {
@@ -5185,6 +6074,7 @@ if (videoSeekRange) {
         return;
       }
       if (youTubePlayerReady && youTubePlayer && typeof youTubePlayer.seekTo === "function") {
+        allowRoomVideoRewindTemporarily();
         youTubePlayer.seekTo(targetTime, true);
       }
       sendRoomVideoSync("seek", { currentTimeOverride: targetTime, allowRewind: true });
@@ -5342,13 +6232,22 @@ if (roomVideoPlayer) {
       applyRoomVideoSyncToPlayer({ forceSeek: true });
       return;
     }
-    if (!isRoomLeader()) {
-      applyRoomVideoSyncToPlayer({ forceSeek: true });
-      return;
-    }
     const endTime = duration > 0 && current >= duration - 0.35 ? duration : current;
     roomVideoLastKnownTime = endTime;
-    sendRoomVideoSync("pause", { currentTimeOverride: endTime });
+    const endedVideoId = String(activeRoomVideoId || roomVideoState?.id || "").trim();
+    if (roomVideoQueueState.length > 0) {
+      startRoomVideoAutoNextCountdown(endedVideoId);
+      if (isRoomLeader()) {
+        handleLeaderVideoEndedAutoAdvance(endTime);
+      }
+      return;
+    }
+    cancelRoomVideoAutoNextCountdown();
+    if (isRoomLeader()) {
+      handleLeaderVideoEndedAutoAdvance(endTime);
+      return;
+    }
+    applyRoomVideoSyncToPlayer({ forceSeek: true });
   });
 
   roomVideoPlayer.addEventListener("contextmenu", (event) => {
@@ -5437,6 +6336,37 @@ if (chatReplyCancelBtn) {
   });
 }
 
+if (chatComposerOpenBtn) {
+  chatComposerOpenBtn.addEventListener("click", () => {
+    sfx("click");
+    setMobileChatComposerOpen(true, { focusInput: true });
+  });
+}
+
+if (chatComposerCloseBtn) {
+  chatComposerCloseBtn.addEventListener("click", () => {
+    sfx("click");
+    closeMobileChatComposerFromUserAction();
+  });
+}
+
+if (chatInput) {
+  chatInput.addEventListener("focus", () => {
+    if (!isRoomMobileLayout()) {
+      return;
+    }
+    setMobileChatComposerOpen(true);
+  });
+}
+
+if (chatMessages) {
+  const closeComposerFromChatSurface = () => {
+    closeMobileChatComposerFromUserAction();
+  };
+  chatMessages.addEventListener("pointerdown", closeComposerFromChatSurface);
+  chatMessages.addEventListener("touchstart", closeComposerFromChatSurface, { passive: true });
+}
+
 chatForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (isSendingChatMessage) {
@@ -5447,10 +6377,13 @@ chatForm.addEventListener("submit", async (event) => {
   if (!text) {
     return;
   }
+  if (isRoomMobileLayout()) {
+    setMobileChatComposerOpen(true);
+  }
   const replyToMessageId = Number(activeReplyTarget?.id || 0);
   const clientMessageId = reserveClientMessageId(text, replyToMessageId);
   setChatSendingState(true);
-  focusChatInputForContinuousTyping(submitStartedAt);
+  focusChatInputForContinuousTyping(submitStartedAt, { force: isRoomMobileLayout() });
 
   try {
     await api(`/api/rooms/${encodedCode}/messages`, {
@@ -5473,7 +6406,7 @@ chatForm.addEventListener("submit", async (event) => {
     showToast(error.message);
   } finally {
     setChatSendingState(false);
-    focusChatInputForContinuousTyping(submitStartedAt);
+    focusChatInputForContinuousTyping(submitStartedAt, { force: isRoomMobileLayout() });
   }
 });
 
@@ -5576,8 +6509,8 @@ document.addEventListener("visibilitychange", () => {
     }
     applyRoomVideoSyncToPlayer({ forceSeek: true });
   }
-  if (roomVideoPlayer && roomVideoUserInteracted && roomVideoPlayer.muted) {
-    roomVideoPlayer.muted = false;
+  if (roomVideoPlayer && roomVideoUserInteracted) {
+    applyLocalRoomVideoVolumeToPlayers();
   }
   attemptMobileRoomVideoResume({ fromGesture: false });
   youTubeAudioUnlockNeeded = true;
@@ -5588,6 +6521,8 @@ document.addEventListener("visibilitychange", () => {
   refreshMessages().catch(() => {});
 });
 
+loadRoomVideoVolumePreference();
+setRoomVideoVolume(roomVideoLocalVolume, { mute: roomVideoLocalMuted, persist: false });
 updateRoomVideoControls();
 
 setLang(getLang());

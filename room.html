@@ -7,9 +7,14 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Changa:wght@600;700;800&family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=20260225d">
+  <link rel="stylesheet" href="styles.css?v=20260226q">
 </head>
 <body>
+  <div class="lobby-sakura-scene" aria-hidden="true">
+    <div class="lobby-sakura-branch"></div>
+    <div class="lobby-sakura-bloom"></div>
+    <div class="lobby-sakura-petals"></div>
+  </div>
   <div class="top-controls">
     <label for="langSelect" id="langLabel">Language</label>
     <select id="langSelect">
@@ -37,7 +42,7 @@
           <div class="video-box-head">
             <h3 id="videoTitle">Room Video</h3>
             <p id="videoStatusText" class="muted">No video uploaded yet.</p>
-            <button id="videoClearTopBtn" class="btn btn-danger video-clear-desktop-btn hidden" type="button">Remove Video</button>
+            <button id="videoClearTopBtn" class="btn btn-danger video-clear-desktop-btn hidden" type="button">Skip Video</button>
           </div>
           <button id="playersDrawerToggle" class="players-drawer-toggle" type="button" aria-controls="playersDrawer" aria-expanded="false">
             <span class="players-drawer-toggle-icon players-drawer-toggle-icon-open" aria-hidden="true">
@@ -61,9 +66,14 @@
               <p id="videoEmptyNoticeLine1">تم إنشاء هذا الموقع لتسهيل مشاهدة الأفلام والفيديوهات.</p>
               <p id="videoEmptyNoticeLine2">صُمم هذا الموقع لجلسات المشاهدة الجماعية السلسة مع الأصدقاء.</p>
             </div>
+            <div id="videoQueueCountdownNotice" class="video-queue-countdown hidden" aria-live="polite"></div>
             <div id="videoControlsBar" class="video-controls-bar">
               <button id="videoPlayPauseBtn" class="btn btn-ghost video-control-btn" type="button">Play</button>
-              <input id="videoSeekRange" class="video-seek-range" type="range" min="0" max="1000" step="1" value="0" aria-label="Video progress">
+              <div id="videoVolumeWrap" class="video-volume-wrap" aria-label="Video volume">
+                <button id="videoVolumeBtn" class="btn btn-ghost video-control-btn video-volume-btn" type="button" aria-label="Mute">🔊</button>
+                <input id="videoVolumeRange" class="video-volume-range" type="range" min="0" max="100" step="1" value="100" aria-label="Video volume">
+              </div>
+              <input id="videoSeekRange" class="video-seek-range" type="range" min="0" max="10000" step="1" value="0" aria-label="Video progress">
               <span id="videoTimeText" class="video-time-text">00:00 / 00:00</span>
               <button id="videoFullscreenBtn" class="btn btn-ghost video-control-btn" type="button">Fullscreen</button>
             </div>
@@ -81,8 +91,18 @@
             <div class="room-actions">
               <button id="videoUploadBtn" class="btn" type="button">Upload Video</button>
               <button id="videoYoutubeBtn" class="btn btn-ghost" type="button">Play from YouTube</button>
-              <button id="videoClearBtn" class="btn btn-danger video-clear-mobile-btn" type="button">Remove Video</button>
+              <button id="videoClearBtn" class="btn btn-danger video-clear-mobile-btn" type="button">Skip Video</button>
             </div>
+            <section id="videoQueueTools" class="video-queue-tools">
+              <div class="video-queue-head">
+                <h5 id="videoQueueTitle">Queue</h5>
+              </div>
+              <div class="video-queue-actions">
+                <button id="videoQueueNextBtn" class="btn btn-ghost" type="button">Next</button>
+              </div>
+              <p id="videoQueueEmpty" class="muted">Queue is empty.</p>
+              <ul id="videoQueueList" class="video-queue-list"></ul>
+            </section>
           </div>
         </section>
 
@@ -109,7 +129,9 @@
               data-lpignore="true"
             >
             <button class="btn" type="submit" id="sendBtn">Send</button>
+            <button id="chatComposerCloseBtn" class="btn btn-ghost chat-composer-close-btn hidden" type="button" aria-label="Hide keyboard">⌄</button>
           </form>
+          <button id="chatComposerOpenBtn" class="btn chat-composer-open-btn hidden" type="button" aria-label="Open message box">✎</button>
         </section>
 
         <aside id="playersDrawer" class="players-box box" aria-hidden="false">
@@ -247,10 +269,6 @@
 
   <div id="toastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
   <script src="sound.js?v=20260225c"></script>
-  <script src="room.js?v=20260225t"></script>
+  <script src="room.js?v=20260226u"></script>
 </body>
 </html>
-
-
-
-

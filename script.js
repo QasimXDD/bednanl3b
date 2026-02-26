@@ -477,9 +477,11 @@ function renderSoundToggle() {
   if (!soundToggleBtn || !window.BednaSound) {
     return;
   }
-  const enabled = window.BednaSound.isEnabled();
-  soundToggleBtn.textContent = enabled ? t("soundOn") : t("soundOff");
-  soundToggleBtn.classList.toggle("off", !enabled);
+  soundToggleBtn.textContent = t("soundOn");
+  soundToggleBtn.classList.remove("off");
+  soundToggleBtn.disabled = true;
+  soundToggleBtn.setAttribute("aria-disabled", "true");
+  soundToggleBtn.title = t("soundOn");
 }
 
 function formatDate(ts) {
@@ -491,6 +493,101 @@ function formatDate(ts) {
     dateStyle: "medium",
     timeStyle: "short"
   }).format(new Date(value));
+}
+
+function normalizeCountryCode(value) {
+  const code = String(value || "").trim().toUpperCase();
+  return /^[A-Z]{2}$/.test(code) ? code : "";
+}
+
+function extractCountryCodeFromLocaleTag(rawTag) {
+  const tag = String(rawTag || "").trim();
+  if (!tag) {
+    return "";
+  }
+  const parts = tag.split(/[-_]/g);
+  if (parts.length < 2) {
+    return "";
+  }
+  for (let i = 1; i < parts.length; i += 1) {
+    const candidate = normalizeCountryCode(parts[i]);
+    if (candidate) {
+      return candidate;
+    }
+  }
+  return "";
+}
+
+function detectClientCountryCode() {
+  const localeCandidates = [];
+  if (typeof navigator !== "undefined") {
+    if (Array.isArray(navigator.languages)) {
+      localeCandidates.push(...navigator.languages);
+    }
+    if (typeof navigator.language === "string") {
+      localeCandidates.push(navigator.language);
+    }
+  }
+  try {
+    localeCandidates.push(Intl.DateTimeFormat().resolvedOptions().locale);
+  } catch (_error) {
+    // Ignore locale resolution failure and continue.
+  }
+
+  for (const locale of localeCandidates) {
+    const fromLocale = extractCountryCodeFromLocaleTag(locale);
+    if (fromLocale) {
+      return fromLocale;
+    }
+  }
+  return "";
+}
+
+const CLIENT_COUNTRY_CODE = detectClientCountryCode();
+
+function countryCodeToFlagEmoji(countryCode) {
+  const code = normalizeCountryCode(countryCode);
+  if (!code) {
+    return "";
+  }
+  return String.fromCodePoint(...Array.from(code).map((ch) => ch.charCodeAt(0) + 127397));
+}
+
+function countryCodeToFlagIconUrl(countryCode) {
+  const code = normalizeCountryCode(countryCode);
+  if (!code) {
+    return "";
+  }
+  return `https://flagcdn.com/24x18/${code.toLowerCase()}.png`;
+}
+
+function createCountryFlagBadge(countryCode) {
+  const code = normalizeCountryCode(countryCode);
+  if (!code) {
+    return null;
+  }
+  const badge = document.createElement("span");
+  badge.className = "country-flag-badge";
+  badge.title = code;
+  badge.setAttribute("aria-label", code);
+  const img = document.createElement("img");
+  img.src = countryCodeToFlagIconUrl(code);
+  img.alt = code;
+  img.width = 24;
+  img.height = 18;
+  img.decoding = "async";
+  img.referrerPolicy = "no-referrer";
+  img.addEventListener(
+    "error",
+    () => {
+      const fallback = countryCodeToFlagEmoji(code);
+      badge.classList.add("is-fallback-text");
+      badge.textContent = fallback || code;
+    },
+    { once: true }
+  );
+  badge.appendChild(img);
+  return badge;
 }
 
 function closeLobbyProfileModal() {
@@ -592,7 +689,14 @@ async function openLobbyProfileModal() {
     activeLobbyProfile = profile;
     selectedLobbyAvatarDataUrl = profile.avatarDataUrl || null;
     lobbyProfileTitle.textContent = t("profileTitle");
-    lobbyProfileUsername.textContent = `@${profile.username} • ${profile.displayName || profile.username}`;
+    lobbyProfileUsername.textContent = "";
+    const identity = document.createElement("span");
+    identity.textContent = `@${profile.username} • ${profile.displayName || profile.username}`;
+    lobbyProfileUsername.appendChild(identity);
+    const countryFlagBadge = createCountryFlagBadge(profile.countryCode || CLIENT_COUNTRY_CODE);
+    if (countryFlagBadge) {
+      lobbyProfileUsername.appendChild(countryFlagBadge);
+    }
     lobbyProfileStatus.textContent = profile.isOnline ? t("profileOnline") : t("profileOffline");
     lobbyProfileCreatedAt.textContent = fmt(t("profileCreated"), { date: formatDate(profile.createdAt) });
     lobbyProfileDisplayNameInput.value = profile.displayName || profile.username;
@@ -1171,6 +1275,7 @@ async function api(pathname, options = {}) {
   const headers = {
     "Content-Type": "application/json",
     "X-Lang": getLang(),
+    ...(CLIENT_COUNTRY_CODE ? { "X-Country": CLIENT_COUNTRY_CODE } : {}),
     ...(options.headers || {})
   };
   if (token) {
@@ -1317,7 +1422,7 @@ function syncSupervisorControls() {
 }
 
 function setLobbyBackgroundAnimation(active) {
-  document.body.classList.toggle("lobby-animated", Boolean(active));
+  void active;
 }
 
 function showAuth() {
@@ -2183,20 +2288,6 @@ langSelect.addEventListener("change", (event) => {
   sfx("click");
   setLang(event.target.value);
 });
-
-if (soundToggleBtn) {
-  soundToggleBtn.addEventListener("click", () => {
-    if (!window.BednaSound) {
-      return;
-    }
-    const wasEnabled = window.BednaSound.isEnabled();
-    const next = window.BednaSound.toggle();
-    if (!wasEnabled && next) {
-      sfx("notify");
-    }
-    renderSoundToggle();
-  });
-}
 
 if (openRegisterBtn) {
   openRegisterBtn.addEventListener("click", () => {
