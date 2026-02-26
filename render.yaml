@@ -18,8 +18,10 @@ services:
         value: /tmp/sawawatch/data
       - key: UPLOADS_DIR
         value: /tmp/sawawatch/uploads
+      # Free-plan persistence fallback: sync users.json to GitHub.
+      # Keep this pointed to your repository and set GITHUB_USERS_SYNC_TOKEN in Render secrets.
       - key: GITHUB_USERS_SYNC_REPO
-        value: ""
+        value: QasimXDD/bednanl3b
       - key: GITHUB_USERS_SYNC_BRANCH
         value: main
       - key: GITHUB_USERS_SYNC_PATH

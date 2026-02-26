@@ -188,10 +188,13 @@ let avatarWebpSupported = null;
 let retryableChatSend = null;
 let chatLastOutsidePointerAt = 0;
 let mobileChatComposerOpen = false;
+let mobileChatKeyboardOffsetPx = 0;
+let mobileChatViewportEventsBound = false;
 let activeReplyTarget = null;
 const renderedMessageIds = new Set();
 const CHAT_SEND_RETRY_WINDOW_MS = 30000;
 const CHAT_REACTION_CHOICES = Object.freeze(["👍", "❤️", "😂", "🔥", "😮", "😢"]);
+const MOBILE_CHAT_KEYBOARD_OPEN_THRESHOLD_PX = 72;
 const ROOM_VIDEO_MAX_BYTES = 1024 * 1024 * 1024;
 const ROOM_VIDEO_SYNC_LOCK_TOAST_MS = 4000;
 const ROOM_VIDEO_LEADER_SEEK_DRIFT_SEC = 0.9;
@@ -783,11 +786,82 @@ function focusChatInputForContinuousTyping(submitStartedAt = 0, { force = false 
   });
 }
 
+function setMobileChatKeyboardOffset(offsetPx, { keepLatestVisible = false } = {}) {
+  const safeOffset = Math.max(0, Math.round(Number(offsetPx) || 0));
+  if (!Number.isFinite(safeOffset)) {
+    return;
+  }
+  const changed = safeOffset !== mobileChatKeyboardOffsetPx;
+  mobileChatKeyboardOffsetPx = safeOffset;
+  document.documentElement.style.setProperty("--room-chat-keyboard-offset", `${safeOffset}px`);
+  document.body.classList.toggle("room-mobile-keyboard-open", safeOffset > 0);
+  if (!chatMessages) {
+    return;
+  }
+  if (!changed && !keepLatestVisible) {
+    return;
+  }
+  const scrollToLatest = () => {
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+  };
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(scrollToLatest);
+  } else {
+    setTimeout(scrollToLatest, 0);
+  }
+}
+
+function getMobileChatKeyboardOffset() {
+  if (!isRoomMobileLayout()) {
+    return 0;
+  }
+  if (!window.visualViewport) {
+    return 0;
+  }
+  const viewport = window.visualViewport;
+  const viewportBottom = Number(viewport.height || 0) + Number(viewport.offsetTop || 0);
+  const rawOffset = Math.max(0, Math.round(Number(window.innerHeight || 0) - viewportBottom));
+  if (rawOffset < MOBILE_CHAT_KEYBOARD_OPEN_THRESHOLD_PX) {
+    return 0;
+  }
+  return rawOffset;
+}
+
+function syncMobileChatKeyboardOffset({ keepLatestVisible = false } = {}) {
+  if (!chatForm || !chatMessages) {
+    return;
+  }
+  if (!isRoomMobileLayout()) {
+    setMobileChatKeyboardOffset(0, { keepLatestVisible: false });
+    return;
+  }
+  const keyboardOffset = getMobileChatKeyboardOffset();
+  const shouldStickLatest = keepLatestVisible || keyboardOffset > 0 || document.activeElement === chatInput;
+  setMobileChatKeyboardOffset(keyboardOffset, { keepLatestVisible: shouldStickLatest });
+}
+
+function bindMobileChatViewportEvents() {
+  if (mobileChatViewportEventsBound) {
+    return;
+  }
+  mobileChatViewportEventsBound = true;
+  const handleViewportShift = () => {
+    syncMobileChatKeyboardOffset({ keepLatestVisible: true });
+  };
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", handleViewportShift);
+    window.visualViewport.addEventListener("scroll", handleViewportShift);
+  }
+  window.addEventListener("resize", handleViewportShift, { passive: true });
+  window.addEventListener("orientationchange", handleViewportShift);
+}
+
 function setMobileChatComposerOpen(open, { focusInput = false, blurInput = false } = {}) {
   if (!chatForm || !chatInput) {
     return;
   }
   const mobile = isRoomMobileLayout();
+  void open;
   if (!mobile) {
     mobileChatComposerOpen = true;
     chatForm.classList.remove("mobile-chat-collapsed");
@@ -798,31 +872,40 @@ function setMobileChatComposerOpen(open, { focusInput = false, blurInput = false
     if (chatComposerCloseBtn) {
       chatComposerCloseBtn.classList.add("hidden");
     }
+    setMobileChatKeyboardOffset(0);
     return;
   }
 
-  mobileChatComposerOpen = Boolean(open);
-  chatForm.classList.toggle("mobile-chat-collapsed", !mobileChatComposerOpen);
-  document.body.classList.toggle("mobile-chat-composer-open", mobileChatComposerOpen);
+  mobileChatComposerOpen = true;
+  chatForm.classList.remove("mobile-chat-collapsed");
+  document.body.classList.add("mobile-chat-composer-open");
   if (chatComposerOpenBtn) {
-    chatComposerOpenBtn.classList.toggle("hidden", mobileChatComposerOpen);
+    chatComposerOpenBtn.classList.add("hidden");
   }
   if (chatComposerCloseBtn) {
-    chatComposerCloseBtn.classList.toggle("hidden", !mobileChatComposerOpen);
+    chatComposerCloseBtn.classList.add("hidden");
   }
-  if (!mobileChatComposerOpen && blurInput) {
+  if (blurInput && !focusInput) {
     chatInput.blur();
   }
-  if (mobileChatComposerOpen && focusInput) {
+  if (focusInput) {
     focusChatInputForContinuousTyping(0, { force: true });
   }
+  syncMobileChatKeyboardOffset({ keepLatestVisible: true });
 }
 
 function closeMobileChatComposerFromUserAction() {
   if (!isRoomMobileLayout()) {
     return;
   }
-  setMobileChatComposerOpen(false, { blurInput: true });
+  if (chatInput) {
+    chatInput.blur();
+  }
+  [0, 90, 180].forEach((delayMs) => {
+    setTimeout(() => {
+      syncMobileChatKeyboardOffset({ keepLatestVisible: true });
+    }, delayMs);
+  });
 }
 
 function shortenReplyText(text, max = 90) {
@@ -6324,6 +6407,7 @@ document.addEventListener("touchstart", markInteractionForRoomVideoAudio, { pass
 if (roomMobileLayoutQuery && typeof roomMobileLayoutQuery.addEventListener === "function") {
   roomMobileLayoutQuery.addEventListener("change", () => {
     syncPlayersDrawerMode();
+    syncMobileChatKeyboardOffset({ keepLatestVisible: true });
   });
 }
 
@@ -6373,6 +6457,27 @@ if (chatInput) {
       return;
     }
     setMobileChatComposerOpen(true);
+    [0, 80, 170, 300].forEach((delayMs) => {
+      setTimeout(() => {
+        syncMobileChatKeyboardOffset({ keepLatestVisible: true });
+      }, delayMs);
+    });
+  });
+  chatInput.addEventListener("input", () => {
+    if (!isRoomMobileLayout()) {
+      return;
+    }
+    syncMobileChatKeyboardOffset({ keepLatestVisible: true });
+  });
+  chatInput.addEventListener("blur", () => {
+    if (!isRoomMobileLayout()) {
+      return;
+    }
+    [0, 90, 180].forEach((delayMs) => {
+      setTimeout(() => {
+        syncMobileChatKeyboardOffset({ keepLatestVisible: true });
+      }, delayMs);
+    });
   });
 }
 
@@ -6469,7 +6574,9 @@ async function bootRoom() {
 window.addEventListener("beforeunload", () => {
   roomVideoPageLeaving = true;
   document.body.classList.remove("room-page");
+  document.body.classList.remove("room-mobile-keyboard-open");
   document.documentElement.classList.remove("room-page");
+  document.documentElement.style.setProperty("--room-chat-keyboard-offset", "0px");
   leaveCurrentRoom({ keepalive: true });
   if (pollTimer) {
     clearInterval(pollTimer);
@@ -6502,6 +6609,11 @@ window.addEventListener("pageshow", () => {
   setTimeout(() => {
     attemptMobileRoomVideoResume({ fromGesture: false });
   }, 90);
+  [40, 130, 240].forEach((delayMs) => {
+    setTimeout(() => {
+      syncMobileChatKeyboardOffset({ keepLatestVisible: true });
+    }, delayMs);
+  });
 });
 
 document.addEventListener("visibilitychange", () => {
@@ -6529,6 +6641,7 @@ document.addEventListener("visibilitychange", () => {
   if (roomVideoPlayer && roomVideoUserInteracted) {
     applyLocalRoomVideoVolumeToPlayers();
   }
+  syncMobileChatKeyboardOffset({ keepLatestVisible: true });
   attemptMobileRoomVideoResume({ fromGesture: false });
   youTubeAudioUnlockNeeded = true;
   setTimeout(() => {
@@ -6542,8 +6655,10 @@ loadRoomVideoVolumePreference();
 setRoomVideoVolume(roomVideoLocalVolume, { mute: roomVideoLocalMuted, persist: false });
 updateRoomVideoControls();
 
+bindMobileChatViewportEvents();
 setLang(getLang());
 syncPlayersDrawerMode();
+syncMobileChatKeyboardOffset({ keepLatestVisible: false });
 bootRoom();
 
 

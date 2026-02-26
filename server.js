@@ -18,8 +18,17 @@ const Busboy = require("busboy");
 
 const PORT = process.env.PORT || 3000;
 const ROOT = __dirname;
-const DATA_DIR = path.resolve(String(process.env.DATA_DIR || path.join(ROOT, "data")));
-const UPLOADS_DIR = path.resolve(String(process.env.UPLOADS_DIR || path.join(ROOT, "uploads")));
+const RENDER_DATA_ROOT = path.resolve(
+  String(process.env.RENDER_DISK_ROOT || path.join(os.tmpdir(), "sawawatch"))
+);
+const DEFAULT_DATA_DIR = process.env.RENDER
+  ? path.join(RENDER_DATA_ROOT, "data")
+  : path.join(ROOT, "data");
+const DEFAULT_UPLOADS_DIR = process.env.RENDER
+  ? path.join(RENDER_DATA_ROOT, "uploads")
+  : path.join(ROOT, "uploads");
+const DATA_DIR = path.resolve(String(process.env.DATA_DIR || DEFAULT_DATA_DIR));
+const UPLOADS_DIR = path.resolve(String(process.env.UPLOADS_DIR || DEFAULT_UPLOADS_DIR));
 const ROOM_VIDEO_PUBLIC_PREFIX = "/uploads/room-videos/";
 const ROOM_VIDEO_UPLOAD_DIR_DEFAULT = path.join(UPLOADS_DIR, "room-videos");
 const ROOM_VIDEO_UPLOAD_DIR_FALLBACK = path.join(os.tmpdir(), "bednanl3b-room-videos");
@@ -985,6 +994,57 @@ function queueUsersSyncToGitHub(serializedUsers) {
     .catch((error) => {
       console.error("Failed to sync users to GitHub:", error.message);
     });
+}
+
+function normalizePathForCompare(dirPath) {
+  return path.resolve(String(dirPath || ""))
+    .replace(/\\/g, "/")
+    .replace(/\/+$/, "")
+    .toLowerCase();
+}
+
+const OS_TMP_DIR_NORMALIZED = normalizePathForCompare(os.tmpdir());
+
+function isLikelyEphemeralDir(dirPath) {
+  const normalized = normalizePathForCompare(dirPath);
+  if (!normalized) {
+    return false;
+  }
+  return (
+    normalized === "/tmp"
+    || normalized.startsWith("/tmp/")
+    || normalized === "/var/tmp"
+    || normalized.startsWith("/var/tmp/")
+    || normalized === OS_TMP_DIR_NORMALIZED
+    || normalized.startsWith(`${OS_TMP_DIR_NORMALIZED}/`)
+  );
+}
+
+function hasDurableUsersStorage() {
+  if (!isLikelyEphemeralDir(DATA_DIR)) {
+    return true;
+  }
+  if (isGitHubUsersSyncEnabled()) {
+    return true;
+  }
+  if (DATABASE_URL) {
+    return true;
+  }
+  return false;
+}
+
+function warnIfUsersStorageIsEphemeral() {
+  if (hasDurableUsersStorage()) {
+    return;
+  }
+  console.warn(
+    [
+      "Users storage path appears ephemeral:",
+      DATA_DIR,
+      "Created accounts may be lost after restart/deploy.",
+      "Use a persistent disk path (e.g. /var/data/...) or enable GITHUB_USERS_SYNC / DATABASE_URL."
+    ].join(" ")
+  );
 }
 
 function ensureDataDir() {
@@ -5905,6 +5965,7 @@ server.headersTimeout = 120000;
 setupWebSocketServer(server);
 
 async function bootstrap() {
+  warnIfUsersStorageIsEphemeral();
   await loadUsers();
   loadModeration();
   ensureUploadsDir();

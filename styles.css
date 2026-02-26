@@ -22,6 +22,7 @@
   --radius-lg: 24px;
   --radius-md: 16px;
   --radius-sm: 12px;
+  --room-chat-keyboard-offset: 0px;
 }
 
 * {
@@ -4963,56 +4964,35 @@ ul {
 
 .chat-composer-open-btn,
 .chat-composer-close-btn {
-  display: none;
+  display: none !important;
 }
 
 @media (max-width: 980px) {
+  body.room-page .chat-box {
+    padding-bottom: calc(4.6rem + env(safe-area-inset-bottom, 0px) + var(--room-chat-keyboard-offset, 0px)) !important;
+    transition: padding-bottom 0.2s ease;
+  }
+
+  body.room-page .chat-messages {
+    padding-bottom: calc(0.28rem + (var(--room-chat-keyboard-offset, 0px) * 0.4)) !important;
+    scroll-padding-bottom: calc(6.2rem + env(safe-area-inset-bottom, 0px) + var(--room-chat-keyboard-offset, 0px)) !important;
+    transition: padding-bottom 0.2s ease;
+  }
+
   body.room-page .chat-form {
-    grid-template-columns: minmax(0, 1fr) auto auto !important;
+    grid-template-columns: minmax(0, 1fr) auto !important;
+    transform: translateY(calc(var(--room-chat-keyboard-offset, 0px) * -1)) !important;
     transition: transform 0.22s ease, opacity 0.18s ease !important;
   }
 
   body.room-page .chat-form.mobile-chat-collapsed {
-    transform: translateY(calc(100% + 1rem));
-    opacity: 0;
-    pointer-events: none;
+    transform: translateY(calc(var(--room-chat-keyboard-offset, 0px) * -1)) !important;
+    opacity: 1;
+    pointer-events: auto;
   }
 
+  body.room-page .chat-composer-open-btn,
   body.room-page .chat-composer-close-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 2.08rem;
-    width: 2.08rem;
-    min-height: 2.08rem;
-    padding: 0;
-    border-radius: 50%;
-    font-size: 1rem;
-    line-height: 1;
-    color: #d6e7ff;
-  }
-
-  body.room-page .chat-composer-open-btn {
-    position: fixed;
-    left: 0.45rem;
-    bottom: calc(0.45rem + env(safe-area-inset-bottom, 0px));
-    z-index: 111;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 2.36rem;
-    height: 2.36rem;
-    padding: 0;
-    border-radius: 50%;
-    border: 1px solid rgba(143, 201, 255, 0.42);
-    background: rgba(9, 23, 46, 0.92);
-    box-shadow: 0 10px 26px rgba(1, 8, 21, 0.5);
-    font-size: 0.98rem;
-    line-height: 1;
-  }
-
-  body.room-page.mobile-chat-composer-open .chat-composer-open-btn {
-    opacity: 0;
-    pointer-events: none;
+    display: none !important;
   }
 }
