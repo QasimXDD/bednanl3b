@@ -2514,6 +2514,14 @@ ul {
   flex-shrink: 0;
 }
 
+.player-country-badge {
+  margin-inline-start: auto;
+  flex-shrink: 0;
+  width: 1.34rem;
+  height: 1rem;
+  box-shadow: 0 0 0 1px rgba(255, 236, 186, 0.28), 0 4px 10px rgba(0, 0, 0, 0.22);
+}
+
 .player-action-btn {
   border-radius: 999px;
   padding: 0.35rem 0.62rem;

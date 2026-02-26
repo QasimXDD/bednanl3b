@@ -1225,6 +1225,17 @@ function createCountryFlagBadge(countryCode) {
   return badge;
 }
 
+function countryCodeForUser(username) {
+  const profileCountry = normalizeCountryCode(profileCache.get(username)?.countryCode);
+  if (profileCountry) {
+    return profileCountry;
+  }
+  if (username === me) {
+    return CLIENT_COUNTRY_CODE;
+  }
+  return "";
+}
+
 function displayNameFor(username) {
   const profile = profileCache.get(username);
   return profile?.displayName || username;
@@ -5087,6 +5098,12 @@ function renderPlayers(members) {
 
     if (actions.childElementCount > 0) {
       item.appendChild(actions);
+    }
+
+    const playerFlagBadge = createCountryFlagBadge(countryCodeForUser(player));
+    if (playerFlagBadge) {
+      playerFlagBadge.classList.add("player-country-badge");
+      item.appendChild(playerFlagBadge);
     }
 
     playersList.appendChild(item);

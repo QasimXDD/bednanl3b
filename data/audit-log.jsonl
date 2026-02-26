@@ -764,3 +764,15 @@
 {"id":"1772114319691-0b3bcad7bb","createdAt":1772114319691,"action":"auth_guest_login","actor":"guest_قاسم","target":"guest_قاسم","details":{"ip":"::1","displayName":"قاسم"}}
 {"id":"1772114326443-85e0c12d47","createdAt":1772114326443,"action":"room_created","actor":"guest_قاسم","target":"7CYCKZ","details":{"roomName":"غرفة جديدة"}}
 {"id":"1772114329179-37426587bd","createdAt":1772114329179,"action":"room_opened","actor":"guest_قاسم","target":"7CYCKZ","details":{}}
+{"id":"1772114743532-1e0b84fff1","createdAt":1772114743532,"action":"auth_register_success","actor":"ugfjx08s8","target":"ugfjx08s8","details":{"ip":"127.0.0.1"}}
+{"id":"1772114743567-8cdd29c4a0","createdAt":1772114743567,"action":"auth_register_success","actor":"uil9buoob","target":"uil9buoob","details":{"ip":"127.0.0.1"}}
+{"id":"1772114743598-44b390cb4b","createdAt":1772114743598,"action":"auth_login_failure","actor":"ugfjx08s8","target":"ugfjx08s8","details":{"reason":"bad_password","ip":"127.0.0.1"}}
+{"id":"1772114743601-53766d7592","createdAt":1772114743602,"action":"room_created","actor":"ugfjx08s8","target":"CTY9HD","details":{"roomName":"QA Smoke Room"}}
+{"id":"1772114743603-be0769f1aa","createdAt":1772114743603,"action":"room_join_requested","actor":"uil9buoob","target":"CTY9HD","details":{}}
+{"id":"1772114743606-0cb8b0b98d","createdAt":1772114743606,"action":"room_join_request_approved","actor":"ugfjx08s8","target":"CTY9HD","details":{"target":"uil9buoob"}}
+{"id":"1772114743608-d58be8c862","createdAt":1772114743608,"action":"room_opened","actor":"uil9buoob","target":"CTY9HD","details":{}}
+{"id":"1772114743613-3681b25c6e","createdAt":1772114743613,"action":"room_member_kicked","actor":"ugfjx08s8","target":"CTY9HD","details":{"target":"uil9buoob"}}
+{"id":"1772114743620-f90a1a4f53","createdAt":1772114743620,"action":"auth_guest_login","actor":"guest_smoke_guest","target":"guest_smoke_guest","details":{"ip":"127.0.0.1","displayName":"Smoke Guest"}}
+{"id":"1772114765525-429ae2e59e","createdAt":1772114765525,"action":"room_left","actor":"guest_قاسم","target":"7CYCKZ","details":{}}
+{"id":"1772114765789-0527a88a72","createdAt":1772114765789,"action":"room_joined","actor":"guest_قاسم","target":"7CYCKZ","details":{"via":"join_endpoint"}}
+{"id":"1772114765789-058e442144","createdAt":1772114765789,"action":"room_opened","actor":"guest_قاسم","target":"7CYCKZ","details":{}}
