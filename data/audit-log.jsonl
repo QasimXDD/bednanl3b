@@ -812,3 +812,13 @@
 {"id":"1772115803551-a5df79c568","createdAt":1772115803551,"action":"room_opened","actor":"uot7dfidl","target":"JH7WWU","details":{}}
 {"id":"1772115803557-3d4bc4876a","createdAt":1772115803557,"action":"room_member_kicked","actor":"uvjs87qjt","target":"JH7WWU","details":{"target":"uot7dfidl"}}
 {"id":"1772115803565-660283940d","createdAt":1772115803565,"action":"auth_guest_login","actor":"guest_smoke_guest","target":"guest_smoke_guest","details":{"ip":"127.0.0.1","displayName":"Smoke Guest"}}
+{"id":"1772116463064-30fc649903","createdAt":1772116463064,"action":"room_left","actor":"guest_قاسم","target":"7CYCKZ","details":{}}
+{"id":"1772116911381-d1922c99a5","createdAt":1772116911381,"action":"auth_register_success","actor":"uyemj36up","target":"uyemj36up","details":{"ip":"127.0.0.1"}}
+{"id":"1772116911420-fcdb5d1787","createdAt":1772116911420,"action":"auth_register_success","actor":"u5mjn6vwi","target":"u5mjn6vwi","details":{"ip":"127.0.0.1"}}
+{"id":"1772116911453-d0721ae0d9","createdAt":1772116911453,"action":"auth_login_failure","actor":"uyemj36up","target":"uyemj36up","details":{"reason":"bad_password","ip":"127.0.0.1"}}
+{"id":"1772116911457-bc6750213a","createdAt":1772116911457,"action":"room_created","actor":"uyemj36up","target":"6EGP2R","details":{"roomName":"QA Smoke Room"}}
+{"id":"1772116911459-a92c86e120","createdAt":1772116911459,"action":"room_join_requested","actor":"u5mjn6vwi","target":"6EGP2R","details":{}}
+{"id":"1772116911462-0c5577d200","createdAt":1772116911462,"action":"room_join_request_approved","actor":"uyemj36up","target":"6EGP2R","details":{"target":"u5mjn6vwi"}}
+{"id":"1772116911464-a4b84cb1e8","createdAt":1772116911464,"action":"room_opened","actor":"u5mjn6vwi","target":"6EGP2R","details":{}}
+{"id":"1772116911470-feb8f25b24","createdAt":1772116911470,"action":"room_member_kicked","actor":"uyemj36up","target":"6EGP2R","details":{"target":"u5mjn6vwi"}}
+{"id":"1772116911477-f6552b0922","createdAt":1772116911477,"action":"auth_guest_login","actor":"guest_smoke_guest","target":"guest_smoke_guest","details":{"ip":"127.0.0.1","displayName":"Smoke Guest"}}

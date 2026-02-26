@@ -190,6 +190,7 @@ let chatLastOutsidePointerAt = 0;
 let mobileChatComposerOpen = false;
 let mobileChatKeyboardOffsetPx = 0;
 let mobileChatViewportEventsBound = false;
+let suppressNextMobileSendButtonClickUntil = 0;
 let activeReplyTarget = null;
 const renderedMessageIds = new Set();
 const CHAT_SEND_RETRY_WINDOW_MS = 30000;
@@ -787,10 +788,10 @@ function focusChatInputForContinuousTyping(submitStartedAt = 0, { force = false 
 }
 
 function setMobileChatKeyboardOffset(offsetPx, { keepLatestVisible = false } = {}) {
-  const safeOffset = Math.max(0, Math.round(Number(offsetPx) || 0));
-  if (!Number.isFinite(safeOffset)) {
-    return;
-  }
+  const numericOffset = Number(offsetPx);
+  const safeOffset = Number.isFinite(numericOffset)
+    ? Math.max(0, Math.min(520, Math.round(numericOffset)))
+    : 0;
   const changed = safeOffset !== mobileChatKeyboardOffsetPx;
   mobileChatKeyboardOffsetPx = safeOffset;
   document.documentElement.style.setProperty("--room-chat-keyboard-offset", `${safeOffset}px`);
@@ -835,8 +836,9 @@ function syncMobileChatKeyboardOffset({ keepLatestVisible = false } = {}) {
     setMobileChatKeyboardOffset(0, { keepLatestVisible: false });
     return;
   }
-  const keyboardOffset = getMobileChatKeyboardOffset();
-  const shouldStickLatest = keepLatestVisible || keyboardOffset > 0 || document.activeElement === chatInput;
+  const inputFocused = document.activeElement === chatInput;
+  const keyboardOffset = inputFocused ? getMobileChatKeyboardOffset() : 0;
+  const shouldStickLatest = keepLatestVisible || keyboardOffset > 0 || inputFocused;
   setMobileChatKeyboardOffset(keyboardOffset, { keepLatestVisible: shouldStickLatest });
 }
 
@@ -6448,6 +6450,42 @@ if (chatComposerCloseBtn) {
   chatComposerCloseBtn.addEventListener("click", () => {
     sfx("click");
     closeMobileChatComposerFromUserAction();
+  });
+}
+
+if (sendBtn) {
+  sendBtn.addEventListener(
+    "pointerdown",
+    (event) => {
+      if (!isRoomMobileLayout()) {
+        return;
+      }
+      // Keep focus on the input so mobile keyboard does not collapse on send tap.
+      if (event.pointerType && event.pointerType !== "mouse") {
+        event.preventDefault();
+        suppressNextMobileSendButtonClickUntil = Date.now() + 700;
+        focusChatInputForContinuousTyping(0, { force: true });
+        if (!isSendingChatMessage) {
+          if (typeof chatForm.requestSubmit === "function") {
+            chatForm.requestSubmit();
+          } else {
+            chatForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+          }
+        }
+      }
+    },
+    { passive: false }
+  );
+  sendBtn.addEventListener("click", (event) => {
+    if (!isRoomMobileLayout()) {
+      return;
+    }
+    if (Date.now() <= suppressNextMobileSendButtonClickUntil) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    focusChatInputForContinuousTyping(0, { force: true });
   });
 }
 
