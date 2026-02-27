@@ -1124,6 +1124,13 @@ async function persistRuntimeSnapshotToMySql() {
 }
 
 async function initSqlRuntime() {
+  if (hasMySqlRuntimeConfig()) {
+    await initMySqlRuntime();
+    if (!mysqlRuntimeEnabled) {
+      await initPgRuntime();
+    }
+    return;
+  }
   await initPgRuntime();
   if (!pgRuntimeEnabled) {
     await initMySqlRuntime();

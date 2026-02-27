@@ -983,3 +983,12 @@
 {"id":"1772216776979-206bce2b93","createdAt":1772216776979,"action":"room_video_queued","actor":"qasim","target":"BKP2EG","details":{"source":"youtube","youtubeId":"xNnjlP94GnY","queueLength":1}}
 {"id":"1772216794287-14bf8d5530","createdAt":1772216794287,"action":"room_video_queue_next","actor":"qasim","target":"BKP2EG","details":{"queueLength":0}}
 {"id":"1772216811417-18785d9550","createdAt":1772216811417,"action":"room_video_queued","actor":"qasim","target":"BKP2EG","details":{"source":"youtube","youtubeId":"awNkMZYfm2c","queueLength":1}}
+{"id":"1772217091376-e636154f45","createdAt":1772217091376,"action":"auth_register_success","actor":"ucdohoxr9","target":"ucdohoxr9","details":{"ip":"127.0.0.1"}}
+{"id":"1772217091413-96e5b8eb59","createdAt":1772217091413,"action":"auth_register_success","actor":"uedc0u25w","target":"uedc0u25w","details":{"ip":"127.0.0.1"}}
+{"id":"1772217091446-b676e994c8","createdAt":1772217091446,"action":"auth_login_failure","actor":"ucdohoxr9","target":"ucdohoxr9","details":{"reason":"bad_password","ip":"127.0.0.1"}}
+{"id":"1772217091450-f7db31a2a0","createdAt":1772217091450,"action":"room_created","actor":"ucdohoxr9","target":"2PETNM","details":{"roomName":"QA Smoke Room"}}
+{"id":"1772217091452-487dd0304c","createdAt":1772217091452,"action":"room_join_requested","actor":"uedc0u25w","target":"2PETNM","details":{}}
+{"id":"1772217091456-077007c90c","createdAt":1772217091456,"action":"room_join_request_approved","actor":"ucdohoxr9","target":"2PETNM","details":{"target":"uedc0u25w"}}
+{"id":"1772217091458-a428d567de","createdAt":1772217091458,"action":"room_opened","actor":"uedc0u25w","target":"2PETNM","details":{}}
+{"id":"1772217091463-bf76e36c6c","createdAt":1772217091463,"action":"room_member_kicked","actor":"ucdohoxr9","target":"2PETNM","details":{"target":"uedc0u25w"}}
+{"id":"1772217091470-f82361f6c3","createdAt":1772217091470,"action":"auth_guest_login","actor":"guest_smoke_guest","target":"guest_smoke_guest","details":{"ip":"127.0.0.1","displayName":"Smoke Guest"}}
