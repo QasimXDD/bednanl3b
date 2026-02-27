@@ -32,6 +32,7 @@ const DEFAULT_UPLOADS_DIR = process.env.RENDER
 const DATA_DIR = path.resolve(String(process.env.DATA_DIR || DEFAULT_DATA_DIR));
 const UPLOADS_DIR = path.resolve(String(process.env.UPLOADS_DIR || DEFAULT_UPLOADS_DIR));
 const ROOM_VIDEO_PUBLIC_PREFIX = "/uploads/room-videos/";
+const ROOM_VIDEO_BLOB_API_PREFIX = "/api/video-blob/";
 const ROOM_VIDEO_UPLOAD_DIR_DEFAULT = path.join(UPLOADS_DIR, "room-videos");
 const ROOM_VIDEO_UPLOAD_DIR_FALLBACK = path.join(os.tmpdir(), "bednanl3b-room-videos");
 const USERS_FILE = path.join(DATA_DIR, "users.json");
@@ -63,6 +64,7 @@ const ROOM_VIDEO_MULTIPART_OVERHEAD_BYTES = 8 * 1024 * 1024;
 const ROOM_VIDEO_MAX_DURATION_SEC = 60 * 60 * 8;
 const ROOM_VIDEO_MAX_FILENAME_LENGTH = 120;
 const ROOM_VIDEO_HEARTBEAT_REWIND_GUARD_SEC = 2.4;
+const ROOM_VIDEO_DB_STREAM_CHUNK_BYTES = 1024 * 1024;
 const YOUTUBE_SEARCH_TIMEOUT_MS = 9000;
 const YOUTUBE_DOWNLOAD_TIMEOUT_MS = 1000 * 60 * 4;
 const YOUTUBE_INPUT_MAX_LENGTH = 300;
@@ -497,6 +499,18 @@ async function ensurePgRuntimeSchema() {
     );
   `);
   await pgClient.query(`
+    CREATE TABLE IF NOT EXISTS app_video_assets (
+      id TEXT PRIMARY KEY,
+      mime_type TEXT NOT NULL,
+      byte_size BIGINT NOT NULL,
+      payload BYTEA NOT NULL,
+      created_at BIGINT NOT NULL,
+      source_kind TEXT NOT NULL DEFAULT 'upload',
+      file_name TEXT NOT NULL DEFAULT '',
+      youtube_id TEXT NOT NULL DEFAULT ''
+    );
+  `);
+  await pgClient.query(`
     CREATE TABLE IF NOT EXISTS app_users (
       username TEXT PRIMARY KEY,
       password_hash TEXT NOT NULL,
@@ -585,6 +599,18 @@ async function ensureMySqlRuntimeSchema() {
       message_id BIGINT NOT NULL,
       payload LONGTEXT NOT NULL,
       PRIMARY KEY (room_code, message_id)
+    )
+  `);
+  await mysqlPool.execute(`
+    CREATE TABLE IF NOT EXISTS app_video_assets (
+      id VARCHAR(80) PRIMARY KEY,
+      mime_type VARCHAR(160) NOT NULL,
+      byte_size BIGINT NOT NULL,
+      payload LONGBLOB NOT NULL,
+      created_at BIGINT NOT NULL,
+      source_kind VARCHAR(32) NOT NULL DEFAULT 'upload',
+      file_name VARCHAR(255) NOT NULL DEFAULT '',
+      youtube_id VARCHAR(40) NOT NULL DEFAULT ''
     )
   `);
   await mysqlPool.execute(`
@@ -3087,6 +3113,440 @@ function roomVideoPublicToAbsolutePath(publicPath) {
   return absolute;
 }
 
+function buildRoomVideoBlobSrc(blobId) {
+  const cleanId = String(blobId || "").trim();
+  if (!cleanId) {
+    return "";
+  }
+  return `${ROOM_VIDEO_BLOB_API_PREFIX}${cleanId}`;
+}
+
+function extractRoomVideoBlobIdFromSrc(src) {
+  const clean = String(src || "").trim();
+  if (!clean.startsWith(ROOM_VIDEO_BLOB_API_PREFIX)) {
+    return "";
+  }
+  const value = clean.slice(ROOM_VIDEO_BLOB_API_PREFIX.length).split(/[?#]/)[0] || "";
+  return /^[A-Za-z0-9_-]+$/.test(value) ? value : "";
+}
+
+function getRoomVideoBlobId(entry) {
+  if (!entry) {
+    return "";
+  }
+  const explicit = String(entry.blobId || "").trim();
+  if (explicit) {
+    return explicit;
+  }
+  return extractRoomVideoBlobIdFromSrc(entry.src);
+}
+
+function normalizeSqlVideoBlobChunk(value) {
+  if (!value) {
+    return Buffer.alloc(0);
+  }
+  if (Buffer.isBuffer(value)) {
+    return value;
+  }
+  if (ArrayBuffer.isView(value)) {
+    return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+  }
+  if (value instanceof ArrayBuffer) {
+    return Buffer.from(value);
+  }
+  if (typeof value === "string") {
+    return Buffer.from(value, "binary");
+  }
+  return Buffer.alloc(0);
+}
+
+function isRoomVideoBlobReferenced(blobId) {
+  const cleanId = String(blobId || "").trim();
+  if (!cleanId) {
+    return false;
+  }
+  for (const room of rooms.values()) {
+    const currentBlobId = getRoomVideoBlobId(room?.video || null);
+    if (currentBlobId === cleanId) {
+      return true;
+    }
+    const queue = Array.isArray(room?.videoQueue) ? room.videoQueue : [];
+    for (const entry of queue) {
+      if (getRoomVideoBlobId(entry) === cleanId) {
+        return true;
+      }
+    }
+    const history = Array.isArray(room?.videoHistory) ? room.videoHistory : [];
+    for (const entry of history) {
+      if (getRoomVideoBlobId(entry) === cleanId) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function readRoomVideoBlobBufferFromDisk(filePath) {
+  const target = String(filePath || "").trim();
+  if (!target) {
+    return null;
+  }
+  try {
+    if (!fs.existsSync(target)) {
+      return null;
+    }
+    const payload = fs.readFileSync(target);
+    if (!Buffer.isBuffer(payload) || payload.length <= 0) {
+      return null;
+    }
+    if (payload.length > ROOM_VIDEO_MAX_BYTES) {
+      return null;
+    }
+    return payload;
+  } catch (_error) {
+    return null;
+  }
+}
+
+async function persistRoomVideoBlobBufferToSql(payload, {
+  mimeType = "video/mp4",
+  sourceKind = "upload",
+  fileName = "",
+  youtubeId = ""
+} = {}) {
+  if (!isSqlRuntimeEnabled()) {
+    return null;
+  }
+  const binary = normalizeSqlVideoBlobChunk(payload);
+  if (!binary.length || binary.length > ROOM_VIDEO_MAX_BYTES) {
+    return null;
+  }
+  const blobId = randomToken();
+  const createdAt = Date.now();
+  const cleanMimeType = normalizeVideoMimeType(mimeType) || "video/mp4";
+  const cleanSourceKind = String(sourceKind || "upload").trim().slice(0, 32) || "upload";
+  const cleanFileName = sanitizeUploadedFilename(fileName || "video");
+  const cleanYouTubeId = String(youtubeId || "").trim().slice(0, 40);
+  if (pgRuntimeEnabled && pgClient) {
+    await pgClient.query(
+      "INSERT INTO app_video_assets (id, mime_type, byte_size, payload, created_at, source_kind, file_name, youtube_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+      [
+        blobId,
+        cleanMimeType,
+        Number(binary.length),
+        binary,
+        Number(createdAt),
+        cleanSourceKind,
+        cleanFileName,
+        cleanYouTubeId
+      ]
+    );
+    return {
+      blobId,
+      src: buildRoomVideoBlobSrc(blobId),
+      size: Number(binary.length),
+      mimeType: cleanMimeType
+    };
+  }
+  if (mysqlRuntimeEnabled && mysqlPool) {
+    await mysqlPool.execute(
+      "INSERT INTO app_video_assets (id, mime_type, byte_size, payload, created_at, source_kind, file_name, youtube_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      [
+        blobId,
+        cleanMimeType,
+        Number(binary.length),
+        binary,
+        Number(createdAt),
+        cleanSourceKind,
+        cleanFileName,
+        cleanYouTubeId
+      ]
+    );
+    return {
+      blobId,
+      src: buildRoomVideoBlobSrc(blobId),
+      size: Number(binary.length),
+      mimeType: cleanMimeType
+    };
+  }
+  return null;
+}
+
+async function persistRoomVideoBlobFromFileToSql(filePath, meta = {}) {
+  const payload = readRoomVideoBlobBufferFromDisk(filePath);
+  if (!payload) {
+    return null;
+  }
+  return persistRoomVideoBlobBufferToSql(payload, meta);
+}
+
+async function deleteRoomVideoBlobFromSql(blobId) {
+  const cleanId = String(blobId || "").trim();
+  if (!cleanId || !isSqlRuntimeEnabled()) {
+    return;
+  }
+  if (pgRuntimeEnabled && pgClient) {
+    await pgClient.query("DELETE FROM app_video_assets WHERE id = $1", [cleanId]);
+    return;
+  }
+  if (mysqlRuntimeEnabled && mysqlPool) {
+    await mysqlPool.execute("DELETE FROM app_video_assets WHERE id = ?", [cleanId]);
+  }
+}
+
+async function fetchRoomVideoBlobMetaFromSql(blobId) {
+  const cleanId = String(blobId || "").trim();
+  if (!cleanId || !isSqlRuntimeEnabled()) {
+    return null;
+  }
+  if (pgRuntimeEnabled && pgClient) {
+    const result = await pgClient.query(
+      "SELECT id, mime_type, byte_size, created_at FROM app_video_assets WHERE id = $1 LIMIT 1",
+      [cleanId]
+    );
+    const row = result.rows[0];
+    if (!row) {
+      return null;
+    }
+    return {
+      id: String(row.id || cleanId),
+      mimeType: normalizeVideoMimeType(row.mime_type) || "video/mp4",
+      size: Math.max(0, Number(row.byte_size || 0)),
+      createdAt: Number(row.created_at || 0)
+    };
+  }
+  if (mysqlRuntimeEnabled && mysqlPool) {
+    const [rows] = await mysqlPool.query(
+      "SELECT id, mime_type, byte_size, created_at FROM app_video_assets WHERE id = ? LIMIT 1",
+      [cleanId]
+    );
+    const row = Array.isArray(rows) ? rows[0] : null;
+    if (!row) {
+      return null;
+    }
+    return {
+      id: String(row.id || cleanId),
+      mimeType: normalizeVideoMimeType(row.mime_type) || "video/mp4",
+      size: Math.max(0, Number(row.byte_size || 0)),
+      createdAt: Number(row.created_at || 0)
+    };
+  }
+  return null;
+}
+
+async function fetchRoomVideoBlobChunkFromSql(blobId, offset, length) {
+  const cleanId = String(blobId || "").trim();
+  const startOffset = Math.max(0, Number(offset) || 0);
+  const take = Math.max(0, Number(length) || 0);
+  if (!cleanId || !take || !isSqlRuntimeEnabled()) {
+    return Buffer.alloc(0);
+  }
+  if (pgRuntimeEnabled && pgClient) {
+    const result = await pgClient.query(
+      "SELECT substring(payload from $2 for $3) AS chunk FROM app_video_assets WHERE id = $1 LIMIT 1",
+      [cleanId, startOffset + 1, take]
+    );
+    const row = result.rows[0];
+    return normalizeSqlVideoBlobChunk(row?.chunk);
+  }
+  if (mysqlRuntimeEnabled && mysqlPool) {
+    const [rows] = await mysqlPool.query(
+      "SELECT SUBSTRING(payload, ?, ?) AS chunk FROM app_video_assets WHERE id = ? LIMIT 1",
+      [startOffset + 1, take, cleanId]
+    );
+    const row = Array.isArray(rows) ? rows[0] : null;
+    return normalizeSqlVideoBlobChunk(row?.chunk);
+  }
+  return Buffer.alloc(0);
+}
+
+async function serveRoomVideoBlobFromSql(req, res, blobId) {
+  const method = req.method === "HEAD" ? "HEAD" : req.method;
+  if (method !== "GET" && method !== "HEAD") {
+    res.writeHead(
+      405,
+      securityHeaders({
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store",
+        Allow: "GET, HEAD"
+      })
+    );
+    res.end(JSON.stringify({ error: "Method not allowed." }));
+    return;
+  }
+
+  const meta = await fetchRoomVideoBlobMetaFromSql(blobId);
+  if (!meta || !meta.size) {
+    res.writeHead(
+      404,
+      securityHeaders({
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store"
+      })
+    );
+    res.end(JSON.stringify({ error: "No room video is available." }));
+    return;
+  }
+
+  const totalSize = Math.max(0, Number(meta.size || 0));
+  const mimeType = normalizeVideoMimeType(meta.mimeType) || "video/mp4";
+  const rangeHeader = String(req.headers.range || "").trim();
+  let start = 0;
+  let end = totalSize - 1;
+  let statusCode = 200;
+
+  if (rangeHeader) {
+    const match = rangeHeader.match(/^bytes=(\d*)-(\d*)$/i);
+    if (!match) {
+      res.writeHead(
+        416,
+        securityHeaders({
+          "Content-Range": `bytes */${totalSize}`,
+          "Cache-Control": "no-store"
+        })
+      );
+      res.end();
+      return;
+    }
+    if (match[1] === "" && match[2] === "") {
+      res.writeHead(
+        416,
+        securityHeaders({
+          "Content-Range": `bytes */${totalSize}`,
+          "Cache-Control": "no-store"
+        })
+      );
+      res.end();
+      return;
+    }
+    if (match[1] === "") {
+      const suffixLength = Number(match[2]);
+      if (!Number.isInteger(suffixLength) || suffixLength <= 0) {
+        res.writeHead(
+          416,
+          securityHeaders({
+            "Content-Range": `bytes */${totalSize}`,
+            "Cache-Control": "no-store"
+          })
+        );
+        res.end();
+        return;
+      }
+      start = Math.max(0, totalSize - suffixLength);
+      end = totalSize - 1;
+    } else {
+      start = Number(match[1]);
+      end = match[2] === "" ? totalSize - 1 : Number(match[2]);
+    }
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || start >= totalSize) {
+      res.writeHead(
+        416,
+        securityHeaders({
+          "Content-Range": `bytes */${totalSize}`,
+          "Cache-Control": "no-store"
+        })
+      );
+      res.end();
+      return;
+    }
+    end = Math.min(totalSize - 1, end);
+    statusCode = 206;
+  }
+
+  const contentLength = end - start + 1;
+  const headers = {
+    "Content-Type": mimeType,
+    "Cache-Control": "public, max-age=120, must-revalidate",
+    "Accept-Ranges": "bytes",
+    "Content-Length": contentLength
+  };
+  if (statusCode === 206) {
+    headers["Content-Range"] = `bytes ${start}-${end}/${totalSize}`;
+  }
+  res.writeHead(statusCode, securityHeaders(headers));
+  if (method === "HEAD") {
+    res.end();
+    return;
+  }
+
+  let cursor = start;
+  let remaining = contentLength;
+  let aborted = false;
+  req.on("close", () => {
+    aborted = true;
+  });
+  while (remaining > 0 && !aborted && !res.writableEnded) {
+    const take = Math.min(ROOM_VIDEO_DB_STREAM_CHUNK_BYTES, remaining);
+    const chunk = await fetchRoomVideoBlobChunkFromSql(blobId, cursor, take);
+    if (!chunk || !chunk.length) {
+      break;
+    }
+    if (!res.write(chunk)) {
+      await new Promise((resolve) => res.once("drain", resolve));
+    }
+    cursor += chunk.length;
+    remaining -= chunk.length;
+  }
+  res.end();
+}
+
+function collectReferencedRoomVideoBlobIds() {
+  const ids = new Set();
+  rooms.forEach((room) => {
+    const currentBlobId = getRoomVideoBlobId(room?.video || null);
+    if (currentBlobId) {
+      ids.add(currentBlobId);
+    }
+    const queue = Array.isArray(room?.videoQueue) ? room.videoQueue : [];
+    queue.forEach((entry) => {
+      const id = getRoomVideoBlobId(entry);
+      if (id) {
+        ids.add(id);
+      }
+    });
+    const history = Array.isArray(room?.videoHistory) ? room.videoHistory : [];
+    history.forEach((entry) => {
+      const id = getRoomVideoBlobId(entry);
+      if (id) {
+        ids.add(id);
+      }
+    });
+  });
+  return ids;
+}
+
+async function pruneOrphanedRoomVideoBlobsFromSql() {
+  if (!isSqlRuntimeEnabled()) {
+    return;
+  }
+  const referenced = collectReferencedRoomVideoBlobIds();
+  try {
+    if (pgRuntimeEnabled && pgClient) {
+      const result = await pgClient.query("SELECT id FROM app_video_assets");
+      for (const row of result.rows) {
+        const id = String(row?.id || "").trim();
+        if (!id || referenced.has(id)) {
+          continue;
+        }
+        await pgClient.query("DELETE FROM app_video_assets WHERE id = $1", [id]);
+      }
+      return;
+    }
+    if (mysqlRuntimeEnabled && mysqlPool) {
+      const [rows] = await mysqlPool.query("SELECT id FROM app_video_assets");
+      for (const row of rows || []) {
+        const id = String(row?.id || "").trim();
+        if (!id || referenced.has(id)) {
+          continue;
+        }
+        await mysqlPool.execute("DELETE FROM app_video_assets WHERE id = ?", [id]);
+      }
+    }
+  } catch (error) {
+    console.error("Failed to prune orphaned room video blobs:", error.message);
+  }
+}
+
 function createRoomVideoSyncState(videoId) {
   return {
     videoId: String(videoId || randomToken()),
@@ -3103,11 +3563,13 @@ function cloneRoomVideoEntry(entry) {
   if (!entry || typeof entry !== "object") {
     return null;
   }
+  const blobId = String(entry.blobId || extractRoomVideoBlobIdFromSrc(entry.src)).trim();
   return {
     id: String(entry.id || randomToken()),
     sourceType: String(entry.sourceType || "file"),
     youtubeId: String(entry.youtubeId || ""),
     src: String(entry.src || ""),
+    blobId,
     filename: String(entry.filename || "video"),
     mimeType: String(entry.mimeType || "video/mp4"),
     size: Number(entry.size || 0),
@@ -3150,6 +3612,12 @@ function formatRoomVideoEntry(entry, room, syncState = null) {
 function cleanupRoomVideoEntryAsset(videoEntry) {
   if (!videoEntry || !videoEntry.src) {
     return;
+  }
+  const blobId = getRoomVideoBlobId(videoEntry);
+  if (blobId) {
+    deleteRoomVideoBlobFromSql(blobId).catch((error) => {
+      console.error("Failed to delete room video blob asset:", error.message);
+    });
   }
   const shouldPreserveCachedFile = Boolean(videoEntry.isYouTubeCached || isVideoSrcInYouTubeCache(videoEntry.src));
   const absolutePath = shouldPreserveCachedFile ? null : roomVideoPublicToAbsolutePath(videoEntry.src);
@@ -3315,23 +3783,34 @@ function removeRoomVideoAsset(room, options = {}) {
 }
 
 function createRoomFileVideoEntry(room, {
+  src,
   storedFileName,
   filename,
   mimeType,
   size,
   uploadedBy,
-  duration = 0
+  duration = 0,
+  youtubeId = ""
 }) {
-  const cleanStoredFileName = String(storedFileName || "").trim();
-  if (!room?.code || !cleanStoredFileName) {
+  if (!room?.code) {
     return null;
   }
+  let cleanSrc = String(src || "").trim();
+  if (!cleanSrc) {
+    const cleanStoredFileName = String(storedFileName || "").trim();
+    if (!cleanStoredFileName) {
+      return null;
+    }
+    cleanSrc = `${ROOM_VIDEO_PUBLIC_PREFIX}${cleanStoredFileName}`;
+  }
+  const blobId = extractRoomVideoBlobIdFromSrc(cleanSrc);
   return {
     id: randomToken(),
     sourceType: "file",
-    youtubeId: "",
-    src: `${ROOM_VIDEO_PUBLIC_PREFIX}${cleanStoredFileName}`,
-    filename: sanitizeUploadedFilename(filename || cleanStoredFileName),
+    youtubeId: String(youtubeId || "").trim(),
+    src: cleanSrc,
+    blobId,
+    filename: sanitizeUploadedFilename(filename || blobId || storedFileName || "video"),
     mimeType: String(mimeType || "video/mp4"),
     size: Number(size || 0),
     uploadedBy: normalizeUsername(uploadedBy),
@@ -3414,6 +3893,7 @@ function ensureRoomVideoRuntimeState(room) {
   const src = String(room?.video?.src || "");
   const isAllowedFileSrc =
     src.startsWith(ROOM_VIDEO_PUBLIC_PREFIX) ||
+    src.startsWith(ROOM_VIDEO_BLOB_API_PREFIX) ||
     src.startsWith("/api/youtube-proxy/");
   if (room?.video && sourceType === "file" && src && !isAllowedFileSrc) {
     room.video = null;
@@ -4763,6 +5243,15 @@ async function handleApi(req, res) {
     await serveYouTubeProxyStream(req, res, streamId);
     return;
   }
+  if ((req.method === "GET" || req.method === "HEAD") && pathname.startsWith(ROOM_VIDEO_BLOB_API_PREFIX)) {
+    const blobId = extractRoomVideoBlobIdFromSrc(pathname);
+    if (!blobId) {
+      sendJson(res, 404, { error: i18n(req, "No room video is available.", "No room video is available.") });
+      return;
+    }
+    await serveRoomVideoBlobFromSql(req, res, blobId);
+    return;
+  }
 
   if (req.method === "POST" && pathname === "/api/register") {
     if (!enforceRateLimit(req, res, RATE_LIMITS.REGISTER)) {
@@ -5971,20 +6460,6 @@ async function handleApi(req, res) {
         return;
       }
       const cleanFileName = sanitizeUploadedFilename(uploaded.filename || "room-video");
-      const extension = normalizeVideoExtension(cleanFileName, mimeType);
-      const storedFileName = `room-${room.code.toLowerCase()}-${Date.now()}-${crypto.randomBytes(6).toString("hex")}${extension}`;
-      const absolutePath = path.join(getRoomVideoUploadDir(), storedFileName);
-      try {
-        fs.renameSync(uploaded.tempPath, absolutePath);
-      } catch (_error) {
-        cleanupUploadedTemp();
-        sendJson(res, 503, {
-          code: "VIDEO_STORAGE_UNAVAILABLE",
-          error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Server storage is unavailable right now.")
-        });
-        return;
-      }
-
       const normalizedDuration = normalizeRoomVideoDuration(multipart.fields.duration);
       const enqueueRequested = resolveRoomVideoEnqueueMode(
         room,
@@ -5992,16 +6467,62 @@ async function handleApi(req, res) {
         multipart.fields.enqueue,
         multipart.fields.mode
       );
-      const videoEntry = createRoomFileVideoEntry(room, {
-        storedFileName,
-        filename: cleanFileName,
-        mimeType,
-        size: Number(uploaded.size || 0),
-        uploadedBy: username,
-        duration: normalizedDuration
-      });
+      let videoEntry = null;
+      let persistedBlobId = "";
+      if (isSqlRuntimeEnabled()) {
+        let blob = null;
+        try {
+          blob = await persistRoomVideoBlobFromFileToSql(uploaded.tempPath, {
+            mimeType,
+            sourceKind: "upload",
+            fileName: cleanFileName
+          });
+        } finally {
+          cleanupUploadedTemp();
+        }
+        if (!blob?.src) {
+          sendJson(res, 503, {
+            code: "VIDEO_STORAGE_UNAVAILABLE",
+            error: i18n(req, "Server storage is unavailable right now.", "Server storage is unavailable right now.")
+          });
+          return;
+        }
+        persistedBlobId = String(blob.blobId || "");
+        videoEntry = createRoomFileVideoEntry(room, {
+          src: blob.src,
+          filename: cleanFileName,
+          mimeType,
+          size: Number(blob.size || uploaded.size || 0),
+          uploadedBy: username,
+          duration: normalizedDuration
+        });
+      } else {
+        const extension = normalizeVideoExtension(cleanFileName, mimeType);
+        const storedFileName = `room-${room.code.toLowerCase()}-${Date.now()}-${crypto.randomBytes(6).toString("hex")}${extension}`;
+        const absolutePath = path.join(getRoomVideoUploadDir(), storedFileName);
+        try {
+          fs.renameSync(uploaded.tempPath, absolutePath);
+        } catch (_error) {
+          cleanupUploadedTemp();
+          sendJson(res, 503, {
+            code: "VIDEO_STORAGE_UNAVAILABLE",
+            error: i18n(req, "ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½ط£آ¯ط·ع؛ط¢آ½.", "Server storage is unavailable right now.")
+          });
+          return;
+        }
+        videoEntry = createRoomFileVideoEntry(room, {
+          storedFileName,
+          filename: cleanFileName,
+          mimeType,
+          size: Number(uploaded.size || 0),
+          uploadedBy: username,
+          duration: normalizedDuration
+        });
+      }
       if (!videoEntry) {
-        removeFileIfExists(absolutePath);
+        if (persistedBlobId) {
+          deleteRoomVideoBlobFromSql(persistedBlobId).catch(() => undefined);
+        }
         sendJson(res, 500, {
           code: "VIDEO_STORAGE_UNAVAILABLE",
           error: i18n(req, "Server storage is unavailable right now.", "Server storage is unavailable right now.")
@@ -6078,7 +6599,74 @@ async function handleApi(req, res) {
         });
         return;
       }
-      const videoEntry = createYouTubeEmbedVideoEntry(resolved.videoId, username, resolved.label);
+      let videoEntry = null;
+      let downloadedLabel = resolved.label;
+      if (isSqlRuntimeEnabled()) {
+        if (!ensureUploadsDir()) {
+          sendJson(res, 503, {
+            code: "VIDEO_STORAGE_UNAVAILABLE",
+            error: i18n(req, "Server storage is unavailable right now.", "Server storage is unavailable right now.")
+          });
+          return;
+        }
+        let downloaded = null;
+        let downloadedAbsolutePath = "";
+        let persistedBlobId = "";
+        try {
+          downloaded = await downloadYouTubeVideoToLocalFile(resolved.videoId);
+          downloadedAbsolutePath = path.join(getRoomVideoUploadDir(), downloaded.storedFileName);
+          downloadedLabel = downloaded.cleanFileName || downloadedLabel;
+          const blob = await persistRoomVideoBlobFromFileToSql(downloadedAbsolutePath, {
+            mimeType: downloaded.mimeType,
+            sourceKind: "youtube",
+            fileName: downloaded.cleanFileName,
+            youtubeId: resolved.videoId
+          });
+          if (!blob?.src) {
+            throw new Error("SQL_VIDEO_STORE_FAILED");
+          }
+          persistedBlobId = String(blob.blobId || "");
+          videoEntry = createRoomFileVideoEntry(room, {
+            src: blob.src,
+            filename: downloaded.cleanFileName || resolved.label || `youtube-${resolved.videoId}`,
+            mimeType: downloaded.mimeType,
+            size: Number(blob.size || downloaded.downloadedBytes || 0),
+            uploadedBy: username,
+            duration: downloaded.durationSec,
+            youtubeId: resolved.videoId
+          });
+          if (!videoEntry && persistedBlobId) {
+            await deleteRoomVideoBlobFromSql(persistedBlobId).catch(() => undefined);
+          }
+        } catch (error) {
+          const errorCode = String(error?.code || "").trim().toUpperCase();
+          if (persistedBlobId) {
+            deleteRoomVideoBlobFromSql(persistedBlobId).catch(() => undefined);
+          }
+          if (errorCode === "YOUTUBE_VIDEO_TOO_LARGE") {
+            sendJson(res, 413, {
+              code: "VIDEO_TOO_LARGE",
+              error: i18n(req, "Video file is too large (max 1GB).", "Video file is too large (max 1GB).")
+            });
+            return;
+          }
+          sendJson(res, 502, {
+            code: "YOUTUBE_DOWNLOAD_FAILED",
+            error: i18n(
+              req,
+              "Could not download this YouTube video right now. Try another one.",
+              "Could not download this YouTube video right now. Try another one."
+            )
+          });
+          return;
+        } finally {
+          if (downloadedAbsolutePath) {
+            removeFileIfExists(downloadedAbsolutePath);
+          }
+        }
+      } else {
+        videoEntry = createYouTubeEmbedVideoEntry(resolved.videoId, username, resolved.label);
+      }
       if (!videoEntry) {
         sendJson(res, 400, {
           code: "YOUTUBE_INVALID_VIDEO",
@@ -6106,7 +6694,7 @@ async function handleApi(req, res) {
       }
       pushSystemMessage(room, "room_video_set", {
         user: username,
-        name: String(room.video?.filename || resolved.label || "video")
+        name: String(room.video?.filename || downloadedLabel || resolved.label || "video")
       });
       recordAudit("room_video_set", username, room.code, {
         source: "youtube",
@@ -6632,6 +7220,7 @@ async function bootstrap() {
   loadYouTubeCache();
   if (isSqlRuntimeEnabled()) {
     await loadRuntimeSnapshotFromSql();
+    await pruneOrphanedRoomVideoBlobsFromSql();
   }
   server.listen(PORT, () => {
     console.log(`Server is running on http://localhost:${PORT}`);

@@ -1,4 +1,4 @@
 MySQL runtime persistence is enabled.
-Loaded 7 users from SQL storage.
-Loaded runtime snapshot from MySQL: 0 rooms, 1 sessions.
+Loaded 1 users from SQL storage.
+Loaded runtime snapshot from MySQL: 1 rooms, 1 sessions.
 Server is running on http://localhost:3000

@@ -936,3 +936,50 @@
 {"id":"1772215074691-9e152881be","createdAt":1772215074691,"action":"room_member_kicked","actor":"uhvr4eyc9","target":"T45LNE","details":{"target":"upkdl8irg"}}
 {"id":"1772215074699-ea0c33425c","createdAt":1772215074699,"action":"auth_guest_login","actor":"guest_smoke_guest","target":"guest_smoke_guest","details":{"ip":"127.0.0.1","displayName":"Smoke Guest"}}
 {"id":"1772215186424-4120faac51","createdAt":1772215186424,"action":"auth_register_success","actor":"testt","target":"testt","details":{"ip":"::1"}}
+{"id":"1772215478930-cbab6725bc","createdAt":1772215478930,"action":"auth_login_success","actor":"qasim","target":"qasim","details":{"ip":"::1"}}
+{"id":"1772215496573-5b4025c7c7","createdAt":1772215496573,"action":"room_created","actor":"qasim","target":"N6AJBF","details":{"roomName":"غرفة جديدة"}}
+{"id":"1772215499335-96bc3bd462","createdAt":1772215499336,"action":"room_opened","actor":"qasim","target":"N6AJBF","details":{}}
+{"id":"1772216179148-e1e3a99785","createdAt":1772216179148,"action":"auth_register_success","actor":"uz78eez41","target":"uz78eez41","details":{"ip":"127.0.0.1"}}
+{"id":"1772216179184-26fb329e08","createdAt":1772216179184,"action":"auth_register_success","actor":"usy7dmixe","target":"usy7dmixe","details":{"ip":"127.0.0.1"}}
+{"id":"1772216179216-675c70cf80","createdAt":1772216179216,"action":"auth_login_failure","actor":"uz78eez41","target":"uz78eez41","details":{"reason":"bad_password","ip":"127.0.0.1"}}
+{"id":"1772216179220-38e493a309","createdAt":1772216179220,"action":"room_created","actor":"uz78eez41","target":"LNWGWV","details":{"roomName":"QA Smoke Room"}}
+{"id":"1772216179222-1a9b6a42c1","createdAt":1772216179222,"action":"room_join_requested","actor":"usy7dmixe","target":"LNWGWV","details":{}}
+{"id":"1772216179226-24ed289b2b","createdAt":1772216179226,"action":"room_join_request_approved","actor":"uz78eez41","target":"LNWGWV","details":{"target":"usy7dmixe"}}
+{"id":"1772216179228-b60d8a42f5","createdAt":1772216179228,"action":"room_opened","actor":"usy7dmixe","target":"LNWGWV","details":{}}
+{"id":"1772216179233-db639f4faf","createdAt":1772216179233,"action":"room_member_kicked","actor":"uz78eez41","target":"LNWGWV","details":{"target":"usy7dmixe"}}
+{"id":"1772216179241-d1a095d7c3","createdAt":1772216179242,"action":"auth_guest_login","actor":"guest_smoke_guest","target":"guest_smoke_guest","details":{"ip":"127.0.0.1","displayName":"Smoke Guest"}}
+{"id":"1772216213167-c4e15c2e66","createdAt":1772216213167,"action":"auth_register_success","actor":"vidsql210569","target":"vidsql210569","details":{"ip":"127.0.0.1"}}
+{"id":"1772216213171-45a82fcea8","createdAt":1772216213171,"action":"room_created","actor":"vidsql210569","target":"LP42Z6","details":{"roomName":"New Room"}}
+{"id":"1772216213710-6c8051e050","createdAt":1772216213710,"action":"room_video_set","actor":"vidsql210569","target":"LP42Z6","details":{"fileName":"tiny.mp4","queueLength":0}}
+{"id":"1772216214212-8563d213cc","createdAt":1772216214212,"action":"room_video_removed","actor":"vidsql210569","target":"LP42Z6","details":{"hadVideo":true}}
+{"id":"1772216237218-89b710ebc5","createdAt":1772216237218,"action":"auth_register_success","actor":"ytsql234613","target":"ytsql234613","details":{"ip":"127.0.0.1"}}
+{"id":"1772216237221-6cf8e12908","createdAt":1772216237222,"action":"room_created","actor":"ytsql234613","target":"B6U8GN","details":{"roomName":"New Room"}}
+{"id":"1772216265526-23980e39da","createdAt":1772216265526,"action":"auth_register_success","actor":"uqurrgpub","target":"uqurrgpub","details":{"ip":"127.0.0.1"}}
+{"id":"1772216265561-1bf7dccfdf","createdAt":1772216265561,"action":"auth_register_success","actor":"uyel0tlk3","target":"uyel0tlk3","details":{"ip":"127.0.0.1"}}
+{"id":"1772216265594-f9483db9b1","createdAt":1772216265594,"action":"auth_login_failure","actor":"uqurrgpub","target":"uqurrgpub","details":{"reason":"bad_password","ip":"127.0.0.1"}}
+{"id":"1772216265598-583e27a5ce","createdAt":1772216265598,"action":"room_created","actor":"uqurrgpub","target":"38U7MY","details":{"roomName":"QA Smoke Room"}}
+{"id":"1772216265600-6f848ca0e4","createdAt":1772216265600,"action":"room_join_requested","actor":"uyel0tlk3","target":"38U7MY","details":{}}
+{"id":"1772216265604-b5b0aa468a","createdAt":1772216265604,"action":"room_join_request_approved","actor":"uqurrgpub","target":"38U7MY","details":{"target":"uyel0tlk3"}}
+{"id":"1772216265605-26483374a6","createdAt":1772216265605,"action":"room_opened","actor":"uyel0tlk3","target":"38U7MY","details":{}}
+{"id":"1772216265611-af897da17d","createdAt":1772216265611,"action":"room_member_kicked","actor":"uqurrgpub","target":"38U7MY","details":{"target":"uyel0tlk3"}}
+{"id":"1772216265619-84be68ac7c","createdAt":1772216265619,"action":"auth_guest_login","actor":"guest_smoke_guest","target":"guest_smoke_guest","details":{"ip":"127.0.0.1","displayName":"Smoke Guest"}}
+{"id":"1772216425617-5d1559c4c4","createdAt":1772216425617,"action":"room_left","actor":"qasim","target":"N6AJBF","details":{}}
+{"id":"1772216425900-3681b7ba01","createdAt":1772216425900,"action":"room_joined","actor":"qasim","target":"N6AJBF","details":{"via":"join_endpoint"}}
+{"id":"1772216425901-f8b93c16a1","createdAt":1772216425901,"action":"room_opened","actor":"qasim","target":"N6AJBF","details":{}}
+{"id":"1772216555222-8d1158d80e","createdAt":1772216555222,"action":"room_left","actor":"qasim","target":"N6AJBF","details":{}}
+{"id":"1772216560674-62fcb4381c","createdAt":1772216560674,"action":"room_created","actor":"qasim","target":"BKP2EG","details":{"roomName":"غرفة جديدة"}}
+{"id":"1772216563432-3364251d03","createdAt":1772216563432,"action":"room_opened","actor":"qasim","target":"BKP2EG","details":{}}
+{"id":"1772216578718-ca45812fb4","createdAt":1772216578718,"action":"room_video_set","actor":"qasim","target":"BKP2EG","details":{"source":"youtube","youtubeId":"awNkMZYfm2c","queueLength":0}}
+{"id":"1772216605849-ef080f5ed6","createdAt":1772216605849,"action":"room_video_queued","actor":"qasim","target":"BKP2EG","details":{"fileName":"Amel Bouchoucha - Darb Jnoun _Official Clip_ _ Ø_Ù_Ù_ Ø_Ù_Ø_Ù_Ø_Ø_ - Ø_Ø_Ø_ Ø_Ù_Ù_Ù_.mp4","queueLength":1}}
+{"id":"1772216609268-822f09e277","createdAt":1772216609268,"action":"room_video_queue_next","actor":"qasim","target":"BKP2EG","details":{"queueLength":0}}
+{"id":"1772216625421-c5269ff767","createdAt":1772216625421,"action":"room_video_queued","actor":"qasim","target":"BKP2EG","details":{"source":"youtube","youtubeId":"xNnjlP94GnY","queueLength":1}}
+{"id":"1772216627331-708834f758","createdAt":1772216627331,"action":"room_video_queue_next","actor":"qasim","target":"BKP2EG","details":{"queueLength":0}}
+{"id":"1772216672374-31cc4dc1ef","createdAt":1772216672374,"action":"auth_guest_login","actor":"guest_يي","target":"guest_يي","details":{"ip":"::1","displayName":"يي"}}
+{"id":"1772216680794-7df2eab7dd","createdAt":1772216680794,"action":"room_join_requested","actor":"guest_يي","target":"BKP2EG","details":{}}
+{"id":"1772216682585-9ed9d9c4c0","createdAt":1772216682585,"action":"room_join_request_approved","actor":"qasim","target":"BKP2EG","details":{"target":"guest_يي"}}
+{"id":"1772216687656-f91f55659a","createdAt":1772216687656,"action":"room_opened","actor":"guest_يي","target":"BKP2EG","details":{}}
+{"id":"1772216738852-8fcbad1b2e","createdAt":1772216738852,"action":"room_video_removed","actor":"qasim","target":"BKP2EG","details":{"hadVideo":true}}
+{"id":"1772216748447-3bfeec3d83","createdAt":1772216748447,"action":"room_video_set","actor":"qasim","target":"BKP2EG","details":{"source":"youtube","youtubeId":"MedFEHEEoBE","queueLength":0}}
+{"id":"1772216776979-206bce2b93","createdAt":1772216776979,"action":"room_video_queued","actor":"qasim","target":"BKP2EG","details":{"source":"youtube","youtubeId":"xNnjlP94GnY","queueLength":1}}
+{"id":"1772216794287-14bf8d5530","createdAt":1772216794287,"action":"room_video_queue_next","actor":"qasim","target":"BKP2EG","details":{"queueLength":0}}
+{"id":"1772216811417-18785d9550","createdAt":1772216811417,"action":"room_video_queued","actor":"qasim","target":"BKP2EG","details":{"source":"youtube","youtubeId":"awNkMZYfm2c","queueLength":1}}
