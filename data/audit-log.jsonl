@@ -1084,3 +1084,21 @@
 {"id":"1772224421829-a9cd81d8cb","createdAt":1772224421829,"action":"room_opened","actor":"ud75lxv2j","target":"KTWHZZ","details":{}}
 {"id":"1772224421835-2f38e399b1","createdAt":1772224421836,"action":"room_member_kicked","actor":"upmhgexl4","target":"KTWHZZ","details":{"target":"ud75lxv2j"}}
 {"id":"1772224421844-9af7cdf0b1","createdAt":1772224421844,"action":"auth_guest_login","actor":"guest_smoke_guest","target":"guest_smoke_guest","details":{"ip":"127.0.0.1","displayName":"Smoke Guest"}}
+{"id":"1772224696817-041f86da7d","createdAt":1772224696817,"action":"auth_register_success","actor":"u45mugzao","target":"u45mugzao","details":{"ip":"127.0.0.1"}}
+{"id":"1772224696854-6ce64397b2","createdAt":1772224696854,"action":"auth_register_success","actor":"urfkl8bqj","target":"urfkl8bqj","details":{"ip":"127.0.0.1"}}
+{"id":"1772224696889-19a36b4999","createdAt":1772224696889,"action":"auth_login_failure","actor":"u45mugzao","target":"u45mugzao","details":{"reason":"bad_password","ip":"127.0.0.1"}}
+{"id":"1772224696894-f60353b2ea","createdAt":1772224696894,"action":"room_created","actor":"u45mugzao","target":"J6BU4X","details":{"roomName":"QA Smoke Room"}}
+{"id":"1772224696896-0f9ce817e2","createdAt":1772224696896,"action":"room_join_requested","actor":"urfkl8bqj","target":"J6BU4X","details":{}}
+{"id":"1772224696901-bf5bd4b4a5","createdAt":1772224696901,"action":"room_join_request_approved","actor":"u45mugzao","target":"J6BU4X","details":{"target":"urfkl8bqj"}}
+{"id":"1772224696903-bcab2f0592","createdAt":1772224696903,"action":"room_opened","actor":"urfkl8bqj","target":"J6BU4X","details":{}}
+{"id":"1772224696910-3e0a40810b","createdAt":1772224696910,"action":"room_member_kicked","actor":"u45mugzao","target":"J6BU4X","details":{"target":"urfkl8bqj"}}
+{"id":"1772224696919-6b2f084f5d","createdAt":1772224696919,"action":"auth_guest_login","actor":"guest_smoke_guest","target":"guest_smoke_guest","details":{"ip":"127.0.0.1","displayName":"Smoke Guest"}}
+{"id":"1772224737437-fcb1d65e71","createdAt":1772224737437,"action":"auth_register_success","actor":"u5cifvvp3","target":"u5cifvvp3","details":{"ip":"127.0.0.1"}}
+{"id":"1772224737474-224d0236e3","createdAt":1772224737474,"action":"auth_register_success","actor":"uti78kn2r","target":"uti78kn2r","details":{"ip":"127.0.0.1"}}
+{"id":"1772224737509-5c6a3ef554","createdAt":1772224737509,"action":"auth_login_failure","actor":"u5cifvvp3","target":"u5cifvvp3","details":{"reason":"bad_password","ip":"127.0.0.1"}}
+{"id":"1772224737513-7b67e2579a","createdAt":1772224737513,"action":"room_created","actor":"u5cifvvp3","target":"Z7Y36X","details":{"roomName":"QA Smoke Room"}}
+{"id":"1772224737515-19ff4b6ad9","createdAt":1772224737515,"action":"room_join_requested","actor":"uti78kn2r","target":"Z7Y36X","details":{}}
+{"id":"1772224737520-c0a67b84f6","createdAt":1772224737520,"action":"room_join_request_approved","actor":"u5cifvvp3","target":"Z7Y36X","details":{"target":"uti78kn2r"}}
+{"id":"1772224737522-d51b8eec58","createdAt":1772224737522,"action":"room_opened","actor":"uti78kn2r","target":"Z7Y36X","details":{}}
+{"id":"1772224737530-6b673a925a","createdAt":1772224737530,"action":"room_member_kicked","actor":"u5cifvvp3","target":"Z7Y36X","details":{"target":"uti78kn2r"}}
+{"id":"1772224737541-e331bebee6","createdAt":1772224737541,"action":"auth_guest_login","actor":"guest_smoke_guest","target":"guest_smoke_guest","details":{"ip":"127.0.0.1","displayName":"Smoke Guest"}}

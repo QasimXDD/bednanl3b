@@ -80,6 +80,9 @@ const YOUTUBE_VIDEO_ID_REGEX = /^[A-Za-z0-9_-]{11}$/;
 const YOUTUBE_CACHE_MAX_ITEMS = 180;
 const YOUTUBE_CACHE_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 30;
 const YOUTUBE_PROXY_TTL_MS = 1000 * 60 * 60 * 6;
+const YOUTUBE_OUTBOUND_PROXY = String(
+  process.env.YOUTUBE_OUTBOUND_PROXY || process.env.HTTPS_PROXY || process.env.HTTP_PROXY || ""
+).trim();
 const YT_DLP_BINARY = String(process.env.YT_DLP_BINARY || "yt-dlp").trim() || "yt-dlp";
 const YT_DLP_EMBEDDED_BINARY = (() => {
   try {
@@ -4883,6 +4886,21 @@ async function downloadRemoteFileToPath(url, targetPath, timeoutMs = YT_DLP_AUTO
       throw new Error("Web stream is unsupported in this runtime");
     }
     await streamPipeline(source, fs.createWriteStream(tempPath, { flags: "w" }));
+    const stats = fs.statSync(tempPath);
+    if (!Number.isFinite(Number(stats.size)) || Number(stats.size) < 512 * 1024) {
+      throw new Error("Downloaded file is too small to be a valid yt-dlp binary");
+    }
+    const probeBuffer = Buffer.alloc(256);
+    const fd = fs.openSync(tempPath, "r");
+    try {
+      fs.readSync(fd, probeBuffer, 0, probeBuffer.length, 0);
+    } finally {
+      fs.closeSync(fd);
+    }
+    const probeText = probeBuffer.toString("utf8").toLowerCase();
+    if (probeText.includes("<html") || probeText.includes("<!doctype")) {
+      throw new Error("Downloaded content looks like an HTML error page");
+    }
     fs.renameSync(tempPath, cleanTargetPath);
     if (process.platform !== "win32") {
       fs.chmodSync(cleanTargetPath, 0o755);
@@ -4979,7 +4997,8 @@ function runYtDlp(args, timeoutMs = YOUTUBE_DOWNLOAD_TIMEOUT_MS) {
     let stderr = "";
     let settled = false;
     let timer = null;
-    const mergedArgs = [...baseArgs, ...args];
+    const proxyArgs = YOUTUBE_OUTBOUND_PROXY ? ["--proxy", YOUTUBE_OUTBOUND_PROXY] : [];
+    const mergedArgs = [...baseArgs, ...proxyArgs, ...args];
     let child = null;
     ensureCommandIsExecutable(command);
     try {
@@ -5025,7 +5044,7 @@ function runYtDlp(args, timeoutMs = YOUTUBE_DOWNLOAD_TIMEOUT_MS) {
     child.on("error", (error) => {
       const wrapped = new Error(`yt-dlp execution failed: ${error?.message || error}`);
       const childErrorCode = String(error?.code || "").trim().toUpperCase();
-      wrapped.code = childErrorCode === "ENOENT" || childErrorCode === "EACCES" || childErrorCode === "EPERM"
+      wrapped.code = childErrorCode === "ENOENT" || childErrorCode === "EACCES" || childErrorCode === "EPERM" || childErrorCode === "ENOEXEC"
         ? "YT_DLP_UNAVAILABLE"
         : "YT_DLP_FAILED";
       finish(wrapped);
@@ -5034,7 +5053,12 @@ function runYtDlp(args, timeoutMs = YOUTUBE_DOWNLOAD_TIMEOUT_MS) {
     child.on("close", (code) => {
       if (code !== 0) {
         const runError = new Error(`yt-dlp exited with code ${code}: ${stderr.trim() || stdout.trim()}`);
-        runError.code = Number(code) === 126 || Number(code) === 127 ? "YT_DLP_UNAVAILABLE" : "YT_DLP_FAILED";
+        const lowerOutput = `${stderr}\n${stdout}`.toLowerCase();
+        const looksUnavailable = Number(code) === 126
+          || Number(code) === 127
+          || lowerOutput.includes("exec format error")
+          || lowerOutput.includes("not found");
+        runError.code = looksUnavailable ? "YT_DLP_UNAVAILABLE" : "YT_DLP_FAILED";
         finish(runError);
         return;
       }
