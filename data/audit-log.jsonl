@@ -1063,3 +1063,24 @@
 {"id":"1772222998472-186d4a871e","createdAt":1772222998472,"action":"room_opened","actor":"ulhw0tqk6","target":"FGB7LH","details":{}}
 {"id":"1772222998479-88cec09ae8","createdAt":1772222998479,"action":"room_member_kicked","actor":"uywse9kwn","target":"FGB7LH","details":{"target":"ulhw0tqk6"}}
 {"id":"1772222998488-b16e65d97a","createdAt":1772222998488,"action":"auth_guest_login","actor":"guest_smoke_guest","target":"guest_smoke_guest","details":{"ip":"127.0.0.1","displayName":"Smoke Guest"}}
+{"id":"1772224334619-cfb5d6ccae","createdAt":1772224334619,"action":"auth_register_success","actor":"ytlycszw","target":"ytlycszw","details":{"ip":"127.0.0.1"}}
+{"id":"1772224334624-18da6cf8a2","createdAt":1772224334624,"action":"auth_register_success","actor":"u5wtpurh8","target":"u5wtpurh8","details":{"ip":"127.0.0.1"}}
+{"id":"1772224334625-52f9151095","createdAt":1772224334625,"action":"room_created","actor":"ytlycszw","target":"LTTL3N","details":{"roomName":"YT only-download"}}
+{"id":"1772224334675-909ea0c58b","createdAt":1772224334675,"action":"auth_register_success","actor":"unqbg7eq7","target":"unqbg7eq7","details":{"ip":"127.0.0.1"}}
+{"id":"1772224334717-a217b4a2ac","createdAt":1772224334717,"action":"auth_login_failure","actor":"u5wtpurh8","target":"u5wtpurh8","details":{"reason":"bad_password","ip":"127.0.0.1"}}
+{"id":"1772224334724-557d98400b","createdAt":1772224334724,"action":"room_created","actor":"u5wtpurh8","target":"AVRARY","details":{"roomName":"QA Smoke Room"}}
+{"id":"1772224334727-88575073f8","createdAt":1772224334727,"action":"room_join_requested","actor":"unqbg7eq7","target":"AVRARY","details":{}}
+{"id":"1772224334735-f5432496ca","createdAt":1772224334735,"action":"room_join_request_approved","actor":"u5wtpurh8","target":"AVRARY","details":{"target":"unqbg7eq7"}}
+{"id":"1772224334738-4a27f008b6","createdAt":1772224334738,"action":"room_opened","actor":"unqbg7eq7","target":"AVRARY","details":{}}
+{"id":"1772224334747-3d07cee90a","createdAt":1772224334747,"action":"room_member_kicked","actor":"u5wtpurh8","target":"AVRARY","details":{"target":"unqbg7eq7"}}
+{"id":"1772224334758-a8610c3d60","createdAt":1772224334758,"action":"auth_guest_login","actor":"guest_smoke_guest","target":"guest_smoke_guest","details":{"ip":"127.0.0.1","displayName":"Smoke Guest"}}
+{"id":"1772224341935-d02469cc80","createdAt":1772224341935,"action":"room_video_set","actor":"ytlycszw","target":"LTTL3N","details":{"source":"youtube","youtubeId":"dQw4w9WgXcQ","queueLength":0}}
+{"id":"1772224421743-c4e41e7471","createdAt":1772224421743,"action":"auth_register_success","actor":"upmhgexl4","target":"upmhgexl4","details":{"ip":"127.0.0.1"}}
+{"id":"1772224421780-caaf111033","createdAt":1772224421780,"action":"auth_register_success","actor":"ud75lxv2j","target":"ud75lxv2j","details":{"ip":"127.0.0.1"}}
+{"id":"1772224421815-c16e03ce33","createdAt":1772224421815,"action":"auth_login_failure","actor":"upmhgexl4","target":"upmhgexl4","details":{"reason":"bad_password","ip":"127.0.0.1"}}
+{"id":"1772224421819-2b3b3ab6df","createdAt":1772224421820,"action":"room_created","actor":"upmhgexl4","target":"KTWHZZ","details":{"roomName":"QA Smoke Room"}}
+{"id":"1772224421822-f0f3925d8a","createdAt":1772224421822,"action":"room_join_requested","actor":"ud75lxv2j","target":"KTWHZZ","details":{}}
+{"id":"1772224421827-086e914d9c","createdAt":1772224421827,"action":"room_join_request_approved","actor":"upmhgexl4","target":"KTWHZZ","details":{"target":"ud75lxv2j"}}
+{"id":"1772224421829-a9cd81d8cb","createdAt":1772224421829,"action":"room_opened","actor":"ud75lxv2j","target":"KTWHZZ","details":{}}
+{"id":"1772224421835-2f38e399b1","createdAt":1772224421836,"action":"room_member_kicked","actor":"upmhgexl4","target":"KTWHZZ","details":{"target":"ud75lxv2j"}}
+{"id":"1772224421844-9af7cdf0b1","createdAt":1772224421844,"action":"auth_guest_login","actor":"guest_smoke_guest","target":"guest_smoke_guest","details":{"ip":"127.0.0.1","displayName":"Smoke Guest"}}

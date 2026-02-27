@@ -6,6 +6,7 @@ const path = require("path");
 const crypto = require("crypto");
 const { spawn } = require("child_process");
 const { Readable } = require("stream");
+const { pipeline: streamPipeline } = require("stream/promises");
 const { WebSocketServer } = require("ws");
 const { Client: PgClient } = require("pg");
 const mysql = require("mysql2/promise");
@@ -88,6 +89,29 @@ const YT_DLP_EMBEDDED_BINARY = (() => {
     return "";
   }
 })();
+const YT_DLP_AUTO_DOWNLOAD_URL = String(
+  process.env.YT_DLP_AUTO_DOWNLOAD_URL || "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
+).trim();
+const YT_DLP_AUTO_DOWNLOAD_URLS = Array.from(
+  new Set(
+    [
+      YT_DLP_AUTO_DOWNLOAD_URL,
+      "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp",
+      "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux"
+    ]
+      .map((url) => String(url || "").trim())
+      .filter(Boolean)
+  )
+);
+const YT_DLP_AUTO_DOWNLOAD_TIMEOUT_MS = Math.max(
+  15000,
+  Number(process.env.YT_DLP_AUTO_DOWNLOAD_TIMEOUT_MS || 1000 * 60 * 2) || 1000 * 60 * 2
+);
+const YT_DLP_AUTO_BINARY_PATH = path.join(
+  DATA_DIR,
+  "bin",
+  process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp"
+);
 const DATABASE_URL = String(process.env.DATABASE_URL || "").trim();
 const MYSQL_HOST = String(process.env.MYSQL_HOST || "").trim();
 const MYSQL_PORT = Math.max(1, Number(process.env.MYSQL_PORT || 3306) || 3306);
@@ -172,6 +196,7 @@ const rateLimitBuckets = new Map();
 let siteAnnouncement = null;
 let activeRoomVideoUploadDir = ROOM_VIDEO_UPLOAD_DIR_DEFAULT;
 let ytDlpCommandOverride = null;
+let ytDlpAutoInstallPromise = null;
 let ybdYtdlClient = null;
 let gitHubUsersSyncQueue = Promise.resolve();
 let gitHubUsersFileSha = "";
@@ -4806,6 +4831,104 @@ async function getYouTubeDirectPlayableSource(videoId) {
   };
 }
 
+function canUseYtDlpBinaryPath(binaryPath) {
+  const cleanPath = String(binaryPath || "").trim();
+  if (!cleanPath) {
+    return false;
+  }
+  const looksLikePath = cleanPath.includes("/") || cleanPath.includes("\\") || path.isAbsolute(cleanPath);
+  if (!looksLikePath) {
+    return false;
+  }
+  try {
+    const stat = fs.statSync(cleanPath);
+    if (!stat.isFile()) {
+      return false;
+    }
+    if (process.platform !== "win32") {
+      fs.chmodSync(cleanPath, 0o755);
+    }
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+async function downloadRemoteFileToPath(url, targetPath, timeoutMs = YT_DLP_AUTO_DOWNLOAD_TIMEOUT_MS) {
+  const cleanUrl = String(url || "").trim();
+  const cleanTargetPath = String(targetPath || "").trim();
+  if (!cleanUrl || !cleanTargetPath) {
+    return false;
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const tempPath = `${cleanTargetPath}.tmp-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+  try {
+    const response = await fetch(cleanUrl, {
+      method: "GET",
+      redirect: "follow",
+      signal: controller.signal,
+      headers: {
+        "user-agent": "bednanl3b-ytdlp-installer/1.0"
+      }
+    });
+    if (!response.ok || !response.body) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    fs.mkdirSync(path.dirname(cleanTargetPath), { recursive: true });
+    const source = typeof Readable.fromWeb === "function"
+      ? Readable.fromWeb(response.body)
+      : null;
+    if (!source) {
+      throw new Error("Web stream is unsupported in this runtime");
+    }
+    await streamPipeline(source, fs.createWriteStream(tempPath, { flags: "w" }));
+    fs.renameSync(tempPath, cleanTargetPath);
+    if (process.platform !== "win32") {
+      fs.chmodSync(cleanTargetPath, 0o755);
+    }
+    return true;
+  } catch (_error) {
+    removeFileIfExists(tempPath);
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function ensureYtDlpBinaryAvailable() {
+  if (canUseYtDlpBinaryPath(YT_DLP_BINARY)) {
+    return YT_DLP_BINARY;
+  }
+  if (canUseYtDlpBinaryPath(YT_DLP_EMBEDDED_BINARY)) {
+    return YT_DLP_EMBEDDED_BINARY;
+  }
+  if (canUseYtDlpBinaryPath(YT_DLP_AUTO_BINARY_PATH)) {
+    return YT_DLP_AUTO_BINARY_PATH;
+  }
+  if (!YT_DLP_AUTO_DOWNLOAD_URLS.length) {
+    return "";
+  }
+  if (!ytDlpAutoInstallPromise) {
+    ytDlpAutoInstallPromise = (async () => {
+      for (const url of YT_DLP_AUTO_DOWNLOAD_URLS) {
+        const installed = await downloadRemoteFileToPath(
+          url,
+          YT_DLP_AUTO_BINARY_PATH,
+          YT_DLP_AUTO_DOWNLOAD_TIMEOUT_MS
+        );
+        if (installed && canUseYtDlpBinaryPath(YT_DLP_AUTO_BINARY_PATH)) {
+          return YT_DLP_AUTO_BINARY_PATH;
+        }
+      }
+      return "";
+    })().finally(() => {
+      ytDlpAutoInstallPromise = null;
+    });
+  }
+  return ytDlpAutoInstallPromise;
+}
+
 function runYtDlp(args, timeoutMs = YOUTUBE_DOWNLOAD_TIMEOUT_MS) {
   const ensureCommandIsExecutable = (command) => {
     if (process.platform === "win32") {
@@ -4849,6 +4972,7 @@ function runYtDlp(args, timeoutMs = YOUTUBE_DOWNLOAD_TIMEOUT_MS) {
     pushCommandCandidate("python3", ["-m", "yt_dlp"]);
     pushCommandCandidate("python", ["-m", "yt_dlp"]);
   }
+  const autoBinaryCandidatePromise = ensureYtDlpBinaryAvailable().catch(() => "");
 
   const runWithCommand = (command, baseArgs) => new Promise((resolve, reject) => {
     let stdout = "";
@@ -4919,6 +5043,10 @@ function runYtDlp(args, timeoutMs = YOUTUBE_DOWNLOAD_TIMEOUT_MS) {
   });
 
   const attempt = async () => {
+    const autoBinaryCandidate = await autoBinaryCandidatePromise;
+    if (autoBinaryCandidate) {
+      pushCommandCandidate(autoBinaryCandidate, []);
+    }
     let unavailableCount = 0;
     let lastError = null;
     for (const candidate of commandCandidates) {
@@ -6971,37 +7099,15 @@ async function handleApi(req, res) {
               });
               return;
             }
-            try {
-              const directPlayable = await getYouTubeDirectPlayableSource(resolved.videoId);
-              const proxy = registerYouTubeProxyStream(resolved.videoId, directPlayable);
-              const proxyEntry = createRoomFileVideoEntry(room, {
-                src: proxy.src,
-                filename: directPlayable.cleanFileName || resolved.label || `youtube-${resolved.videoId}`,
-                mimeType: directPlayable.mimeType,
-                size: Number(directPlayable.estimatedBytes || 0),
-                uploadedBy: username,
-                duration: directPlayable.durationSec,
-                youtubeId: resolved.videoId
-              });
-              if (proxyEntry) {
-                proxyEntry.isYouTubeProxy = true;
-                videoEntry = proxyEntry;
-                downloadedLabel = directPlayable.cleanFileName || downloadedLabel;
-              }
-            } catch (_proxyError) {
-              // Keep the original download error path when proxy preparation fails.
-            }
-            if (!videoEntry) {
-              sendJson(res, 502, {
-                code: "YOUTUBE_DOWNLOAD_FAILED",
-                error: i18n(
-                  req,
-                  "Could not download this YouTube video right now. Try another one.",
-                  "Could not download this YouTube video right now. Try another one."
-                )
-              });
-              return;
-            }
+            sendJson(res, 502, {
+              code: "YOUTUBE_DOWNLOAD_FAILED",
+              error: i18n(
+                req,
+                "Could not download this YouTube video right now. Try another one.",
+                "Could not download this YouTube video right now. Try another one."
+              )
+            });
+            return;
           } finally {
             if (downloadedAbsolutePath) {
               removeFileIfExists(downloadedAbsolutePath);
