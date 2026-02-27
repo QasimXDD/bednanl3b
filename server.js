@@ -7144,6 +7144,11 @@ async function handleApi(req, res) {
               // Keep the original failure path when direct proxy source also fails.
             }
             if (!videoEntry) {
+              // Final fallback: start classic YouTube playback instead of failing the request.
+              videoEntry = createYouTubeEmbedVideoEntry(resolved.videoId, username, resolved.label);
+              downloadedLabel = resolved.label || downloadedLabel;
+            }
+            if (!videoEntry) {
               sendJson(res, 502, {
                 code: "YOUTUBE_DOWNLOAD_FAILED",
                 error: i18n(
@@ -7179,7 +7184,8 @@ async function handleApi(req, res) {
             downloadedLabel = directPlayable.cleanFileName || downloadedLabel;
           }
         } catch (_proxyError) {
-          videoEntry = null;
+          videoEntry = createYouTubeEmbedVideoEntry(resolved.videoId, username, resolved.label);
+          downloadedLabel = resolved.label || downloadedLabel;
         }
       }
       if (!videoEntry) {
