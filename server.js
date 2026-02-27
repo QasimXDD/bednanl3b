@@ -4749,6 +4749,25 @@ async function getYouTubeDirectPlayableSource(videoId) {
 }
 
 function runYtDlp(args, timeoutMs = YOUTUBE_DOWNLOAD_TIMEOUT_MS) {
+  const ensureCommandIsExecutable = (command) => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const cleanCommand = String(command || "").trim();
+    if (!cleanCommand) {
+      return;
+    }
+    const looksLikeFilePath = cleanCommand.includes("/") || cleanCommand.includes("\\") || path.isAbsolute(cleanCommand);
+    if (!looksLikeFilePath || !fs.existsSync(cleanCommand)) {
+      return;
+    }
+    try {
+      fs.chmodSync(cleanCommand, 0o755);
+    } catch (_error) {
+      // Ignore chmod issues and let spawn report a real execution error.
+    }
+  };
+
   const commandCandidates = [];
   const commandCandidateKeys = new Set();
   const pushCommandCandidate = (command, baseArgs = []) => {
@@ -4780,6 +4799,7 @@ function runYtDlp(args, timeoutMs = YOUTUBE_DOWNLOAD_TIMEOUT_MS) {
     let timer = null;
     const mergedArgs = [...baseArgs, ...args];
     let child = null;
+    ensureCommandIsExecutable(command);
     try {
       child = spawn(command, mergedArgs, { windowsHide: true });
     } catch (error) {
@@ -4822,14 +4842,17 @@ function runYtDlp(args, timeoutMs = YOUTUBE_DOWNLOAD_TIMEOUT_MS) {
 
     child.on("error", (error) => {
       const wrapped = new Error(`yt-dlp execution failed: ${error?.message || error}`);
-      wrapped.code = error?.code === "ENOENT" ? "YT_DLP_UNAVAILABLE" : "YT_DLP_FAILED";
+      const childErrorCode = String(error?.code || "").trim().toUpperCase();
+      wrapped.code = childErrorCode === "ENOENT" || childErrorCode === "EACCES" || childErrorCode === "EPERM"
+        ? "YT_DLP_UNAVAILABLE"
+        : "YT_DLP_FAILED";
       finish(wrapped);
     });
 
     child.on("close", (code) => {
       if (code !== 0) {
         const runError = new Error(`yt-dlp exited with code ${code}: ${stderr.trim() || stdout.trim()}`);
-        runError.code = "YT_DLP_FAILED";
+        runError.code = Number(code) === 126 || Number(code) === 127 ? "YT_DLP_UNAVAILABLE" : "YT_DLP_FAILED";
         finish(runError);
         return;
       }

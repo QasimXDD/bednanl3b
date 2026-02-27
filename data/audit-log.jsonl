@@ -1019,3 +1019,15 @@
 {"id":"1772218815457-0e947ec7d6","createdAt":1772218815457,"action":"auth_register_success","actor":"ytdoqpyo","target":"ytdoqpyo","details":{"ip":"127.0.0.1"}}
 {"id":"1772218815460-5d15d08713","createdAt":1772218815460,"action":"room_created","actor":"ytdoqpyo","target":"LKP48X","details":{"roomName":"YT Final Check"}}
 {"id":"1772218820745-2bf9d21a59","createdAt":1772218820745,"action":"room_video_set","actor":"ytdoqpyo","target":"LKP48X","details":{"source":"youtube","youtubeId":"dQw4w9WgXcQ","queueLength":0}}
+{"id":"1772219527606-805d9011bb","createdAt":1772219527606,"action":"auth_register_success","actor":"uq2ymskle","target":"uq2ymskle","details":{"ip":"127.0.0.1"}}
+{"id":"1772219527642-e636367476","createdAt":1772219527642,"action":"auth_register_success","actor":"uohexihvs","target":"uohexihvs","details":{"ip":"127.0.0.1"}}
+{"id":"1772219527675-4dad566475","createdAt":1772219527675,"action":"auth_login_failure","actor":"uq2ymskle","target":"uq2ymskle","details":{"reason":"bad_password","ip":"127.0.0.1"}}
+{"id":"1772219527679-68cf8e49ee","createdAt":1772219527679,"action":"room_created","actor":"uq2ymskle","target":"E9BBQ2","details":{"roomName":"QA Smoke Room"}}
+{"id":"1772219527681-4cce1c12e2","createdAt":1772219527681,"action":"room_join_requested","actor":"uohexihvs","target":"E9BBQ2","details":{}}
+{"id":"1772219527685-103ed8995c","createdAt":1772219527685,"action":"room_join_request_approved","actor":"uq2ymskle","target":"E9BBQ2","details":{"target":"uohexihvs"}}
+{"id":"1772219527687-bb3cbb3e92","createdAt":1772219527687,"action":"room_opened","actor":"uohexihvs","target":"E9BBQ2","details":{}}
+{"id":"1772219527692-3e8b7a5dcd","createdAt":1772219527692,"action":"room_member_kicked","actor":"uq2ymskle","target":"E9BBQ2","details":{"target":"uohexihvs"}}
+{"id":"1772219527699-167026b231","createdAt":1772219527699,"action":"auth_guest_login","actor":"guest_smoke_guest","target":"guest_smoke_guest","details":{"ip":"127.0.0.1","displayName":"Smoke Guest"}}
+{"id":"1772219542011-266e573670","createdAt":1772219542011,"action":"auth_register_success","actor":"ytaw9upg","target":"ytaw9upg","details":{"ip":"127.0.0.1"}}
+{"id":"1772219542015-0fff1a1a28","createdAt":1772219542015,"action":"room_created","actor":"ytaw9upg","target":"S4MMUY","details":{"roomName":"YT check"}}
+{"id":"1772219549208-38d0e2366c","createdAt":1772219549208,"action":"room_video_set","actor":"ytaw9upg","target":"S4MMUY","details":{"source":"youtube","youtubeId":"dQw4w9WgXcQ","queueLength":0}}
