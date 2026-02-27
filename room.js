@@ -152,6 +152,12 @@ let me = "";
 let host = "";
 let lastMessageId = 0;
 let pollTimer = null;
+let roomSocket = null;
+let roomSocketConnected = false;
+let roomSocketReconnectTimer = null;
+let roomSocketReconnectAttempt = 0;
+let roomSocketManualClose = false;
+let roomRefreshDebounceTimer = null;
 let currentPendingRequests = [];
 let requestModalQueue = [];
 let activeRequestUser = "";
@@ -216,6 +222,11 @@ const ROOM_VIDEO_REWIND_ALLOW_MS = 2400;
 const ROOM_VIDEO_SEEK_RANGE_MAX = 10000;
 const ROOM_VIDEO_DEFAULT_VOLUME = 1;
 const FULLSCREEN_CHAT_NOTICE_TIMEOUT_MS = 2600;
+const ROOM_POLL_CONNECTED_MS = 12000;
+const ROOM_POLL_DISCONNECTED_MS = 3500;
+const ROOM_WS_RECONNECT_BASE_MS = 800;
+const ROOM_WS_RECONNECT_MAX_MS = 8000;
+const ROOM_WS_REFRESH_DEBOUNCE_MS = 120;
 let roomVideoState = null;
 let roomVideoSyncState = null;
 let roomVideoQueueState = [];
@@ -405,6 +416,7 @@ const I18N = {
     toastLoginFirst: "يرجى تسجيل الدخول أولًا.",
     toastInvalidCode: "رمز الغرفة غير صالح.",
     toastKickedOut: "تم طردك من هذه الغرفة ويمكنك إرسال طلب انضمام جديد.",
+    toastRoomClosed: "تم إغلاق الغرفة لعدم وجود أعضاء.",
     toastAccountBanned: "تم حظر حسابك من الموقع.",
     sysCreated: "{user} أنشأ الغرفة.",
     sysJoined: "{user} انضم إلى الغرفة.",
@@ -593,6 +605,7 @@ const I18N = {
     toastLoginFirst: "Please login first.",
     toastInvalidCode: "Invalid room code.",
     toastKickedOut: "You were kicked from this room and can request to join again.",
+    toastRoomClosed: "The room was closed because it became empty.",
     toastAccountBanned: "Your account was banned from the site.",
     sysCreated: "{user} created the room.",
     sysJoined: "{user} joined the room.",
@@ -4413,6 +4426,8 @@ function leaveCurrentRoom({ keepalive = false } = {}) {
     return Promise.resolve();
   }
   hasLeftRoom = true;
+  closeRoomSocket({ manual: true });
+  stopRoomPolling();
   return fetch(`/api/rooms/${encodedCode}/leave`, {
     method: "POST",
     headers: {
@@ -4427,9 +4442,11 @@ function leaveCurrentRoom({ keepalive = false } = {}) {
 
 function redirectToHome(message = "") {
   roomVideoPageLeaving = true;
-  if (pollTimer) {
-    clearInterval(pollTimer);
-    pollTimer = null;
+  closeRoomSocket({ manual: true });
+  stopRoomPolling();
+  if (roomRefreshDebounceTimer) {
+    clearTimeout(roomRefreshDebounceTimer);
+    roomRefreshDebounceTimer = null;
   }
   setRoomSupervisorOpen(false);
   hideGlobalAnnouncement();
@@ -5429,6 +5446,178 @@ function renderRoomInfo(room) {
   renderRoomMembersCount(members.length);
   renderPlayers(members);
   renderRoomVideo(room);
+}
+
+function stopRoomPolling() {
+  if (!pollTimer) {
+    return;
+  }
+  clearInterval(pollTimer);
+  pollTimer = null;
+}
+
+function restartRoomPolling() {
+  stopRoomPolling();
+  if (hasLeftRoom || !code || !me) {
+    return;
+  }
+  const intervalMs = roomSocketConnected ? ROOM_POLL_CONNECTED_MS : ROOM_POLL_DISCONNECTED_MS;
+  pollTimer = setInterval(() => {
+    if (roomVideoPageLeaving || document.visibilityState === "hidden") {
+      return;
+    }
+    refreshMessages().catch(() => {});
+  }, intervalMs);
+}
+
+function scheduleRoomRefresh(delayMs = ROOM_WS_REFRESH_DEBOUNCE_MS) {
+  if (roomRefreshDebounceTimer) {
+    return;
+  }
+  roomRefreshDebounceTimer = setTimeout(() => {
+    roomRefreshDebounceTimer = null;
+    if (roomVideoPageLeaving || hasLeftRoom) {
+      return;
+    }
+    refreshMessages().catch(() => {});
+  }, Math.max(0, Number(delayMs) || 0));
+}
+
+function clearRoomSocketReconnectTimer() {
+  if (!roomSocketReconnectTimer) {
+    return;
+  }
+  clearTimeout(roomSocketReconnectTimer);
+  roomSocketReconnectTimer = null;
+}
+
+function closeRoomSocket({ manual = true } = {}) {
+  if (manual) {
+    roomSocketManualClose = true;
+  }
+  clearRoomSocketReconnectTimer();
+  const activeSocket = roomSocket;
+  roomSocket = null;
+  roomSocketConnected = false;
+  if (!activeSocket) {
+    return;
+  }
+  try {
+    activeSocket.close(1000, "client-close");
+  } catch (_error) {
+    // Ignore close transport errors.
+  }
+}
+
+function handleRoomSocketPacket(packet) {
+  if (!packet || typeof packet !== "object") {
+    return;
+  }
+  const type = String(packet.type || "").trim().toLowerCase();
+  if (!type) {
+    return;
+  }
+  if (type === "video_sync") {
+    renderRoomVideo({
+      video: packet.video || null,
+      queue: Array.isArray(packet.queue) ? packet.queue : roomVideoQueueState
+    });
+    return;
+  }
+  if (type === "chat_message" || type === "room_changed") {
+    scheduleRoomRefresh();
+    return;
+  }
+  if (type === "room_forbidden") {
+    redirectToHome(t("toastKickedOut"));
+    return;
+  }
+  if (type === "room_closed") {
+    redirectToHome(t("toastRoomClosed"));
+  }
+}
+
+function connectRoomSocket() {
+  if (roomSocket || roomSocketManualClose || !code || !me) {
+    return;
+  }
+  const token = getToken();
+  if (!token) {
+    return;
+  }
+  const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const wsUrl = `${wsProtocol}//${window.location.host}/ws?token=${encodeURIComponent(token)}&room=${encodeURIComponent(code)}`;
+  let socket = null;
+  try {
+    socket = new WebSocket(wsUrl);
+  } catch (_error) {
+    roomSocketConnected = false;
+    restartRoomPolling();
+    if (roomSocketManualClose || roomVideoPageLeaving) {
+      return;
+    }
+    roomSocketReconnectAttempt += 1;
+    const delay = Math.min(
+      ROOM_WS_RECONNECT_MAX_MS,
+      ROOM_WS_RECONNECT_BASE_MS * (2 ** Math.min(roomSocketReconnectAttempt, 6))
+    );
+    clearRoomSocketReconnectTimer();
+    roomSocketReconnectTimer = setTimeout(() => {
+      roomSocketReconnectTimer = null;
+      connectRoomSocket();
+    }, delay);
+    return;
+  }
+
+  roomSocket = socket;
+  socket.addEventListener("open", () => {
+    if (roomSocket !== socket) {
+      return;
+    }
+    roomSocketConnected = true;
+    roomSocketReconnectAttempt = 0;
+    clearRoomSocketReconnectTimer();
+    restartRoomPolling();
+  });
+
+  socket.addEventListener("message", (event) => {
+    if (roomSocket !== socket) {
+      return;
+    }
+    let packet = null;
+    try {
+      packet = JSON.parse(String(event.data || ""));
+    } catch (_error) {
+      return;
+    }
+    handleRoomSocketPacket(packet);
+  });
+
+  socket.addEventListener("close", () => {
+    if (roomSocket !== socket) {
+      return;
+    }
+    roomSocket = null;
+    roomSocketConnected = false;
+    restartRoomPolling();
+    if (roomSocketManualClose || roomVideoPageLeaving || hasLeftRoom) {
+      return;
+    }
+    roomSocketReconnectAttempt += 1;
+    const delay = Math.min(
+      ROOM_WS_RECONNECT_MAX_MS,
+      ROOM_WS_RECONNECT_BASE_MS * (2 ** Math.min(roomSocketReconnectAttempt, 6))
+    );
+    clearRoomSocketReconnectTimer();
+    roomSocketReconnectTimer = setTimeout(() => {
+      roomSocketReconnectTimer = null;
+      connectRoomSocket();
+    }, delay);
+  });
+
+  socket.addEventListener("error", () => {
+    // Let the close handler handle reconnect behavior.
+  });
 }
 
 async function refreshMessages() {
@@ -6602,7 +6791,9 @@ async function bootRoom() {
     sfx("join");
     renderRoomInfo(joinData.room);
     await refreshMessages();
-    pollTimer = setInterval(refreshMessages, 1500);
+    roomSocketManualClose = false;
+    connectRoomSocket();
+    restartRoomPolling();
     ensureRoomVideoSyncHeartbeat();
   } catch (error) {
     redirectToHome(error.message);
@@ -6615,10 +6806,13 @@ window.addEventListener("beforeunload", () => {
   document.body.classList.remove("room-mobile-keyboard-open");
   document.documentElement.classList.remove("room-page");
   document.documentElement.style.setProperty("--room-chat-keyboard-offset", "0px");
-  leaveCurrentRoom({ keepalive: true });
-  if (pollTimer) {
-    clearInterval(pollTimer);
+  closeRoomSocket({ manual: true });
+  stopRoomPolling();
+  if (roomRefreshDebounceTimer) {
+    clearTimeout(roomRefreshDebounceTimer);
+    roomRefreshDebounceTimer = null;
   }
+  leaveCurrentRoom({ keepalive: true });
   setRoomSupervisorOpen(false);
   hideGlobalAnnouncement();
   queuedAnnouncement = null;
@@ -6638,6 +6832,12 @@ window.addEventListener("pagehide", () => {
 
 window.addEventListener("pageshow", () => {
   roomVideoPageLeaving = false;
+  if (me && !hasLeftRoom) {
+    if (!roomSocket && !roomSocketManualClose) {
+      connectRoomSocket();
+    }
+    restartRoomPolling();
+  }
   if (roomVideoSyncState?.playing) {
     roomVideoResumePending = true;
   }
@@ -6658,10 +6858,17 @@ document.addEventListener("visibilitychange", () => {
   const isVisible = document.visibilityState === "visible";
   roomVideoPageLeaving = !isVisible;
   if (!isVisible) {
+    stopRoomPolling();
     if (roomVideoSyncState?.playing) {
       roomVideoResumePending = true;
     }
     return;
+  }
+  if (me && !hasLeftRoom) {
+    if (!roomSocket && !roomSocketManualClose) {
+      connectRoomSocket();
+    }
+    restartRoomPolling();
   }
   if (roomVideoSyncState?.playing) {
     roomVideoResumePending = true;

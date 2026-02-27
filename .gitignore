@@ -3,3 +3,4 @@ uploads/room-videos/*.webm
 uploads/room-videos/*.ogg
 uploads/room-videos/*.mov
 data/users.backup.json
+.env

@@ -7,6 +7,8 @@ const crypto = require("crypto");
 const { spawn } = require("child_process");
 const { WebSocketServer } = require("ws");
 const { Client: PgClient } = require("pg");
+const mysql = require("mysql2/promise");
+require("dotenv").config();
 if (!process.env.YTDL_NO_DEBUG_FILE) {
   process.env.YTDL_NO_DEBUG_FILE = "1";
 }
@@ -70,6 +72,12 @@ const YOUTUBE_CACHE_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 30;
 const YOUTUBE_PROXY_TTL_MS = 1000 * 60 * 60 * 6;
 const YT_DLP_BINARY = String(process.env.YT_DLP_BINARY || "yt-dlp").trim() || "yt-dlp";
 const DATABASE_URL = String(process.env.DATABASE_URL || "").trim();
+const MYSQL_HOST = String(process.env.MYSQL_HOST || "").trim();
+const MYSQL_PORT = Math.max(1, Number(process.env.MYSQL_PORT || 3306) || 3306);
+const MYSQL_DATABASE = String(process.env.MYSQL_DATABASE || "").trim();
+const MYSQL_USER = String(process.env.MYSQL_USER || "").trim();
+const MYSQL_PASSWORD = String(process.env.MYSQL_PASSWORD || "");
+const MYSQL_SSL = String(process.env.MYSQL_SSL || "").trim().toLowerCase();
 const PG_RUNTIME_SNAPSHOT_DEBOUNCE_MS = 1200;
 const PG_RUNTIME_PERSIST_MAX_MESSAGES_PER_ROOM = 500;
 const WEBSOCKET_PATH = "/ws";
@@ -153,9 +161,14 @@ let wsServer = null;
 let wsPingTimer = null;
 let pgClient = null;
 let pgRuntimeEnabled = false;
+let mysqlPool = null;
+let mysqlRuntimeEnabled = false;
 let pgRuntimePersistTimer = null;
 let pgRuntimePersistInFlight = false;
 let pgRuntimePersistQueued = false;
+let usersSqlPersistTimer = null;
+let usersSqlPersistInFlight = false;
+let usersSqlPersistQueued = false;
 
 function parseJsonWithOptionalBom(raw) {
   return JSON.parse(String(raw || "").replace(/^\uFEFF/, ""));
@@ -236,11 +249,26 @@ function recordAudit(action, actor, target = "", details = {}) {
     details: details && typeof details === "object" ? details : {}
   };
   writeAuditEntryToFile(entry);
-  if (!pgRuntimeEnabled || !pgClient) {
+  if (pgRuntimeEnabled && pgClient) {
+    pgClient.query(
+      "INSERT INTO app_audit_log (created_at, action, actor, target, details) VALUES ($1, $2, $3, $4, $5::jsonb)",
+      [
+        Number(entry.createdAt),
+        entry.action,
+        entry.actor,
+        entry.target,
+        JSON.stringify(entry.details || {})
+      ]
+    ).catch((error) => {
+      console.error("Failed to persist audit entry:", error.message);
+    });
     return;
   }
-  pgClient.query(
-    "INSERT INTO app_audit_log (created_at, action, actor, target, details) VALUES ($1, $2, $3, $4, $5::jsonb)",
+  if (!mysqlRuntimeEnabled || !mysqlPool) {
+    return;
+  }
+  mysqlPool.execute(
+    "INSERT INTO app_audit_log (created_at, action, actor, target, details) VALUES (?, ?, ?, ?, ?)",
     [
       Number(entry.createdAt),
       entry.action,
@@ -381,6 +409,44 @@ function broadcastVideoSync(room) {
   });
 }
 
+function hasMySqlRuntimeConfig() {
+  return Boolean(MYSQL_HOST && MYSQL_DATABASE && MYSQL_USER);
+}
+
+function getMySqlHostCandidates() {
+  const hosts = new Set();
+  if (MYSQL_HOST) {
+    hosts.add(MYSQL_HOST);
+    // Common typo in FreeSQLHosting docs/screenshots.
+    if (MYSQL_HOST.endsWith(".freesqldhosting.net")) {
+      hosts.add(MYSQL_HOST.replace(".freesqldhosting.net", ".freesqldatabase.com"));
+    }
+  }
+  return Array.from(hosts).filter(Boolean);
+}
+
+function isSqlRuntimeEnabled() {
+  return Boolean(pgRuntimeEnabled || mysqlRuntimeEnabled);
+}
+
+function decodeSqlJson(value, fallback = null) {
+  if (value === null || value === undefined) {
+    return fallback;
+  }
+  if (typeof value === "object") {
+    return value;
+  }
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return fallback;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (_error) {
+    return fallback;
+  }
+}
+
 async function ensurePgRuntimeSchema() {
   if (!pgClient) {
     return;
@@ -431,6 +497,17 @@ async function ensurePgRuntimeSchema() {
     );
   `);
   await pgClient.query(`
+    CREATE TABLE IF NOT EXISTS app_users (
+      username TEXT PRIMARY KEY,
+      password_hash TEXT NOT NULL,
+      password_salt TEXT NOT NULL DEFAULT '',
+      created_at BIGINT NOT NULL,
+      display_name TEXT NOT NULL,
+      avatar_data_url TEXT NOT NULL DEFAULT '',
+      country_code TEXT NOT NULL DEFAULT ''
+    );
+  `);
+  await pgClient.query(`
     CREATE TABLE IF NOT EXISTS app_audit_log (
       id BIGSERIAL PRIMARY KEY,
       created_at BIGINT NOT NULL,
@@ -459,6 +536,124 @@ async function initPgRuntime() {
     pgClient = null;
     console.error("Failed to initialize PostgreSQL runtime persistence:", error.message);
   }
+}
+
+async function ensureMySqlRuntimeSchema() {
+  if (!mysqlPool) {
+    return;
+  }
+  await mysqlPool.execute(`
+    CREATE TABLE IF NOT EXISTS app_runtime_sessions (
+      token VARCHAR(255) PRIMARY KEY,
+      username VARCHAR(120) NOT NULL,
+      expires_at BIGINT NOT NULL,
+      is_guest TINYINT(1) NOT NULL DEFAULT 0
+    )
+  `);
+  await mysqlPool.execute(`
+    CREATE TABLE IF NOT EXISTS app_runtime_rooms (
+      code VARCHAR(32) PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      host VARCHAR(120) NOT NULL,
+      pending_host_restore VARCHAR(120) NULL,
+      created_at BIGINT NOT NULL,
+      next_message_id BIGINT NOT NULL,
+      video LONGTEXT NULL,
+      video_sync LONGTEXT NULL,
+      video_queue LONGTEXT NULL,
+      video_history LONGTEXT NULL
+    )
+  `);
+  await mysqlPool.execute(`
+    CREATE TABLE IF NOT EXISTS app_runtime_room_members (
+      room_code VARCHAR(32) NOT NULL,
+      username VARCHAR(120) NOT NULL,
+      approved TINYINT(1) NOT NULL DEFAULT 1,
+      PRIMARY KEY (room_code, username)
+    )
+  `);
+  await mysqlPool.execute(`
+    CREATE TABLE IF NOT EXISTS app_runtime_room_join_requests (
+      room_code VARCHAR(32) NOT NULL,
+      username VARCHAR(120) NOT NULL,
+      PRIMARY KEY (room_code, username)
+    )
+  `);
+  await mysqlPool.execute(`
+    CREATE TABLE IF NOT EXISTS app_runtime_room_messages (
+      room_code VARCHAR(32) NOT NULL,
+      message_id BIGINT NOT NULL,
+      payload LONGTEXT NOT NULL,
+      PRIMARY KEY (room_code, message_id)
+    )
+  `);
+  await mysqlPool.execute(`
+    CREATE TABLE IF NOT EXISTS app_users (
+      username VARCHAR(120) PRIMARY KEY,
+      password_hash LONGTEXT NOT NULL,
+      password_salt VARCHAR(255) NOT NULL DEFAULT '',
+      created_at BIGINT NOT NULL,
+      display_name VARCHAR(255) NOT NULL,
+      avatar_data_url LONGTEXT NOT NULL,
+      country_code VARCHAR(16) NOT NULL DEFAULT ''
+    )
+  `);
+  await mysqlPool.execute(`
+    CREATE TABLE IF NOT EXISTS app_audit_log (
+      id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      created_at BIGINT NOT NULL,
+      action VARCHAR(180) NOT NULL,
+      actor VARCHAR(180) NOT NULL,
+      target VARCHAR(255) NOT NULL,
+      details LONGTEXT NOT NULL
+    )
+  `);
+}
+
+async function initMySqlRuntime() {
+  if (!hasMySqlRuntimeConfig()) {
+    return;
+  }
+  const hostCandidates = getMySqlHostCandidates();
+  let lastError = null;
+  for (const hostCandidate of hostCandidates) {
+    try {
+      mysqlPool = mysql.createPool({
+        host: hostCandidate,
+        port: MYSQL_PORT,
+        database: MYSQL_DATABASE,
+        user: MYSQL_USER,
+        password: MYSQL_PASSWORD,
+        waitForConnections: true,
+        connectionLimit: 6,
+        queueLimit: 0,
+        ssl: MYSQL_SSL === "1" || MYSQL_SSL === "true" || MYSQL_SSL === "require"
+          ? { rejectUnauthorized: false }
+          : undefined
+      });
+      await mysqlPool.execute("SELECT 1");
+      await ensureMySqlRuntimeSchema();
+      mysqlRuntimeEnabled = true;
+      if (hostCandidate !== MYSQL_HOST) {
+        console.warn(`MySQL host fallback in use: ${hostCandidate}`);
+      }
+      console.log("MySQL runtime persistence is enabled.");
+      return;
+    } catch (error) {
+      lastError = error;
+      mysqlRuntimeEnabled = false;
+      if (mysqlPool) {
+        try {
+          await mysqlPool.end();
+        } catch (_closeError) {
+          // Ignore close failures.
+        }
+      }
+      mysqlPool = null;
+    }
+  }
+  const message = lastError?.message || "Unknown MySQL initialization error.";
+  console.error("Failed to initialize MySQL runtime persistence:", message);
 }
 
 function buildRoomSnapshotForPg(room) {
@@ -611,6 +806,124 @@ async function loadRuntimeSnapshotFromPg() {
   }
 }
 
+async function loadRuntimeSnapshotFromMySql() {
+  if (!mysqlRuntimeEnabled || !mysqlPool) {
+    return;
+  }
+  try {
+    const [sessionsRows] = await mysqlPool.query("SELECT token, username, expires_at, is_guest FROM app_runtime_sessions");
+    const [roomsRows] = await mysqlPool.query("SELECT code, name, host, pending_host_restore, created_at, next_message_id, video, video_sync, video_queue, video_history FROM app_runtime_rooms");
+    const [membersRows] = await mysqlPool.query("SELECT room_code, username, approved FROM app_runtime_room_members");
+    const [requestsRows] = await mysqlPool.query("SELECT room_code, username FROM app_runtime_room_join_requests");
+    const [messagesRows] = await mysqlPool.query("SELECT room_code, message_id, payload FROM app_runtime_room_messages ORDER BY room_code ASC, message_id ASC");
+
+    sessions.clear();
+    rooms.clear();
+
+    sessionsRows.forEach((row) => {
+      const token = String(row?.token || "").trim();
+      const username = normalizeUsername(row?.username);
+      if (!token || !username) {
+        return;
+      }
+      sessions.set(token, {
+        username,
+        expiresAt: Number(row?.expires_at) || Date.now() + SESSION_TTL_MS,
+        isGuest: Boolean(Number(row?.is_guest || 0))
+      });
+    });
+
+    const roomByCode = new Map();
+    roomsRows.forEach((row) => {
+      const code = String(row?.code || "").trim().toUpperCase();
+      if (!code) {
+        return;
+      }
+      const parsedVideo = decodeSqlJson(row?.video, null);
+      const parsedVideoSync = decodeSqlJson(row?.video_sync, null);
+      const parsedVideoQueue = decodeSqlJson(row?.video_queue, []);
+      const parsedVideoHistory = decodeSqlJson(row?.video_history, []);
+      const room = {
+        code,
+        name: String(row?.name || "").trim() || "Room",
+        host: normalizeUsername(row?.host),
+        pendingHostRestore: normalizeUsername(row?.pending_host_restore),
+        members: new Set(),
+        approvedUsers: new Set(),
+        joinRequests: new Set(),
+        messageFloorByUser: new Map(),
+        clientMessageLog: new Map(),
+        messages: [],
+        nextMessageId: Math.max(1, Number(row?.next_message_id) || 1),
+        createdAt: Number(row?.created_at) || Date.now(),
+        video: parsedVideo && typeof parsedVideo === "object" ? parsedVideo : null,
+        videoSync: parsedVideoSync && typeof parsedVideoSync === "object" ? parsedVideoSync : null,
+        videoQueue: Array.isArray(parsedVideoQueue) ? parsedVideoQueue : [],
+        videoHistory: Array.isArray(parsedVideoHistory) ? parsedVideoHistory : []
+      };
+      roomByCode.set(code, room);
+      rooms.set(code, room);
+    });
+
+    membersRows.forEach((row) => {
+      const code = String(row?.room_code || "").trim().toUpperCase();
+      const username = normalizeUsername(row?.username);
+      const room = roomByCode.get(code);
+      if (!room || !username) {
+        return;
+      }
+      room.members.add(username);
+      if (Boolean(Number(row?.approved || 0))) {
+        room.approvedUsers.add(username);
+      }
+      room.messageFloorByUser.set(username, 0);
+    });
+
+    requestsRows.forEach((row) => {
+      const code = String(row?.room_code || "").trim().toUpperCase();
+      const username = normalizeUsername(row?.username);
+      const room = roomByCode.get(code);
+      if (!room || !username) {
+        return;
+      }
+      room.joinRequests.add(username);
+    });
+
+    messagesRows.forEach((row) => {
+      const code = String(row?.room_code || "").trim().toUpperCase();
+      const room = roomByCode.get(code);
+      if (!room) {
+        return;
+      }
+      const payload = decodeSqlJson(row?.payload, null);
+      if (!payload || typeof payload !== "object") {
+        return;
+      }
+      const messageId = Number(payload.id || row?.message_id || 0);
+      if (!Number.isInteger(messageId) || messageId <= 0) {
+        return;
+      }
+      room.messages.push(payload);
+      if (messageId >= room.nextMessageId) {
+        room.nextMessageId = messageId + 1;
+      }
+    });
+
+    rooms.forEach((room) => {
+      ensureRoomRuntimeState(room);
+      if (!room.host || !room.members.has(room.host)) {
+        room.host = Array.from(room.members)[0] || "";
+      }
+      if (!room.host && room.members.size === 0) {
+        rooms.delete(room.code);
+      }
+    });
+    console.log(`Loaded runtime snapshot from MySQL: ${rooms.size} rooms, ${sessions.size} sessions.`);
+  } catch (error) {
+    console.error("Failed to load runtime snapshot from MySQL:", error.message);
+  }
+}
+
 async function persistRuntimeSnapshotToPg() {
   if (!pgRuntimeEnabled || !pgClient) {
     return;
@@ -686,14 +999,133 @@ async function persistRuntimeSnapshotToPg() {
     if (pgRuntimePersistQueued) {
       pgRuntimePersistQueued = false;
       setTimeout(() => {
-        persistRuntimeSnapshotToPg().catch(() => undefined);
+        persistRuntimeSnapshotToSql().catch(() => undefined);
       }, 250);
     }
   }
 }
 
-function scheduleRuntimeSnapshotPersistence() {
+async function persistRuntimeSnapshotToMySql() {
+  if (!mysqlRuntimeEnabled || !mysqlPool) {
+    return;
+  }
+  if (pgRuntimePersistInFlight) {
+    pgRuntimePersistQueued = true;
+    return;
+  }
+  pgRuntimePersistInFlight = true;
+  let connection = null;
+  try {
+    connection = await mysqlPool.getConnection();
+    await connection.beginTransaction();
+    await connection.query("DELETE FROM app_runtime_sessions");
+    await connection.query("DELETE FROM app_runtime_rooms");
+    await connection.query("DELETE FROM app_runtime_room_members");
+    await connection.query("DELETE FROM app_runtime_room_join_requests");
+    await connection.query("DELETE FROM app_runtime_room_messages");
+
+    for (const [token, sessionEntry] of sessions.entries()) {
+      const meta = getSessionMeta(sessionEntry);
+      if (!meta.username) {
+        continue;
+      }
+      await connection.execute(
+        "INSERT INTO app_runtime_sessions (token, username, expires_at, is_guest) VALUES (?, ?, ?, ?)",
+        [token, meta.username, Number(meta.expiresAt || 0), Boolean(meta.isGuest) ? 1 : 0]
+      );
+    }
+
+    for (const room of rooms.values()) {
+      ensureRoomRuntimeState(room);
+      const snapshot = buildRoomSnapshotForPg(room);
+      await connection.execute(
+        "INSERT INTO app_runtime_rooms (code, name, host, pending_host_restore, created_at, next_message_id, video, video_sync, video_queue, video_history) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+          snapshot.room.code,
+          snapshot.room.name,
+          snapshot.room.host,
+          snapshot.room.pendingHostRestore || null,
+          snapshot.room.createdAt,
+          snapshot.room.nextMessageId,
+          JSON.stringify(snapshot.room.video || null),
+          JSON.stringify(snapshot.room.videoSync || null),
+          JSON.stringify(snapshot.room.videoQueue || []),
+          JSON.stringify(snapshot.room.videoHistory || [])
+        ]
+      );
+
+      for (const member of snapshot.members) {
+        await connection.execute(
+          "INSERT INTO app_runtime_room_members (room_code, username, approved) VALUES (?, ?, ?)",
+          [snapshot.room.code, member.username, Boolean(member.approved) ? 1 : 0]
+        );
+      }
+      for (const username of snapshot.joinRequests) {
+        await connection.execute(
+          "INSERT INTO app_runtime_room_join_requests (room_code, username) VALUES (?, ?)",
+          [snapshot.room.code, username]
+        );
+      }
+      for (const message of snapshot.messages) {
+        await connection.execute(
+          "INSERT INTO app_runtime_room_messages (room_code, message_id, payload) VALUES (?, ?, ?)",
+          [snapshot.room.code, Number(message.id || 0), JSON.stringify(message)]
+        );
+      }
+    }
+    await connection.commit();
+  } catch (error) {
+    if (connection) {
+      try {
+        await connection.rollback();
+      } catch (_rollbackError) {
+        // Ignore rollback errors.
+      }
+    }
+    console.error("Failed to persist runtime snapshot to MySQL:", error.message);
+  } finally {
+    if (connection) {
+      connection.release();
+    }
+    pgRuntimePersistInFlight = false;
+    if (pgRuntimePersistQueued) {
+      pgRuntimePersistQueued = false;
+      setTimeout(() => {
+        persistRuntimeSnapshotToSql().catch(() => undefined);
+      }, 250);
+    }
+  }
+}
+
+async function initSqlRuntime() {
+  await initPgRuntime();
   if (!pgRuntimeEnabled) {
+    await initMySqlRuntime();
+  }
+}
+
+async function loadRuntimeSnapshotFromSql() {
+  if (pgRuntimeEnabled) {
+    await loadRuntimeSnapshotFromPg();
+    return;
+  }
+  if (mysqlRuntimeEnabled) {
+    await loadRuntimeSnapshotFromMySql();
+  }
+}
+
+async function persistRuntimeSnapshotToSql() {
+  if (pgRuntimeEnabled) {
+    await persistRuntimeSnapshotToPg();
+    return;
+  }
+  if (mysqlRuntimeEnabled) {
+    await persistRuntimeSnapshotToMySql();
+  }
+}
+
+function scheduleRuntimeSnapshotPersistence() {
+  if (!isSqlRuntimeEnabled()) {
     return;
   }
   if (pgRuntimePersistTimer) {
@@ -701,7 +1133,7 @@ function scheduleRuntimeSnapshotPersistence() {
   }
   pgRuntimePersistTimer = setTimeout(() => {
     pgRuntimePersistTimer = null;
-    persistRuntimeSnapshotToPg().catch(() => undefined);
+    persistRuntimeSnapshotToSql().catch(() => undefined);
   }, PG_RUNTIME_SNAPSHOT_DEBOUNCE_MS);
 }
 
@@ -1027,7 +1459,7 @@ function hasDurableUsersStorage() {
   if (isGitHubUsersSyncEnabled()) {
     return true;
   }
-  if (DATABASE_URL) {
+  if (DATABASE_URL || hasMySqlRuntimeConfig()) {
     return true;
   }
   return false;
@@ -1042,7 +1474,7 @@ function warnIfUsersStorageIsEphemeral() {
       "Users storage path appears ephemeral:",
       DATA_DIR,
       "Created accounts may be lost after restart/deploy.",
-      "Use a persistent disk path (e.g. /var/data/...) or enable GITHUB_USERS_SYNC / DATABASE_URL."
+      "Use a persistent disk path (e.g. /var/data/...) or enable GITHUB_USERS_SYNC / DATABASE_URL / MYSQL_*."
     ].join(" ")
   );
 }
@@ -1135,74 +1567,282 @@ function hydrateUsersFromList(list) {
   });
 }
 
+function buildRegisteredUsersList() {
+  return Array.from(users.entries()).map(([username, info]) => ({
+    username,
+    passwordHash: info.passwordHash,
+    passwordSalt: typeof info.passwordSalt === "string" ? info.passwordSalt : "",
+    createdAt: Number(info.createdAt) || Date.now(),
+    displayName: normalizeDisplayName(info.displayName, username),
+    avatarDataUrl: info.avatarDataUrl || "",
+    countryCode: normalizeCountryCode(info.countryCode)
+  }));
+}
+
+function writeUsersListToLocalFiles(list) {
+  ensureDataDir();
+  const serialized = JSON.stringify(Array.isArray(list) ? list : [], null, 2);
+  writeTextFileAtomic(USERS_FILE, serialized);
+  writeTextFileAtomic(USERS_BACKUP_FILE, serialized);
+  return serialized;
+}
+
+async function loadUsersFromPg() {
+  if (!pgRuntimeEnabled || !pgClient) {
+    return -1;
+  }
+  const result = await pgClient.query(
+    "SELECT username, password_hash, password_salt, created_at, display_name, avatar_data_url, country_code FROM app_users ORDER BY username ASC"
+  );
+  const list = result.rows.map((row) => ({
+    username: normalizeUsername(row?.username),
+    passwordHash: String(row?.password_hash || ""),
+    passwordSalt: String(row?.password_salt || ""),
+    createdAt: Number(row?.created_at) || Date.now(),
+    displayName: String(row?.display_name || ""),
+    avatarDataUrl: String(row?.avatar_data_url || ""),
+    countryCode: normalizeCountryCode(row?.country_code)
+  }));
+  hydrateUsersFromList(list);
+  return list.length;
+}
+
+async function loadUsersFromMySql() {
+  if (!mysqlRuntimeEnabled || !mysqlPool) {
+    return -1;
+  }
+  const [rows] = await mysqlPool.query(
+    "SELECT username, password_hash, password_salt, created_at, display_name, avatar_data_url, country_code FROM app_users ORDER BY username ASC"
+  );
+  const list = rows.map((row) => ({
+    username: normalizeUsername(row?.username),
+    passwordHash: String(row?.password_hash || ""),
+    passwordSalt: String(row?.password_salt || ""),
+    createdAt: Number(row?.created_at) || Date.now(),
+    displayName: String(row?.display_name || ""),
+    avatarDataUrl: String(row?.avatar_data_url || ""),
+    countryCode: normalizeCountryCode(row?.country_code)
+  }));
+  hydrateUsersFromList(list);
+  return list.length;
+}
+
+async function loadUsersFromSql() {
+  if (pgRuntimeEnabled) {
+    return loadUsersFromPg();
+  }
+  if (mysqlRuntimeEnabled) {
+    return loadUsersFromMySql();
+  }
+  return -1;
+}
+
+async function replaceUsersSnapshotInPg(list) {
+  if (!pgRuntimeEnabled || !pgClient) {
+    return;
+  }
+  await pgClient.query("BEGIN");
+  try {
+    await pgClient.query("TRUNCATE app_users");
+    for (const item of list) {
+      await pgClient.query(
+        "INSERT INTO app_users (username, password_hash, password_salt, created_at, display_name, avatar_data_url, country_code) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        [
+          item.username,
+          item.passwordHash,
+          item.passwordSalt || "",
+          Number(item.createdAt) || Date.now(),
+          normalizeDisplayName(item.displayName, item.username),
+          item.avatarDataUrl || "",
+          normalizeCountryCode(item.countryCode)
+        ]
+      );
+    }
+    await pgClient.query("COMMIT");
+  } catch (error) {
+    try {
+      await pgClient.query("ROLLBACK");
+    } catch (_rollbackError) {
+      // Ignore rollback errors.
+    }
+    throw error;
+  }
+}
+
+async function replaceUsersSnapshotInMySql(list) {
+  if (!mysqlRuntimeEnabled || !mysqlPool) {
+    return;
+  }
+  const connection = await mysqlPool.getConnection();
+  try {
+    await connection.beginTransaction();
+    await connection.query("DELETE FROM app_users");
+    for (const item of list) {
+      await connection.execute(
+        "INSERT INTO app_users (username, password_hash, password_salt, created_at, display_name, avatar_data_url, country_code) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+          item.username,
+          item.passwordHash,
+          item.passwordSalt || "",
+          Number(item.createdAt) || Date.now(),
+          normalizeDisplayName(item.displayName, item.username),
+          item.avatarDataUrl || "",
+          normalizeCountryCode(item.countryCode)
+        ]
+      );
+    }
+    await connection.commit();
+  } catch (error) {
+    try {
+      await connection.rollback();
+    } catch (_rollbackError) {
+      // Ignore rollback errors.
+    }
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function replaceUsersSnapshotInSql(list) {
+  if (pgRuntimeEnabled) {
+    await replaceUsersSnapshotInPg(list);
+    return;
+  }
+  if (mysqlRuntimeEnabled) {
+    await replaceUsersSnapshotInMySql(list);
+  }
+}
+
+async function persistUsersSnapshotToSql() {
+  if (!isSqlRuntimeEnabled()) {
+    return;
+  }
+  if (usersSqlPersistInFlight) {
+    usersSqlPersistQueued = true;
+    return;
+  }
+  usersSqlPersistInFlight = true;
+  try {
+    const list = buildRegisteredUsersList();
+    await replaceUsersSnapshotInSql(list);
+  } catch (error) {
+    console.error("Failed to persist users to SQL storage:", error.message);
+  } finally {
+    usersSqlPersistInFlight = false;
+    if (usersSqlPersistQueued) {
+      usersSqlPersistQueued = false;
+      setTimeout(() => {
+        persistUsersSnapshotToSql().catch(() => undefined);
+      }, 250);
+    }
+  }
+}
+
+function scheduleUsersSnapshotPersistenceToSql() {
+  if (!isSqlRuntimeEnabled()) {
+    return;
+  }
+  if (usersSqlPersistTimer) {
+    return;
+  }
+  usersSqlPersistTimer = setTimeout(() => {
+    usersSqlPersistTimer = null;
+    persistUsersSnapshotToSql().catch(() => undefined);
+  }, 240);
+}
+
 async function loadUsers() {
   ensureDataDir();
+  if (isSqlRuntimeEnabled()) {
+    try {
+      const sqlCount = await loadUsersFromSql();
+      if (sqlCount > 0) {
+        writeUsersListToLocalFiles(buildRegisteredUsersList());
+        console.log(`Loaded ${sqlCount} users from SQL storage.`);
+        return;
+      }
+      console.log("No users found in SQL storage. Falling back to GitHub/local files.");
+    } catch (error) {
+      console.error("Failed to load users from SQL storage:", error.message);
+      console.warn("Falling back to GitHub/local users files.");
+    }
+  }
+
+  let loadedFromFallback = false;
   if (isGitHubUsersSyncEnabled()) {
     try {
       const remoteUsers = await fetchUsersFromGitHub();
       if (remoteUsers && Array.isArray(remoteUsers.list)) {
         hydrateUsersFromList(remoteUsers.list);
-        const serializedRemote = JSON.stringify(remoteUsers.list, null, 2);
-        writeTextFileAtomic(USERS_FILE, serializedRemote);
-        writeTextFileAtomic(USERS_BACKUP_FILE, serializedRemote);
+        writeUsersListToLocalFiles(buildRegisteredUsersList());
         gitHubUsersFileSha = String(remoteUsers.sha || "");
         console.log(`Loaded ${remoteUsers.list.length} users from GitHub sync.`);
-        return;
+        loadedFromFallback = true;
       }
     } catch (error) {
       console.error("Failed to load users from GitHub sync:", error.message);
       console.warn("Falling back to local users files.");
     }
   }
-  try {
-    if (!fs.existsSync(USERS_FILE)) {
-      writeTextFileAtomic(USERS_FILE, "[]");
-      writeTextFileAtomic(USERS_BACKUP_FILE, "[]");
-      return;
-    }
-    const raw = fs.readFileSync(USERS_FILE, "utf8");
-    const list = parseJsonWithOptionalBom(raw);
-    if (!Array.isArray(list)) {
-      throw new Error("users.json must contain an array.");
-    }
-    hydrateUsersFromList(list);
-    writeTextFileAtomic(USERS_BACKUP_FILE, JSON.stringify(list, null, 2));
-  } catch (error) {
-    console.error("Failed to load users from primary file:", error.message);
+  if (!loadedFromFallback) {
     try {
-      if (!fs.existsSync(USERS_BACKUP_FILE)) {
-        throw new Error("backup file not found.");
+      if (!fs.existsSync(USERS_FILE)) {
+        writeUsersListToLocalFiles([]);
+        loadedFromFallback = true;
+      } else {
+        const raw = fs.readFileSync(USERS_FILE, "utf8");
+        const list = parseJsonWithOptionalBom(raw);
+        if (!Array.isArray(list)) {
+          throw new Error("users.json must contain an array.");
+        }
+        hydrateUsersFromList(list);
+        writeTextFileAtomic(USERS_BACKUP_FILE, JSON.stringify(list, null, 2));
+        loadedFromFallback = true;
       }
-      const backupRaw = fs.readFileSync(USERS_BACKUP_FILE, "utf8");
-      const backupList = parseJsonWithOptionalBom(backupRaw);
-      if (!Array.isArray(backupList)) {
-        throw new Error("backup users file must contain an array.");
+    } catch (error) {
+      console.error("Failed to load users from primary file:", error.message);
+      try {
+        if (!fs.existsSync(USERS_BACKUP_FILE)) {
+          throw new Error("backup file not found.");
+        }
+        const backupRaw = fs.readFileSync(USERS_BACKUP_FILE, "utf8");
+        const backupList = parseJsonWithOptionalBom(backupRaw);
+        if (!Array.isArray(backupList)) {
+          throw new Error("backup users file must contain an array.");
+        }
+        hydrateUsersFromList(backupList);
+        writeTextFileAtomic(USERS_FILE, JSON.stringify(backupList, null, 2));
+        console.warn("Recovered users from backup file.");
+        loadedFromFallback = true;
+      } catch (backupError) {
+        console.error("Failed to recover users from backup:", backupError.message);
       }
-      hydrateUsersFromList(backupList);
-      writeTextFileAtomic(USERS_FILE, JSON.stringify(backupList, null, 2));
-      console.warn("Recovered users from backup file.");
-    } catch (backupError) {
-      console.error("Failed to recover users from backup:", backupError.message);
+    }
+  }
+
+  if (isSqlRuntimeEnabled() && loadedFromFallback && users.size > 0) {
+    try {
+      await replaceUsersSnapshotInSql(buildRegisteredUsersList());
+      console.log(`Migrated ${users.size} users to SQL storage.`);
+    } catch (error) {
+      console.error("Failed to migrate users to SQL storage:", error.message);
+    }
+  } else if (isSqlRuntimeEnabled() && loadedFromFallback && users.size === 0) {
+    try {
+      await replaceUsersSnapshotInSql([]);
+    } catch (error) {
+      console.error("Failed to clear SQL users snapshot:", error.message);
     }
   }
 }
 
 function saveUsers() {
   try {
-    ensureDataDir();
-    const list = Array.from(users.entries()).map(([username, info]) => ({
-      username,
-      passwordHash: info.passwordHash,
-      passwordSalt: typeof info.passwordSalt === "string" ? info.passwordSalt : "",
-      createdAt: info.createdAt,
-      displayName: normalizeDisplayName(info.displayName, username),
-      avatarDataUrl: info.avatarDataUrl || "",
-      countryCode: normalizeCountryCode(info.countryCode)
-    }));
-    const serialized = JSON.stringify(list, null, 2);
-    writeTextFileAtomic(USERS_FILE, serialized);
-    writeTextFileAtomic(USERS_BACKUP_FILE, serialized);
+    const list = buildRegisteredUsersList();
+    const serialized = writeUsersListToLocalFiles(list);
     queueUsersSyncToGitHub(serialized);
+    scheduleUsersSnapshotPersistenceToSql();
     return true;
   } catch (error) {
     console.error("Failed to save users:", error.message);
@@ -2417,6 +3057,20 @@ function shouldEnqueueVideo(value, mode = "") {
     return false;
   }
   return parseBooleanFlag(value);
+}
+
+function resolveRoomVideoEnqueueMode(room, username, enqueueValue, modeValue = "") {
+  const hasActiveVideo = Boolean(room?.video?.src);
+  if (!hasActiveVideo) {
+    // Keep the very first item as current video instead of a silent queue-only state.
+    return false;
+  }
+  const requestedEnqueue = shouldEnqueueVideo(enqueueValue, modeValue);
+  if (requestedEnqueue) {
+    return true;
+  }
+  // Non-leaders can add items but cannot replace current playback.
+  return room?.host !== normalizeUsername(username);
 }
 
 function roomVideoPublicToAbsolutePath(publicPath) {
@@ -5332,7 +5986,12 @@ async function handleApi(req, res) {
       }
 
       const normalizedDuration = normalizeRoomVideoDuration(multipart.fields.duration);
-      const enqueueRequested = true;
+      const enqueueRequested = resolveRoomVideoEnqueueMode(
+        room,
+        username,
+        multipart.fields.enqueue,
+        multipart.fields.mode
+      );
       const videoEntry = createRoomFileVideoEntry(room, {
         storedFileName,
         filename: cleanFileName,
@@ -5390,9 +6049,9 @@ async function handleApi(req, res) {
         return;
       }
 
-      const { input } = await parseBody(req);
+      const { input, enqueue, mode } = await parseBody(req);
       const rawInput = String(input || "").trim();
-      const enqueueRequested = true;
+      const enqueueRequested = resolveRoomVideoEnqueueMode(room, username, enqueue, mode);
       if (rawInput.length < 2) {
         sendJson(res, 400, {
           code: "YOUTUBE_INPUT_REQUIRED",
@@ -5966,13 +6625,13 @@ setupWebSocketServer(server);
 
 async function bootstrap() {
   warnIfUsersStorageIsEphemeral();
+  await initSqlRuntime();
   await loadUsers();
   loadModeration();
   ensureUploadsDir();
   loadYouTubeCache();
-  await initPgRuntime();
-  if (pgRuntimeEnabled) {
-    await loadRuntimeSnapshotFromPg();
+  if (isSqlRuntimeEnabled()) {
+    await loadRuntimeSnapshotFromSql();
   }
   server.listen(PORT, () => {
     console.log(`Server is running on http://localhost:${PORT}`);

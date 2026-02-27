@@ -28,3 +28,16 @@ services:
         value: data/users.json
       - key: GITHUB_USERS_SYNC_TOKEN
         sync: false
+      # MySQL runtime persistence
+      - key: MYSQL_HOST
+        value: mysql-9c8080a-hosm-8240.d.aivencloud.com
+      - key: MYSQL_PORT
+        value: "27966"
+      - key: MYSQL_DATABASE
+        value: defaultdb
+      - key: MYSQL_USER
+        value: avnadmin
+      - key: MYSQL_PASSWORD
+        sync: false
+      - key: MYSQL_SSL
+        value: "require"
