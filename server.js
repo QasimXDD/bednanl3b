@@ -5,6 +5,7 @@ const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 const { spawn } = require("child_process");
+const { Readable } = require("stream");
 const { WebSocketServer } = require("ws");
 const { Client: PgClient } = require("pg");
 const mysql = require("mysql2/promise");
@@ -16,6 +17,12 @@ if (!process.env.YTDL_NO_UPDATE) {
   process.env.YTDL_NO_UPDATE = "1";
 }
 const ytdl = require("@distube/ytdl-core");
+let ybdYtdlModule = null;
+try {
+  ybdYtdlModule = require("@ybd-project/ytdl-core");
+} catch (_error) {
+  ybdYtdlModule = null;
+}
 const Busboy = require("busboy");
 
 const PORT = process.env.PORT || 3000;
@@ -66,7 +73,7 @@ const ROOM_VIDEO_MAX_FILENAME_LENGTH = 120;
 const ROOM_VIDEO_HEARTBEAT_REWIND_GUARD_SEC = 2.4;
 const ROOM_VIDEO_DB_STREAM_CHUNK_BYTES = 1024 * 1024;
 const YOUTUBE_SEARCH_TIMEOUT_MS = 9000;
-const YOUTUBE_DOWNLOAD_TIMEOUT_MS = 1000 * 60 * 4;
+const YOUTUBE_DOWNLOAD_TIMEOUT_MS = 1000 * 60 * 8;
 const YOUTUBE_INPUT_MAX_LENGTH = 300;
 const YOUTUBE_VIDEO_ID_REGEX = /^[A-Za-z0-9_-]{11}$/;
 const YOUTUBE_CACHE_MAX_ITEMS = 180;
@@ -165,6 +172,7 @@ const rateLimitBuckets = new Map();
 let siteAnnouncement = null;
 let activeRoomVideoUploadDir = ROOM_VIDEO_UPLOAD_DIR_DEFAULT;
 let ytDlpCommandOverride = null;
+let ybdYtdlClient = null;
 let gitHubUsersSyncQueue = Promise.resolve();
 let gitHubUsersFileSha = "";
 let wsServer = null;
@@ -4662,6 +4670,56 @@ async function getYouTubeInfoRobust(videoId) {
   }
 }
 
+function getYbdYtdlClient() {
+  if (!ybdYtdlModule || typeof ybdYtdlModule.YtdlCore !== "function") {
+    return null;
+  }
+  if (ybdYtdlClient) {
+    return ybdYtdlClient;
+  }
+  try {
+    ybdYtdlClient = new ybdYtdlModule.YtdlCore({
+      logDisplay: "none",
+      noUpdate: true,
+      disableRetryRequest: false
+    });
+    return ybdYtdlClient;
+  } catch (_error) {
+    ybdYtdlClient = null;
+    return null;
+  }
+}
+
+function toNodeReadableFromYbdStream(stream) {
+  if (!stream) {
+    return null;
+  }
+  if (typeof stream.pipe === "function" && typeof stream.on === "function") {
+    return stream;
+  }
+  if (ybdYtdlModule && typeof ybdYtdlModule.toPipeableStream === "function") {
+    try {
+      const converted = ybdYtdlModule.toPipeableStream(stream);
+      if (converted && typeof converted.pipe === "function" && typeof converted.on === "function") {
+        return converted;
+      }
+    } catch (_error) {
+      // Try other conversions.
+    }
+  }
+  if (typeof Readable.fromWeb === "function" && stream && typeof stream.getReader === "function") {
+    try {
+      const converted = Readable.fromWeb(stream);
+      if (converted && typeof converted.pipe === "function" && typeof converted.on === "function") {
+        return converted;
+      }
+    } catch (_error) {
+      // Ignore unsupported stream conversion.
+    }
+  }
+  return null;
+}
+
 function estimateYouTubeFormatSizeBytes(format) {
   const direct = Number(format?.contentLength || 0);
   if (Number.isFinite(direct) && direct > 0) {
@@ -4962,6 +5020,126 @@ async function downloadYouTubeVideoToLocalFileWithYtDlp(videoId) {
   };
 }
 
+async function downloadYouTubeVideoToLocalFileWithYbd(videoId) {
+  const ybdClient = getYbdYtdlClient();
+  if (!ybdClient) {
+    const unavailable = new Error("YBD ytdl fallback is unavailable");
+    unavailable.code = "YBD_YTDL_UNAVAILABLE";
+    throw unavailable;
+  }
+
+  const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  let info = null;
+  try {
+    info = await ybdClient.getBasicInfo(watchUrl, {
+      filter: "videoandaudio",
+      quality: "highest"
+    });
+  } catch (_error) {
+    // Download may still succeed without metadata.
+  }
+
+  let pickedContainer = "mp4";
+  const candidates = Array.isArray(info?.formats)
+    ? info.formats
+      .filter((item) => item && item.hasVideo && item.hasAudio)
+      .map((item) => ({ format: item, estimatedBytes: estimateYouTubeFormatSizeBytes(item) }))
+      .filter((item) => item.estimatedBytes <= 0 || item.estimatedBytes <= ROOM_VIDEO_MAX_BYTES)
+      .sort((a, b) => compareYouTubeFormats(a.format, b.format))
+    : [];
+  if (candidates.length) {
+    pickedContainer = String(candidates[0]?.format?.container || "mp4").toLowerCase();
+  }
+  const extension = pickedContainer === "webm" ? ".webm" : pickedContainer === "ogg" ? ".ogg" : ".mp4";
+  const mimeType = extension === ".webm" ? "video/webm" : extension === ".ogg" ? "video/ogg" : "video/mp4";
+
+  const cleanFileName = sanitizeUploadedFilename(info?.videoDetails?.title || `youtube-${videoId}`);
+  const durationSec = normalizeRoomVideoDuration(Number(info?.videoDetails?.lengthSeconds || 0));
+  const storedFileName = `yt-${videoId}-${Date.now()}-${crypto.randomBytes(4).toString("hex")}${extension}`;
+  const absolutePath = path.join(getRoomVideoUploadDir(), storedFileName);
+  let downloadedBytes = 0;
+
+  await new Promise((resolve, reject) => {
+    let writer = null;
+    let stream = null;
+    let timer = null;
+    let done = false;
+    const finish = (error) => {
+      if (done) {
+        return;
+      }
+      done = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+      if (error) {
+        if (stream && typeof stream.destroy === "function") {
+          stream.destroy();
+        }
+        if (writer && typeof writer.destroy === "function") {
+          writer.destroy();
+        }
+        removeFileIfExists(absolutePath);
+        reject(error);
+        return;
+      }
+      resolve();
+    };
+
+    writer = fs.createWriteStream(absolutePath, { flags: "wx" });
+    writer.on("error", (error) => finish(error));
+    writer.on("finish", () => finish());
+
+    Promise.resolve(
+      ybdClient.download(watchUrl, {
+        filter: "videoandaudio",
+        quality: "highest"
+      })
+    )
+      .then((downloadStream) => {
+        stream = toNodeReadableFromYbdStream(downloadStream);
+        if (!stream) {
+          const streamError = new Error("YBD stream conversion failed");
+          streamError.code = "YBD_STREAM_UNSUPPORTED";
+          finish(streamError);
+          return;
+        }
+        timer = setTimeout(() => {
+          const timeoutError = new Error("YouTube download timeout");
+          timeoutError.code = "YOUTUBE_DOWNLOAD_TIMEOUT";
+          finish(timeoutError);
+        }, YOUTUBE_DOWNLOAD_TIMEOUT_MS);
+
+        stream.on("data", (chunk) => {
+          downloadedBytes += chunk.length;
+          if (downloadedBytes > ROOM_VIDEO_MAX_BYTES) {
+            const sizeError = new Error("YouTube video exceeds max size");
+            sizeError.code = "YOUTUBE_VIDEO_TOO_LARGE";
+            finish(sizeError);
+          }
+        });
+        stream.on("error", (error) => finish(error));
+        stream.pipe(writer);
+      })
+      .catch((error) => finish(error));
+  });
+
+  if (downloadedBytes <= 0) {
+    removeFileIfExists(absolutePath);
+    const emptyError = new Error("YBD produced empty download");
+    emptyError.code = "YBD_DOWNLOAD_FAILED";
+    throw emptyError;
+  }
+
+  return {
+    storedFileName,
+    cleanFileName,
+    durationSec,
+    downloadedBytes,
+    mimeType
+  };
+}
+
 async function downloadYouTubeVideoToLocalFile(videoId) {
   const info = await getYouTubeInfoRobust(videoId);
   const picked = selectYouTubeDownloadFormats(info);
@@ -5072,8 +5250,26 @@ async function downloadYouTubeVideoToLocalFile(videoId) {
     }
   }
 
+  let ybdFallbackError = null;
+  try {
+    return await downloadYouTubeVideoToLocalFileWithYbd(videoId);
+  } catch (ybdError) {
+    ybdFallbackError = ybdError;
+    if (ybdError?.code === "YOUTUBE_VIDEO_TOO_LARGE") {
+      throw ybdError;
+    }
+    if (ybdError?.code === "YBD_YTDL_UNAVAILABLE") {
+      console.warn("YBD ytdl fallback is unavailable on this host.");
+    } else {
+      console.warn("YBD ytdl fallback download failed:", ybdError?.message || ybdError);
+    }
+  }
+
   if (lastError) {
     throw lastError;
+  }
+  if (ybdFallbackError) {
+    throw ybdFallbackError;
   }
   const fallbackError = new Error("YouTube download failed");
   fallbackError.code = "YOUTUBE_DOWNLOAD_FAILED";
