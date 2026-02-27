@@ -73,6 +73,14 @@ const YOUTUBE_CACHE_MAX_ITEMS = 180;
 const YOUTUBE_CACHE_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 30;
 const YOUTUBE_PROXY_TTL_MS = 1000 * 60 * 60 * 6;
 const YT_DLP_BINARY = String(process.env.YT_DLP_BINARY || "yt-dlp").trim() || "yt-dlp";
+const YT_DLP_EMBEDDED_BINARY = (() => {
+  try {
+    const youtubeDlExec = require("youtube-dl-exec");
+    return String(youtubeDlExec?.constants?.YOUTUBE_DL_PATH || "").trim();
+  } catch (_error) {
+    return "";
+  }
+})();
 const DATABASE_URL = String(process.env.DATABASE_URL || "").trim();
 const MYSQL_HOST = String(process.env.MYSQL_HOST || "").trim();
 const MYSQL_PORT = Math.max(1, Number(process.env.MYSQL_PORT || 3306) || 3306);
@@ -3341,6 +3349,58 @@ async function fetchRoomVideoBlobMetaFromSql(blobId) {
   return null;
 }
 
+async function fetchLatestYouTubeRoomVideoBlobFromSql(youtubeId) {
+  const cleanYouTubeId = String(youtubeId || "").trim();
+  if (!cleanYouTubeId || !isSqlRuntimeEnabled()) {
+    return null;
+  }
+  if (pgRuntimeEnabled && pgClient) {
+    const result = await pgClient.query(
+      "SELECT id, mime_type, byte_size, file_name, created_at FROM app_video_assets WHERE youtube_id = $1 AND source_kind = 'youtube' ORDER BY created_at DESC LIMIT 1",
+      [cleanYouTubeId]
+    );
+    const row = result.rows[0];
+    if (!row) {
+      return null;
+    }
+    const blobId = String(row.id || "").trim();
+    if (!blobId) {
+      return null;
+    }
+    return {
+      blobId,
+      src: buildRoomVideoBlobSrc(blobId),
+      mimeType: normalizeVideoMimeType(row.mime_type) || "video/mp4",
+      size: Math.max(0, Number(row.byte_size || 0)),
+      fileName: sanitizeUploadedFilename(row.file_name || `youtube-${cleanYouTubeId}`),
+      createdAt: Number(row.created_at || 0)
+    };
+  }
+  if (mysqlRuntimeEnabled && mysqlPool) {
+    const [rows] = await mysqlPool.query(
+      "SELECT id, mime_type, byte_size, file_name, created_at FROM app_video_assets WHERE youtube_id = ? AND source_kind = 'youtube' ORDER BY created_at DESC LIMIT 1",
+      [cleanYouTubeId]
+    );
+    const row = Array.isArray(rows) ? rows[0] : null;
+    if (!row) {
+      return null;
+    }
+    const blobId = String(row.id || "").trim();
+    if (!blobId) {
+      return null;
+    }
+    return {
+      blobId,
+      src: buildRoomVideoBlobSrc(blobId),
+      mimeType: normalizeVideoMimeType(row.mime_type) || "video/mp4",
+      size: Math.max(0, Number(row.byte_size || 0)),
+      fileName: sanitizeUploadedFilename(row.file_name || `youtube-${cleanYouTubeId}`),
+      createdAt: Number(row.created_at || 0)
+    };
+  }
+  return null;
+}
+
 async function fetchRoomVideoBlobChunkFromSql(blobId, offset, length) {
   const cleanId = String(blobId || "").trim();
   const startOffset = Math.max(0, Number(offset) || 0);
@@ -4690,10 +4750,27 @@ async function getYouTubeDirectPlayableSource(videoId) {
 
 function runYtDlp(args, timeoutMs = YOUTUBE_DOWNLOAD_TIMEOUT_MS) {
   const commandCandidates = [];
+  const commandCandidateKeys = new Set();
+  const pushCommandCandidate = (command, baseArgs = []) => {
+    const cleanCommand = String(command || "").trim();
+    if (!cleanCommand) {
+      return;
+    }
+    const normalizedArgs = Array.isArray(baseArgs) ? baseArgs.map((item) => String(item)) : [];
+    const key = `${cleanCommand}\u0000${normalizedArgs.join("\u0000")}`;
+    if (commandCandidateKeys.has(key)) {
+      return;
+    }
+    commandCandidateKeys.add(key);
+    commandCandidates.push([cleanCommand, normalizedArgs]);
+  };
   if (ytDlpCommandOverride) {
-    commandCandidates.push(ytDlpCommandOverride);
+    pushCommandCandidate(ytDlpCommandOverride[0], ytDlpCommandOverride[1]);
   } else {
-    commandCandidates.push([YT_DLP_BINARY, []], ["python3", ["-m", "yt_dlp"]], ["python", ["-m", "yt_dlp"]]);
+    pushCommandCandidate(YT_DLP_BINARY, []);
+    pushCommandCandidate(YT_DLP_EMBEDDED_BINARY, []);
+    pushCommandCandidate("python3", ["-m", "yt_dlp"]);
+    pushCommandCandidate("python", ["-m", "yt_dlp"]);
   }
 
   const runWithCommand = (command, baseArgs) => new Promise((resolve, reject) => {
@@ -6609,66 +6686,107 @@ async function handleApi(req, res) {
       let videoEntry = null;
       let downloadedLabel = resolved.label;
       if (isSqlRuntimeEnabled()) {
-        if (!ensureUploadsDir()) {
-          sendJson(res, 503, {
-            code: "VIDEO_STORAGE_UNAVAILABLE",
-            error: i18n(req, "Server storage is unavailable right now.", "Server storage is unavailable right now.")
-          });
-          return;
-        }
-        let downloaded = null;
-        let downloadedAbsolutePath = "";
-        let persistedBlobId = "";
+        let cachedBlob = null;
         try {
-          downloaded = await downloadYouTubeVideoToLocalFile(resolved.videoId);
-          downloadedAbsolutePath = path.join(getRoomVideoUploadDir(), downloaded.storedFileName);
-          downloadedLabel = downloaded.cleanFileName || downloadedLabel;
-          const blob = await persistRoomVideoBlobFromFileToSql(downloadedAbsolutePath, {
-            mimeType: downloaded.mimeType,
-            sourceKind: "youtube",
-            fileName: downloaded.cleanFileName,
-            youtubeId: resolved.videoId
-          });
-          if (!blob?.src) {
-            throw new Error("SQL_VIDEO_STORE_FAILED");
-          }
-          persistedBlobId = String(blob.blobId || "");
-          videoEntry = createRoomFileVideoEntry(room, {
-            src: blob.src,
-            filename: downloaded.cleanFileName || resolved.label || `youtube-${resolved.videoId}`,
-            mimeType: downloaded.mimeType,
-            size: Number(blob.size || downloaded.downloadedBytes || 0),
-            uploadedBy: username,
-            duration: downloaded.durationSec,
-            youtubeId: resolved.videoId
-          });
-          if (!videoEntry && persistedBlobId) {
-            await deleteRoomVideoBlobFromSql(persistedBlobId).catch(() => undefined);
-          }
+          cachedBlob = await fetchLatestYouTubeRoomVideoBlobFromSql(resolved.videoId);
         } catch (error) {
-          const errorCode = String(error?.code || "").trim().toUpperCase();
-          if (persistedBlobId) {
-            deleteRoomVideoBlobFromSql(persistedBlobId).catch(() => undefined);
-          }
-          if (errorCode === "YOUTUBE_VIDEO_TOO_LARGE") {
-            sendJson(res, 413, {
-              code: "VIDEO_TOO_LARGE",
-              error: i18n(req, "Video file is too large (max 1GB).", "Video file is too large (max 1GB).")
+          console.error("Failed to read cached YouTube SQL blob:", error.message);
+        }
+        if (cachedBlob?.src) {
+          downloadedLabel = cachedBlob.fileName || downloadedLabel;
+          videoEntry = createRoomFileVideoEntry(room, {
+            src: cachedBlob.src,
+            filename: cachedBlob.fileName || resolved.label || `youtube-${resolved.videoId}`,
+            mimeType: cachedBlob.mimeType,
+            size: Number(cachedBlob.size || 0),
+            uploadedBy: username,
+            youtubeId: resolved.videoId
+          });
+        }
+        if (!videoEntry) {
+          if (!ensureUploadsDir()) {
+            sendJson(res, 503, {
+              code: "VIDEO_STORAGE_UNAVAILABLE",
+              error: i18n(req, "Server storage is unavailable right now.", "Server storage is unavailable right now.")
             });
             return;
           }
-          sendJson(res, 502, {
-            code: "YOUTUBE_DOWNLOAD_FAILED",
-            error: i18n(
-              req,
-              "Could not download this YouTube video right now. Try another one.",
-              "Could not download this YouTube video right now. Try another one."
-            )
-          });
-          return;
-        } finally {
-          if (downloadedAbsolutePath) {
-            removeFileIfExists(downloadedAbsolutePath);
+          let downloaded = null;
+          let downloadedAbsolutePath = "";
+          let persistedBlobId = "";
+          try {
+            downloaded = await downloadYouTubeVideoToLocalFile(resolved.videoId);
+            downloadedAbsolutePath = path.join(getRoomVideoUploadDir(), downloaded.storedFileName);
+            downloadedLabel = downloaded.cleanFileName || downloadedLabel;
+            const blob = await persistRoomVideoBlobFromFileToSql(downloadedAbsolutePath, {
+              mimeType: downloaded.mimeType,
+              sourceKind: "youtube",
+              fileName: downloaded.cleanFileName,
+              youtubeId: resolved.videoId
+            });
+            if (!blob?.src) {
+              throw new Error("SQL_VIDEO_STORE_FAILED");
+            }
+            persistedBlobId = String(blob.blobId || "");
+            videoEntry = createRoomFileVideoEntry(room, {
+              src: blob.src,
+              filename: downloaded.cleanFileName || resolved.label || `youtube-${resolved.videoId}`,
+              mimeType: downloaded.mimeType,
+              size: Number(blob.size || downloaded.downloadedBytes || 0),
+              uploadedBy: username,
+              duration: downloaded.durationSec,
+              youtubeId: resolved.videoId
+            });
+            if (!videoEntry && persistedBlobId) {
+              await deleteRoomVideoBlobFromSql(persistedBlobId).catch(() => undefined);
+            }
+          } catch (error) {
+            const errorCode = String(error?.code || "").trim().toUpperCase();
+            if (persistedBlobId) {
+              deleteRoomVideoBlobFromSql(persistedBlobId).catch(() => undefined);
+            }
+            if (errorCode === "YOUTUBE_VIDEO_TOO_LARGE") {
+              sendJson(res, 413, {
+                code: "VIDEO_TOO_LARGE",
+                error: i18n(req, "Video file is too large (max 1GB).", "Video file is too large (max 1GB).")
+              });
+              return;
+            }
+            try {
+              const directPlayable = await getYouTubeDirectPlayableSource(resolved.videoId);
+              const proxy = registerYouTubeProxyStream(resolved.videoId, directPlayable);
+              const proxyEntry = createRoomFileVideoEntry(room, {
+                src: proxy.src,
+                filename: directPlayable.cleanFileName || resolved.label || `youtube-${resolved.videoId}`,
+                mimeType: directPlayable.mimeType,
+                size: Number(directPlayable.estimatedBytes || 0),
+                uploadedBy: username,
+                duration: directPlayable.durationSec,
+                youtubeId: resolved.videoId
+              });
+              if (proxyEntry) {
+                proxyEntry.isYouTubeProxy = true;
+                videoEntry = proxyEntry;
+                downloadedLabel = directPlayable.cleanFileName || downloadedLabel;
+              }
+            } catch (_proxyError) {
+              // Keep the original download error path when proxy preparation fails.
+            }
+            if (!videoEntry) {
+              sendJson(res, 502, {
+                code: "YOUTUBE_DOWNLOAD_FAILED",
+                error: i18n(
+                  req,
+                  "Could not download this YouTube video right now. Try another one.",
+                  "Could not download this YouTube video right now. Try another one."
+                )
+              });
+              return;
+            }
+          } finally {
+            if (downloadedAbsolutePath) {
+              removeFileIfExists(downloadedAbsolutePath);
+            }
           }
         }
       } else {
