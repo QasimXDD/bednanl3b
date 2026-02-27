@@ -7123,15 +7123,37 @@ async function handleApi(req, res) {
               });
               return;
             }
-            sendJson(res, 502, {
-              code: "YOUTUBE_DOWNLOAD_FAILED",
-              error: i18n(
-                req,
-                "Could not download this YouTube video right now. Try another one.",
-                "Could not download this YouTube video right now. Try another one."
-              )
-            });
-            return;
+            try {
+              const directPlayable = await getYouTubeDirectPlayableSource(resolved.videoId);
+              const proxy = registerYouTubeProxyStream(resolved.videoId, directPlayable);
+              const proxyEntry = createRoomFileVideoEntry(room, {
+                src: proxy.src,
+                filename: directPlayable.cleanFileName || resolved.label || `youtube-${resolved.videoId}`,
+                mimeType: directPlayable.mimeType,
+                size: Number(directPlayable.estimatedBytes || 0),
+                uploadedBy: username,
+                duration: directPlayable.durationSec,
+                youtubeId: resolved.videoId
+              });
+              if (proxyEntry) {
+                proxyEntry.isYouTubeProxy = true;
+                videoEntry = proxyEntry;
+                downloadedLabel = directPlayable.cleanFileName || downloadedLabel;
+              }
+            } catch (_proxyError) {
+              // Keep the original failure path when direct proxy source also fails.
+            }
+            if (!videoEntry) {
+              sendJson(res, 502, {
+                code: "YOUTUBE_DOWNLOAD_FAILED",
+                error: i18n(
+                  req,
+                  "Could not download this YouTube video right now. Try another one.",
+                  "Could not download this YouTube video right now. Try another one."
+                )
+              });
+              return;
+            }
           } finally {
             if (downloadedAbsolutePath) {
               removeFileIfExists(downloadedAbsolutePath);
@@ -7139,7 +7161,26 @@ async function handleApi(req, res) {
           }
         }
       } else {
-        videoEntry = createYouTubeEmbedVideoEntry(resolved.videoId, username, resolved.label);
+        try {
+          const directPlayable = await getYouTubeDirectPlayableSource(resolved.videoId);
+          const proxy = registerYouTubeProxyStream(resolved.videoId, directPlayable);
+          const proxyEntry = createRoomFileVideoEntry(room, {
+            src: proxy.src,
+            filename: directPlayable.cleanFileName || resolved.label || `youtube-${resolved.videoId}`,
+            mimeType: directPlayable.mimeType,
+            size: Number(directPlayable.estimatedBytes || 0),
+            uploadedBy: username,
+            duration: directPlayable.durationSec,
+            youtubeId: resolved.videoId
+          });
+          if (proxyEntry) {
+            proxyEntry.isYouTubeProxy = true;
+            videoEntry = proxyEntry;
+            downloadedLabel = directPlayable.cleanFileName || downloadedLabel;
+          }
+        } catch (_proxyError) {
+          videoEntry = null;
+        }
       }
       if (!videoEntry) {
         sendJson(res, 400, {
