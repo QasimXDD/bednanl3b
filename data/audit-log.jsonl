@@ -1126,3 +1126,5 @@
 {"id":"1772226515142-4f53c5edfb","createdAt":1772226515142,"action":"auth_register_success","actor":"ytrtfk4y","target":"ytrtfk4y","details":{"ip":"127.0.0.1"}}
 {"id":"1772226515146-dec35485e4","createdAt":1772226515146,"action":"room_created","actor":"ytrtfk4y","target":"TFTZQP","details":{"roomName":"YT fallback"}}
 {"id":"1772226516660-3a5f93b298","createdAt":1772226516660,"action":"room_video_set","actor":"ytrtfk4y","target":"TFTZQP","details":{"source":"youtube","youtubeId":"BaW_jenozKc","queueLength":0}}
+{"id":"1772292712540-e2b706c921","createdAt":1772292712540,"action":"room_created","actor":"qasim","target":"RFYQQH","details":{"roomName":"غرفة جديدة"}}
+{"id":"1772292715318-3b09ee60ce","createdAt":1772292715318,"action":"room_opened","actor":"qasim","target":"RFYQQH","details":{}}
