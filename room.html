@@ -236,6 +236,7 @@
       <button id="roomTabAnnouncement" class="supervisor-tab-btn active" type="button">Global Message</button>
       <button id="roomTabUsers" class="supervisor-tab-btn" type="button">All Accounts</button>
       <button id="roomTabAppeals" class="supervisor-tab-btn" type="button">Unban Requests</button>
+      <button id="roomTabPresence" class="supervisor-tab-btn" type="button">Site Presence</button>
     </div>
     <div class="supervisor-sidebar-content">
       <section id="roomAnnouncementSection" class="box rooms-box">
@@ -264,11 +265,20 @@
         <p class="muted" id="roomAppealsDesc">Users' requests to remove site bans.</p>
         <div id="roomAppealsList" class="public-rooms-list"></div>
       </section>
+
+      <section id="roomPresenceSection" class="box rooms-box">
+        <div class="rooms-box-head">
+          <h3 id="roomPresenceTitle">Site Presence</h3>
+          <button id="roomPresenceRefresh" class="btn btn-ghost" type="button">Refresh</button>
+        </div>
+        <p class="muted" id="roomPresenceDesc">Latest site entry/exit events with IP and country.</p>
+        <div id="roomPresenceList" class="public-rooms-list"></div>
+      </section>
     </div>
   </section>
 
   <div id="toastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
   <script src="sound.js?v=20260225c"></script>
-  <script src="room.js?v=20260226x"></script>
+  <script src="room.js?v=20260228a"></script>
 </body>
 </html>

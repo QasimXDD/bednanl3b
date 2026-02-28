@@ -839,6 +839,10 @@ select:focus-visible {
   grid-column: span 4;
 }
 
+#supervisorPresenceSection {
+  grid-column: span 4;
+}
+
 #roomAnnouncementSection {
   grid-column: span 4;
 }
@@ -848,6 +852,10 @@ select:focus-visible {
 }
 
 #roomAppealsSection {
+  grid-column: span 4;
+}
+
+#roomPresenceSection {
   grid-column: span 4;
 }
 
@@ -863,6 +871,10 @@ select:focus-visible {
   color: #ffc8cf;
 }
 
+#supervisorPresenceSection .rooms-box-head h3 {
+  color: #c8ffd8;
+}
+
 #roomAnnouncementSection .rooms-box-head h3 {
   color: #9ee8ff;
 }
@@ -873,6 +885,10 @@ select:focus-visible {
 
 #roomAppealsSection .rooms-box-head h3 {
   color: #ffc8cf;
+}
+
+#roomPresenceSection .rooms-box-head h3 {
+  color: #c8ffd8;
 }
 
 .box {
@@ -892,7 +908,8 @@ select:focus-visible {
 }
 
 #supervisorUsersSection.box,
-#supervisorAppealsSection.box {
+#supervisorAppealsSection.box,
+#supervisorPresenceSection.box {
   border-color: rgba(255, 174, 107, 0.32);
   background:
     radial-gradient(circle at 92% 8%, rgba(255, 158, 96, 0.14), transparent 28%),
@@ -3218,9 +3235,11 @@ ul {
   #supervisorAnnouncementSection,
   #supervisorUsersSection,
   #supervisorAppealsSection,
+  #supervisorPresenceSection,
   #roomAnnouncementSection,
   #roomUsersSection,
-  #roomAppealsSection {
+  #roomAppealsSection,
+  #roomPresenceSection {
     grid-column: 1 / -1;
   }
 

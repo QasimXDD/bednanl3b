@@ -118,6 +118,7 @@
           <button id="supervisorTabAnnouncement" class="supervisor-tab-btn active" type="button">General Message</button>
           <button id="supervisorTabUsers" class="supervisor-tab-btn" type="button">All Accounts</button>
           <button id="supervisorTabAppeals" class="supervisor-tab-btn" type="button">Unban Requests</button>
+          <button id="supervisorTabPresence" class="supervisor-tab-btn" type="button">Site Presence</button>
         </div>
         <div class="supervisor-sidebar-content">
           <section id="supervisorAnnouncementSection" class="box rooms-box hidden">
@@ -145,6 +146,15 @@
             </div>
             <p class="muted" id="supervisorAppealsDesc">Requests sent to the supervisor to remove bans.</p>
             <div id="supervisorAppealsList" class="public-rooms-list"></div>
+          </section>
+
+          <section id="supervisorPresenceSection" class="box rooms-box hidden">
+            <div class="rooms-box-head">
+              <h3 id="supervisorPresenceTitle">Site Presence</h3>
+              <button id="supervisorPresenceRefreshBtn" class="btn btn-ghost" type="button">Refresh</button>
+            </div>
+            <p class="muted" id="supervisorPresenceDesc">Latest site entry/exit events with IP and country.</p>
+            <div id="supervisorPresenceList" class="public-rooms-list"></div>
           </section>
         </div>
       </aside>
@@ -196,6 +206,6 @@
 
   <div id="toastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
   <script src="sound.js?v=20260225c"></script>
-  <script src="script.js?v=20260226g"></script>
+  <script src="script.js?v=20260228a"></script>
 </body>
 </html>

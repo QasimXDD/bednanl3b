@@ -151,6 +151,16 @@ const BLOCKED_STATIC_FILES = new Set([
   "agents.md"
 ]);
 const BLOCKED_STATIC_DIRS = new Set(["data", ".git", "node_modules"]);
+const SITE_PRESENCE_AUDIT_ACTION_LIST = Object.freeze([
+  "site_presence_enter",
+  "site_presence_exit",
+  "auth_register_success",
+  "auth_login_success",
+  "auth_guest_login"
+]);
+const SITE_PRESENCE_AUDIT_ACTIONS = new Set(SITE_PRESENCE_AUDIT_ACTION_LIST);
+const SITE_PRESENCE_LOG_DEFAULT_LIMIT = 120;
+const SITE_PRESENCE_LOG_MAX_LIMIT = 500;
 const RATE_LIMIT_MESSAGE = "Too many requests. Please wait and try again.";
 const RATE_LIMITS = Object.freeze({
   REGISTER: { key: "register", max: 12, windowMs: 10 * 60 * 1000 },
@@ -325,6 +335,169 @@ function recordAudit(action, actor, target = "", details = {}) {
   ).catch((error) => {
     console.error("Failed to persist audit entry:", error.message);
   });
+}
+
+function clampSitePresenceLimit(rawLimit) {
+  const parsed = Number(rawLimit);
+  if (!Number.isFinite(parsed)) {
+    return SITE_PRESENCE_LOG_DEFAULT_LIMIT;
+  }
+  return Math.max(1, Math.min(SITE_PRESENCE_LOG_MAX_LIMIT, Math.floor(parsed)));
+}
+
+function getSitePresenceEventTypeFromAction(action) {
+  const cleanAction = String(action || "").trim();
+  if (cleanAction === "site_presence_exit") {
+    return "exit";
+  }
+  if (SITE_PRESENCE_AUDIT_ACTIONS.has(cleanAction)) {
+    return "enter";
+  }
+  return "";
+}
+
+function getSitePresenceSourceFromAction(action, details = {}) {
+  const cleanAction = String(action || "").trim();
+  const sourceFromDetails = sanitizeAuditValue(details?.source, 40).toLowerCase();
+  if (sourceFromDetails) {
+    return sourceFromDetails;
+  }
+  if (cleanAction === "auth_register_success") {
+    return "register";
+  }
+  if (cleanAction === "auth_login_success") {
+    return "login";
+  }
+  if (cleanAction === "auth_guest_login") {
+    return "guest";
+  }
+  if (cleanAction === "site_presence_exit") {
+    return "logout";
+  }
+  return "login";
+}
+
+function normalizeSitePresenceEvent(row) {
+  if (!row || typeof row !== "object") {
+    return null;
+  }
+  const action = sanitizeAuditValue(row.action, 120);
+  const eventType = getSitePresenceEventTypeFromAction(action);
+  if (!eventType) {
+    return null;
+  }
+  const details = decodeSqlJson(row.details, {});
+  const username = normalizeUsername(
+    row.actor || row.target || details?.username || details?.user || details?.displayName || ""
+  );
+  const createdAt = Number(row.createdAt || row.created_at || Date.now()) || Date.now();
+  const id = sanitizeAuditValue(
+    row.id || `${createdAt}-${action}-${username || "unknown"}`,
+    120
+  ) || `${createdAt}-${action}`;
+  const countryCode = normalizeCountryCode(details?.countryCode || details?.country || "");
+  const ip = sanitizeAuditValue(details?.ip || details?.clientIp || "", 120);
+  const displayName = sanitizeAuditValue(details?.displayName || "", 120);
+  const isGuest = Boolean(details?.isGuest) || action === "auth_guest_login";
+  return {
+    id,
+    createdAt,
+    eventType,
+    source: getSitePresenceSourceFromAction(action, details),
+    username: username || "unknown",
+    displayName,
+    countryCode,
+    ip,
+    isGuest
+  };
+}
+
+function readSitePresenceEventsFromAuditFile(limit) {
+  if (!fs.existsSync(AUDIT_LOG_FILE)) {
+    return [];
+  }
+  try {
+    const raw = fs.readFileSync(AUDIT_LOG_FILE, "utf8");
+    if (!raw.trim()) {
+      return [];
+    }
+    const lines = raw.split(/\r?\n/);
+    const list = [];
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = String(lines[index] || "").trim();
+      if (!line) {
+        continue;
+      }
+      let parsed = null;
+      try {
+        parsed = JSON.parse(line);
+      } catch (_error) {
+        parsed = null;
+      }
+      if (!parsed || !SITE_PRESENCE_AUDIT_ACTIONS.has(String(parsed.action || "").trim())) {
+        continue;
+      }
+      const normalized = normalizeSitePresenceEvent({
+        id: parsed.id,
+        createdAt: parsed.createdAt,
+        action: parsed.action,
+        actor: parsed.actor,
+        target: parsed.target,
+        details: parsed.details
+      });
+      if (!normalized) {
+        continue;
+      }
+      list.push(normalized);
+      if (list.length >= limit) {
+        break;
+      }
+    }
+    return list;
+  } catch (error) {
+    console.error("Failed to read site presence from audit file:", error.message);
+    return [];
+  }
+}
+
+async function listSitePresenceEvents(limit = SITE_PRESENCE_LOG_DEFAULT_LIMIT) {
+  const safeLimit = clampSitePresenceLimit(limit);
+  if (pgRuntimeEnabled && pgClient) {
+    try {
+      const result = await pgClient.query(
+        `SELECT id::text AS id, created_at AS "createdAt", action, actor, target, details
+         FROM app_audit_log
+         WHERE action = ANY($1::text[])
+         ORDER BY created_at DESC
+         LIMIT $2`,
+        [SITE_PRESENCE_AUDIT_ACTION_LIST, safeLimit]
+      );
+      return result.rows
+        .map((row) => normalizeSitePresenceEvent(row))
+        .filter(Boolean);
+    } catch (error) {
+      console.error("Failed to load site presence from PostgreSQL:", error.message);
+    }
+  }
+  if (mysqlRuntimeEnabled && mysqlPool) {
+    try {
+      const placeholders = SITE_PRESENCE_AUDIT_ACTION_LIST.map(() => "?").join(", ");
+      const [rows] = await mysqlPool.query(
+        `SELECT CAST(id AS CHAR) AS id, created_at AS createdAt, action, actor, target, details
+         FROM app_audit_log
+         WHERE action IN (${placeholders})
+         ORDER BY created_at DESC
+         LIMIT ?`,
+        [...SITE_PRESENCE_AUDIT_ACTION_LIST, safeLimit]
+      );
+      return (Array.isArray(rows) ? rows : [])
+        .map((row) => normalizeSitePresenceEvent(row))
+        .filter(Boolean);
+    } catch (error) {
+      console.error("Failed to load site presence from MySQL:", error.message);
+    }
+  }
+  return readSitePresenceEventsFromAuditFile(safeLimit);
 }
 
 function normalizeRoomVideoCollections(room) {
@@ -5768,8 +5941,15 @@ async function handleApi(req, res) {
       return;
     }
     const token = createSession(cleanUser);
+    const registerIp = getClientIp(req);
     recordAudit("auth_register_success", cleanUser, cleanUser, {
-      ip: getClientIp(req)
+      ip: registerIp
+    });
+    recordAudit("site_presence_enter", cleanUser, cleanUser, {
+      ip: registerIp,
+      countryCode: registerCountryCode,
+      isGuest: false,
+      source: "register"
     });
     sendJson(res, 201, { token, username: cleanUser, announcement: getLiveSiteAnnouncement() });
     return;
@@ -5819,11 +5999,18 @@ async function handleApi(req, res) {
       sendBannedResponse(req, res, cleanUser);
       return;
     }
-    updateUserCountryFromRequest(cleanUser, req, { persistRegistered: true });
+    const loginCountryCode = updateUserCountryFromRequest(cleanUser, req, { persistRegistered: true });
 
     const token = createSession(cleanUser);
+    const loginIp = getClientIp(req);
     recordAudit("auth_login_success", cleanUser, cleanUser, {
-      ip: getClientIp(req)
+      ip: loginIp
+    });
+    recordAudit("site_presence_enter", cleanUser, cleanUser, {
+      ip: loginIp,
+      countryCode: loginCountryCode,
+      isGuest: false,
+      source: "login"
     });
     sendJson(res, 200, { token, username: cleanUser, announcement: getLiveSiteAnnouncement() });
     return;
@@ -5850,9 +6037,17 @@ async function handleApi(req, res) {
       countryCode: guestCountryCode
     });
     const token = createSession(username, { isGuest: true });
+    const guestIp = getClientIp(req);
     recordAudit("auth_guest_login", username, username, {
-      ip: getClientIp(req),
+      ip: guestIp,
       displayName: cleanName
+    });
+    recordAudit("site_presence_enter", username, username, {
+      ip: guestIp,
+      countryCode: guestCountryCode,
+      displayName: cleanName,
+      isGuest: true,
+      source: "guest"
     });
     sendJson(res, 200, {
       token,
@@ -5869,6 +6064,18 @@ async function handleApi(req, res) {
     if (token) {
       const sessionEntry = sessions.get(token);
       const meta = getSessionMeta(sessionEntry);
+      const username = meta.username;
+      if (username) {
+        const logoutCountryCode = updateUserCountryFromRequest(username, req, {
+          persistRegistered: !meta.isGuest
+        });
+        recordAudit("site_presence_exit", username, username, {
+          ip: getClientIp(req),
+          countryCode: logoutCountryCode,
+          isGuest: Boolean(meta.isGuest),
+          source: "logout"
+        });
+      }
       sessions.delete(token);
       if (meta.isGuest && meta.username && !hasActiveSessionForUser(meta.username, token)) {
         cleanupGuestUser(meta.username);
@@ -6013,6 +6220,21 @@ async function handleApi(req, res) {
         return a.username.localeCompare(b.username);
       });
     sendJson(res, 200, { users: list });
+    return;
+  }
+
+  if (req.method === "GET" && pathname === "/api/admin/site-presence") {
+    const username = getUserFromRequest(req);
+    if (!username) {
+      sendJson(res, 401, { error: i18n(req, "Unauthorized.", "Unauthorized.") });
+      return;
+    }
+    if (!assertSupervisor(req, res, username)) {
+      return;
+    }
+    const limit = clampSitePresenceLimit(fullUrl.searchParams.get("limit"));
+    const events = await listSitePresenceEvents(limit);
+    sendJson(res, 200, { events, limit });
     return;
   }
 

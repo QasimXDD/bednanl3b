@@ -81,6 +81,7 @@ const roomSupervisorClose = document.getElementById("roomSupervisorClose");
 const roomTabAnnouncement = document.getElementById("roomTabAnnouncement");
 const roomTabUsers = document.getElementById("roomTabUsers");
 const roomTabAppeals = document.getElementById("roomTabAppeals");
+const roomTabPresence = document.getElementById("roomTabPresence");
 const roomAnnouncementSection = document.getElementById("roomAnnouncementSection");
 const roomAnnouncementTitle = document.getElementById("roomAnnouncementTitle");
 const roomAnnouncementDesc = document.getElementById("roomAnnouncementDesc");
@@ -96,6 +97,11 @@ const roomAppealsTitle = document.getElementById("roomAppealsTitle");
 const roomAppealsRefresh = document.getElementById("roomAppealsRefresh");
 const roomAppealsDesc = document.getElementById("roomAppealsDesc");
 const roomAppealsList = document.getElementById("roomAppealsList");
+const roomPresenceSection = document.getElementById("roomPresenceSection");
+const roomPresenceTitle = document.getElementById("roomPresenceTitle");
+const roomPresenceRefresh = document.getElementById("roomPresenceRefresh");
+const roomPresenceDesc = document.getElementById("roomPresenceDesc");
+const roomPresenceList = document.getElementById("roomPresenceList");
 const videoTitle = document.getElementById("videoTitle");
 const videoStatusText = document.getElementById("videoStatusText");
 const videoHintText = document.getElementById("videoHintText");
@@ -176,6 +182,7 @@ let videoToolsOpen = false;
 let roomSupervisorTab = "announcement";
 let roomCachedAppeals = [];
 let roomCachedUsers = [];
+let roomCachedPresence = [];
 let globalAnnouncementOverlay = null;
 let globalAnnouncementTitle = null;
 let globalAnnouncementText = null;
@@ -450,6 +457,7 @@ const I18N = {
     supervisorTabAnnouncement: "الرسالة العامة",
     supervisorTabUsers: "كل الحسابات",
     supervisorTabAppeals: "طلبات رفع الحظر",
+    supervisorTabPresence: "سجل الدخول والخروج",
     supervisorAnnouncementDesc: "تظهر هذه الرسالة إجباريًا لكل المستخدمين لمدة 10 ثوانٍ.",
     supervisorAnnouncementPlaceholder: "اكتب الرسالة العامة هنا...",
     supervisorAnnouncementSendBtn: "إرسال الرسالة",
@@ -457,10 +465,13 @@ const I18N = {
     supervisorAnnouncementDone: "تم إرسال الرسالة العامة.",
     supervisorUsersDesc: "قائمة كل الحسابات المسجلة (المتصلون أولاً).",
     supervisorAppealsDesc: "طلبات المستخدمين لفك الحظر من الموقع.",
+    supervisorPresenceDesc: "آخر عمليات الدخول والخروج من الموقع مع الآيبي والدولة.",
     supervisorUsersRefreshBtn: "تحديث الحسابات",
     supervisorAppealsRefreshBtn: "تحديث الطلبات",
+    supervisorPresenceRefreshBtn: "تحديث السجل",
     supervisorAppealsEmpty: "لا توجد طلبات رفع حظر.",
     supervisorUsersEmpty: "لا توجد حسابات.",
+    supervisorPresenceEmpty: "لا توجد أحداث دخول/خروج بعد.",
     supervisorAppealBy: "المستخدم",
     supervisorAppealReason: "السبب",
     supervisorAppealStatus: "الحالة",
@@ -473,6 +484,14 @@ const I18N = {
     supervisorUserCreated: "تاريخ الإنشاء",
     supervisorUserBanned: "محظور",
     supervisorUserNotBanned: "غير محظور",
+    supervisorPresenceEnter: "دخول للموقع",
+    supervisorPresenceExit: "خروج من الموقع",
+    supervisorPresenceType: "الحدث",
+    supervisorPresenceIp: "الآيبي",
+    supervisorPresenceCountry: "الدولة",
+    supervisorPresenceTime: "الوقت",
+    supervisorPresenceSource: "المصدر",
+    supervisorPresenceUnknownUser: "مستخدم غير معروف",
     supervisorDeleteBtn: "حذف نهائي",
     supervisorDeleteConfirm: "تأكيد الحذف النهائي للحساب {user}؟ سيتم حذف كل بياناته.",
     supervisorDeleteDone: "تم حذف الحساب نهائيًا.",
@@ -639,6 +658,7 @@ const I18N = {
     supervisorTabAnnouncement: "Global Message",
     supervisorTabUsers: "All Accounts",
     supervisorTabAppeals: "Unban Requests",
+    supervisorTabPresence: "Site Presence",
     supervisorAnnouncementDesc: "This message is forced for all users for 10 seconds.",
     supervisorAnnouncementPlaceholder: "Write the global message here...",
     supervisorAnnouncementSendBtn: "Send Message",
@@ -646,10 +666,13 @@ const I18N = {
     supervisorAnnouncementDone: "Global message sent.",
     supervisorUsersDesc: "All registered accounts (online first).",
     supervisorAppealsDesc: "Users' requests to remove site bans.",
+    supervisorPresenceDesc: "Latest site entry/exit events with IP and country.",
     supervisorUsersRefreshBtn: "Refresh Accounts",
     supervisorAppealsRefreshBtn: "Refresh Requests",
+    supervisorPresenceRefreshBtn: "Refresh Presence",
     supervisorAppealsEmpty: "No unban requests.",
     supervisorUsersEmpty: "No accounts found.",
+    supervisorPresenceEmpty: "No site entry/exit events yet.",
     supervisorAppealBy: "User",
     supervisorAppealReason: "Reason",
     supervisorAppealStatus: "Status",
@@ -662,6 +685,14 @@ const I18N = {
     supervisorUserCreated: "Created",
     supervisorUserBanned: "Banned",
     supervisorUserNotBanned: "Not banned",
+    supervisorPresenceEnter: "Site entry",
+    supervisorPresenceExit: "Site exit",
+    supervisorPresenceType: "Event",
+    supervisorPresenceIp: "IP",
+    supervisorPresenceCountry: "Country",
+    supervisorPresenceTime: "Time",
+    supervisorPresenceSource: "Source",
+    supervisorPresenceUnknownUser: "Unknown user",
     supervisorDeleteBtn: "Delete Forever",
     supervisorDeleteConfirm: "Confirm permanent deletion of {user}? All account data will be removed.",
     supervisorDeleteDone: "Account was permanently deleted.",
@@ -4562,15 +4593,17 @@ function setRoomSupervisorOpen(open) {
     setRoomSupervisorTab(roomSupervisorTab, false);
     refreshRoomSupervisorUsers();
     refreshRoomSupervisorAppeals();
+    refreshRoomSupervisorPresence();
   }
 }
 
 function setRoomSupervisorTab(tabName, scrollIntoView = true) {
-  const allowed = ["announcement", "users", "appeals"];
+  const allowed = ["announcement", "users", "appeals", "presence"];
   roomSupervisorTab = allowed.includes(tabName) ? tabName : "announcement";
   roomTabAnnouncement.classList.toggle("active", roomSupervisorTab === "announcement");
   roomTabUsers.classList.toggle("active", roomSupervisorTab === "users");
   roomTabAppeals.classList.toggle("active", roomSupervisorTab === "appeals");
+  roomTabPresence.classList.toggle("active", roomSupervisorTab === "presence");
   if (!scrollIntoView) {
     return;
   }
@@ -4578,7 +4611,9 @@ function setRoomSupervisorTab(tabName, scrollIntoView = true) {
     ? roomAnnouncementSection
     : roomSupervisorTab === "users"
       ? roomUsersSection
-      : roomAppealsSection;
+      : roomSupervisorTab === "appeals"
+        ? roomAppealsSection
+        : roomPresenceSection;
   target.scrollIntoView({ behavior: "smooth", block: "start" });
   target.classList.add("section-focus-flash");
   setTimeout(() => target.classList.remove("section-focus-flash"), 900);
@@ -4746,6 +4781,47 @@ function renderRoomSupervisorUsers(users) {
       card.appendChild(actions);
     }
     roomUsersList.appendChild(card);
+  });
+}
+
+function roomPresenceEventText(eventType) {
+  return eventType === "exit" ? t("supervisorPresenceExit") : t("supervisorPresenceEnter");
+}
+
+function renderRoomSupervisorPresence(events) {
+  roomCachedPresence = events.slice();
+  roomPresenceList.innerHTML = "";
+  if (events.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = t("supervisorPresenceEmpty");
+    roomPresenceList.appendChild(empty);
+    return;
+  }
+
+  events.forEach((item) => {
+    const card = document.createElement("article");
+    card.className = "admin-user-card";
+    const title = document.createElement("h4");
+    title.className = "admin-user-title";
+    const usernameText = item.username && item.username !== "unknown"
+      ? `@${item.username}`
+      : t("supervisorPresenceUnknownUser");
+    title.textContent = usernameText;
+    const flagBadge = createCountryFlagBadge(item.countryCode);
+    if (flagBadge) {
+      title.appendChild(flagBadge);
+    }
+    card.appendChild(title);
+    if (item.displayName && item.displayName !== item.username) {
+      card.appendChild(roomAdminInfoRow(t("profileDisplayName"), item.displayName));
+    }
+    card.appendChild(roomAdminInfoRow(t("supervisorPresenceType"), roomPresenceEventText(item.eventType)));
+    card.appendChild(roomAdminInfoRow(t("supervisorPresenceIp"), item.ip || "-"));
+    card.appendChild(roomAdminInfoRow(t("supervisorPresenceCountry"), normalizeCountryCode(item.countryCode) || "-"));
+    card.appendChild(roomAdminInfoRow(t("supervisorPresenceSource"), String(item.source || "-")));
+    card.appendChild(roomAdminInfoRow(t("supervisorPresenceTime"), formatDate(item.createdAt)));
+    roomPresenceList.appendChild(card);
   });
 }
 
@@ -5087,6 +5163,18 @@ async function transferRoomLeadership(target) {
     });
     showToast(fmt(t("toastLeaderTransferred"), { user: displayNameFor(cleanTarget) }), "success");
     await refreshMessages();
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+async function refreshRoomSupervisorPresence() {
+  if (!isSupervisor) {
+    return;
+  }
+  try {
+    const data = await api("/api/admin/site-presence?limit=120");
+    renderRoomSupervisorPresence(data.events || []);
   } catch (error) {
     showToast(error.message);
   }
@@ -5816,6 +5904,7 @@ function applyTranslations() {
   roomTabAnnouncement.textContent = t("supervisorTabAnnouncement");
   roomTabUsers.textContent = t("supervisorTabUsers");
   roomTabAppeals.textContent = t("supervisorTabAppeals");
+  roomTabPresence.textContent = t("supervisorTabPresence");
   roomAnnouncementTitle.textContent = t("supervisorTabAnnouncement");
   roomAnnouncementDesc.textContent = t("supervisorAnnouncementDesc");
   roomAnnouncementInput.placeholder = t("supervisorAnnouncementPlaceholder");
@@ -5826,6 +5915,9 @@ function applyTranslations() {
   roomAppealsTitle.textContent = t("supervisorTabAppeals");
   roomAppealsDesc.textContent = t("supervisorAppealsDesc");
   roomAppealsRefresh.textContent = t("supervisorAppealsRefreshBtn");
+  roomPresenceTitle.textContent = t("supervisorTabPresence");
+  roomPresenceDesc.textContent = t("supervisorPresenceDesc");
+  roomPresenceRefresh.textContent = t("supervisorPresenceRefreshBtn");
   roomSupervisorClose.textContent = "✕";
   pendingRequestsTitle.textContent = t("pendingRequestsTitle");
   joinModalTitle.textContent = t("joinModalTitle");
@@ -5881,6 +5973,7 @@ function applyTranslations() {
   renderPendingRequests(currentPendingRequests);
   renderRoomSupervisorUsers(roomCachedUsers);
   renderRoomSupervisorAppeals(roomCachedAppeals);
+  renderRoomSupervisorPresence(roomCachedPresence);
   if (globalAnnouncementOverlay && !globalAnnouncementOverlay.classList.contains("hidden")) {
     globalAnnouncementTitle.textContent = t("announcementModalTitle");
     updateGlobalAnnouncementTimerText();
@@ -6149,6 +6242,11 @@ roomTabAppeals.addEventListener("click", () => {
   setRoomSupervisorTab("appeals");
 });
 
+roomTabPresence.addEventListener("click", () => {
+  sfx("click");
+  setRoomSupervisorTab("presence");
+});
+
 roomUsersRefresh.addEventListener("click", () => {
   sfx("click");
   refreshRoomSupervisorUsers();
@@ -6157,6 +6255,11 @@ roomUsersRefresh.addEventListener("click", () => {
 roomAppealsRefresh.addEventListener("click", () => {
   sfx("click");
   refreshRoomSupervisorAppeals();
+});
+
+roomPresenceRefresh.addEventListener("click", () => {
+  sfx("click");
+  refreshRoomSupervisorPresence();
 });
 
 roomAnnouncementSend.addEventListener("click", () => {

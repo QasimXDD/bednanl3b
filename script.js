@@ -56,6 +56,7 @@ const supervisorSidebarTitle = document.getElementById("supervisorSidebarTitle")
 const supervisorTabAnnouncement = document.getElementById("supervisorTabAnnouncement");
 const supervisorTabUsers = document.getElementById("supervisorTabUsers");
 const supervisorTabAppeals = document.getElementById("supervisorTabAppeals");
+const supervisorTabPresence = document.getElementById("supervisorTabPresence");
 const supervisorAppealsSection = document.getElementById("supervisorAppealsSection");
 const supervisorAppealsTitle = document.getElementById("supervisorAppealsTitle");
 const supervisorAppealsRefreshBtn = document.getElementById("supervisorAppealsRefreshBtn");
@@ -71,6 +72,11 @@ const supervisorUsersTitle = document.getElementById("supervisorUsersTitle");
 const supervisorUsersRefreshBtn = document.getElementById("supervisorUsersRefreshBtn");
 const supervisorUsersDesc = document.getElementById("supervisorUsersDesc");
 const supervisorUsersList = document.getElementById("supervisorUsersList");
+const supervisorPresenceSection = document.getElementById("supervisorPresenceSection");
+const supervisorPresenceTitle = document.getElementById("supervisorPresenceTitle");
+const supervisorPresenceRefreshBtn = document.getElementById("supervisorPresenceRefreshBtn");
+const supervisorPresenceDesc = document.getElementById("supervisorPresenceDesc");
+const supervisorPresenceList = document.getElementById("supervisorPresenceList");
 const toastContainer = document.getElementById("toastContainer");
 const bannedTitle = document.getElementById("bannedTitle");
 const bannedDesc = document.getElementById("bannedDesc");
@@ -91,6 +97,7 @@ let lobbyPollTimer = null;
 let cachedRooms = [];
 let cachedAppeals = [];
 let cachedSupervisorUsers = [];
+let cachedSupervisorPresence = [];
 let cachedSiteStats = { onlineUsers: 0, usersInRooms: 0 };
 let bannedUsername = "";
 let currentBanInfo = null;
@@ -208,6 +215,7 @@ const I18N = {
     supervisorTabAnnouncement: "الرسالة العامة",
     supervisorTabUsers: "كل الحسابات",
     supervisorTabAppeals: "طلبات رفع الحظر",
+    supervisorTabPresence: "سجل الدخول والخروج",
     supervisorMenuClose: "إغلاق",
     supervisorAppealsTitle: "طلبات رفع الحظر",
     supervisorAppealsDesc: "طلبات المستخدمين لفك الحظر من الموقع.",
@@ -223,6 +231,9 @@ const I18N = {
     supervisorUsersTitle: "كل الحسابات",
     supervisorUsersDesc: "قائمة كل الحسابات المسجلة (المتصلون أولاً).",
     supervisorUsersRefreshBtn: "تحديث الحسابات",
+    supervisorPresenceTitle: "سجل الدخول والخروج",
+    supervisorPresenceDesc: "آخر عمليات الدخول والخروج من الموقع مع الآيبي والدولة.",
+    supervisorPresenceRefreshBtn: "تحديث السجل",
     supervisorAnnouncementTitle: "رسالة عامة",
     supervisorAnnouncementDesc: "تظهر هذه الرسالة إجباريًا لكل المستخدمين لمدة 10 ثوانٍ.",
     supervisorAnnouncementPlaceholder: "اكتب الرسالة العامة هنا...",
@@ -230,11 +241,20 @@ const I18N = {
     supervisorAnnouncementNeedText: "اكتب نص الرسالة العامة أولًا.",
     supervisorAnnouncementDone: "تم إرسال الرسالة العامة.",
     supervisorUsersEmpty: "لا توجد حسابات.",
+    supervisorPresenceEmpty: "لا توجد أحداث دخول/خروج بعد.",
     supervisorUserOnline: "متصل الآن",
     supervisorUserOffline: "غير متصل",
     supervisorUserCreated: "تاريخ الإنشاء",
     supervisorUserBanned: "محظور",
     supervisorUserNotBanned: "غير محظور",
+    supervisorPresenceEnter: "دخول للموقع",
+    supervisorPresenceExit: "خروج من الموقع",
+    supervisorPresenceType: "الحدث",
+    supervisorPresenceIp: "الآيبي",
+    supervisorPresenceCountry: "الدولة",
+    supervisorPresenceTime: "الوقت",
+    supervisorPresenceSource: "المصدر",
+    supervisorPresenceUnknownUser: "مستخدم غير معروف",
     supervisorBanBtn: "حظر",
     supervisorUnbanBtn: "فك الحظر",
     supervisorDeleteBtn: "حذف نهائي",
@@ -363,6 +383,7 @@ const I18N = {
     supervisorTabAnnouncement: "Global Message",
     supervisorTabUsers: "All Accounts",
     supervisorTabAppeals: "Unban Requests",
+    supervisorTabPresence: "Site Presence",
     supervisorMenuClose: "Close",
     supervisorAppealsTitle: "Unban Requests",
     supervisorAppealsDesc: "Users' requests to remove site bans.",
@@ -378,6 +399,9 @@ const I18N = {
     supervisorUsersTitle: "All Accounts",
     supervisorUsersDesc: "All registered accounts (online first).",
     supervisorUsersRefreshBtn: "Refresh Accounts",
+    supervisorPresenceTitle: "Site Presence",
+    supervisorPresenceDesc: "Latest site entry/exit events with IP and country.",
+    supervisorPresenceRefreshBtn: "Refresh Presence",
     supervisorAnnouncementTitle: "Global Message",
     supervisorAnnouncementDesc: "This message is forced for all users for 10 seconds.",
     supervisorAnnouncementPlaceholder: "Write the global message here...",
@@ -385,11 +409,20 @@ const I18N = {
     supervisorAnnouncementNeedText: "Please write the announcement text first.",
     supervisorAnnouncementDone: "Global message sent.",
     supervisorUsersEmpty: "No accounts found.",
+    supervisorPresenceEmpty: "No site entry/exit events yet.",
     supervisorUserOnline: "Online now",
     supervisorUserOffline: "Offline",
     supervisorUserCreated: "Created",
     supervisorUserBanned: "Banned",
     supervisorUserNotBanned: "Not banned",
+    supervisorPresenceEnter: "Site entry",
+    supervisorPresenceExit: "Site exit",
+    supervisorPresenceType: "Event",
+    supervisorPresenceIp: "IP",
+    supervisorPresenceCountry: "Country",
+    supervisorPresenceTime: "Time",
+    supervisorPresenceSource: "Source",
+    supervisorPresenceUnknownUser: "Unknown user",
     supervisorBanBtn: "Ban",
     supervisorUnbanBtn: "Unban",
     supervisorDeleteBtn: "Delete Forever",
@@ -1447,19 +1480,23 @@ function setSupervisorMenuOpen(open) {
   document.body.classList.toggle("supervisor-menu-open", nextOpen);
   if (nextOpen) {
     setActiveSupervisorTab(activeSupervisorTab, false);
+    refreshSupervisorUsers();
+    refreshSupervisorAppeals();
+    refreshSupervisorPresence();
   }
 }
 
 function setActiveSupervisorTab(tabName, scrollIntoView = true) {
-  const allowed = ["announcement", "users", "appeals"];
+  const allowed = ["announcement", "users", "appeals", "presence"];
   const nextTab = allowed.includes(tabName) ? tabName : "announcement";
   activeSupervisorTab = nextTab;
-  if (!supervisorTabAnnouncement || !supervisorTabUsers || !supervisorTabAppeals) {
+  if (!supervisorTabAnnouncement || !supervisorTabUsers || !supervisorTabAppeals || !supervisorTabPresence) {
     return;
   }
   supervisorTabAnnouncement.classList.toggle("active", nextTab === "announcement");
   supervisorTabUsers.classList.toggle("active", nextTab === "users");
   supervisorTabAppeals.classList.toggle("active", nextTab === "appeals");
+  supervisorTabPresence.classList.toggle("active", nextTab === "presence");
   if (!scrollIntoView) {
     return;
   }
@@ -1467,7 +1504,9 @@ function setActiveSupervisorTab(tabName, scrollIntoView = true) {
     ? supervisorAnnouncementSection
     : nextTab === "users"
       ? supervisorUsersSection
-      : supervisorAppealsSection;
+      : nextTab === "appeals"
+        ? supervisorAppealsSection
+        : supervisorPresenceSection;
   focusSupervisorSection(targetSection);
 }
 
@@ -1488,6 +1527,7 @@ function syncSupervisorControls() {
   supervisorAnnouncementSection.classList.toggle("hidden", !showSupervisorControls);
   supervisorAppealsSection.classList.toggle("hidden", !showSupervisorControls);
   supervisorUsersSection.classList.toggle("hidden", !showSupervisorControls);
+  supervisorPresenceSection.classList.toggle("hidden", !showSupervisorControls);
   setSupervisorMenuOpen(false);
 }
 
@@ -1842,6 +1882,51 @@ function renderSupervisorUsers(users) {
   });
 }
 
+function supervisorPresenceTypeText(eventType) {
+  return eventType === "exit" ? t("supervisorPresenceExit") : t("supervisorPresenceEnter");
+}
+
+function renderSupervisorPresence(events) {
+  cachedSupervisorPresence = events.slice();
+  supervisorPresenceList.innerHTML = "";
+  if (!isSupervisor) {
+    return;
+  }
+  if (events.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = t("supervisorPresenceEmpty");
+    supervisorPresenceList.appendChild(empty);
+    return;
+  }
+
+  events.forEach((item) => {
+    const card = document.createElement("article");
+    card.className = "admin-user-card";
+    const title = document.createElement("h4");
+    title.className = "admin-user-title";
+    const titleText = document.createElement("span");
+    titleText.textContent = item.username && item.username !== "unknown"
+      ? `@${item.username}`
+      : t("supervisorPresenceUnknownUser");
+    title.appendChild(titleText);
+    const flagBadge = createCountryFlagBadge(item.countryCode);
+    if (flagBadge) {
+      title.appendChild(flagBadge);
+    }
+    card.appendChild(title);
+    if (item.displayName && item.displayName !== item.username) {
+      card.appendChild(roomCardInfo(t("profileDisplayName"), item.displayName));
+    }
+    card.appendChild(roomCardInfo(t("supervisorPresenceType"), supervisorPresenceTypeText(item.eventType)));
+    card.appendChild(roomCardInfo(t("supervisorPresenceIp"), item.ip || "-"));
+    card.appendChild(roomCardInfo(t("supervisorPresenceCountry"), normalizeCountryCode(item.countryCode) || "-"));
+    card.appendChild(roomCardInfo(t("supervisorPresenceSource"), String(item.source || "-")));
+    card.appendChild(roomCardInfo(t("supervisorPresenceTime"), formatDate(item.createdAt)));
+    supervisorPresenceList.appendChild(card);
+  });
+}
+
 async function refreshSupervisorUsers() {
   if (!isSupervisor || lobbySection.classList.contains("hidden")) {
     return;
@@ -1849,6 +1934,18 @@ async function refreshSupervisorUsers() {
   try {
     const data = await api("/api/admin/users");
     renderSupervisorUsers(data.users || []);
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+async function refreshSupervisorPresence() {
+  if (!isSupervisor || lobbySection.classList.contains("hidden")) {
+    return;
+  }
+  try {
+    const data = await api("/api/admin/site-presence?limit=120");
+    renderSupervisorPresence(data.events || []);
   } catch (error) {
     showToast(error.message);
   }
@@ -2200,6 +2297,7 @@ async function refreshPublicRooms() {
     if (isSupervisor) {
       refreshSupervisorAppeals();
       refreshSupervisorUsers();
+      refreshSupervisorPresence();
     }
     await autoOpenApprovedRoom(rooms);
   } catch (error) {
@@ -2310,6 +2408,7 @@ function applyTranslations() {
   supervisorTabAnnouncement.textContent = t("supervisorTabAnnouncement");
   supervisorTabUsers.textContent = t("supervisorTabUsers");
   supervisorTabAppeals.textContent = t("supervisorTabAppeals");
+  supervisorTabPresence.textContent = t("supervisorTabPresence");
   supervisorMenuCloseBtn.textContent = "✕";
   supervisorMenuCloseBtn.setAttribute("aria-label", t("supervisorMenuClose"));
   supervisorMenuCloseBtn.title = t("supervisorMenuClose");
@@ -2320,6 +2419,9 @@ function applyTranslations() {
   supervisorAppealsTitle.textContent = t("supervisorAppealsTitle");
   supervisorAppealsDesc.textContent = t("supervisorAppealsDesc");
   supervisorAppealsRefreshBtn.textContent = t("supervisorAppealsRefreshBtn");
+  supervisorPresenceTitle.textContent = t("supervisorPresenceTitle");
+  supervisorPresenceDesc.textContent = t("supervisorPresenceDesc");
+  supervisorPresenceRefreshBtn.textContent = t("supervisorPresenceRefreshBtn");
   supervisorUsersTitle.textContent = t("supervisorUsersTitle");
   supervisorUsersDesc.textContent = t("supervisorUsersDesc");
   supervisorUsersRefreshBtn.textContent = t("supervisorUsersRefreshBtn");
@@ -2334,6 +2436,7 @@ function applyTranslations() {
   renderPublicRooms(cachedRooms);
   renderSupervisorAppeals(cachedAppeals);
   renderSupervisorUsers(cachedSupervisorUsers);
+  renderSupervisorPresence(cachedSupervisorPresence);
   setActiveSupervisorTab(activeSupervisorTab, false);
   if (globalAnnouncementOverlay && !globalAnnouncementOverlay.classList.contains("hidden")) {
     globalAnnouncementTitle.textContent = t("announcementModalTitle");
@@ -2653,6 +2756,13 @@ if (supervisorTabAppeals) {
   });
 }
 
+if (supervisorTabPresence) {
+  supervisorTabPresence.addEventListener("click", () => {
+    sfx("click");
+    setActiveSupervisorTab("presence");
+  });
+}
+
 supervisorAppealsRefreshBtn.addEventListener("click", () => {
   sfx("click");
   refreshSupervisorAppeals();
@@ -2661,6 +2771,11 @@ supervisorAppealsRefreshBtn.addEventListener("click", () => {
 supervisorUsersRefreshBtn.addEventListener("click", () => {
   sfx("click");
   refreshSupervisorUsers();
+});
+
+supervisorPresenceRefreshBtn.addEventListener("click", () => {
+  sfx("click");
+  refreshSupervisorPresence();
 });
 
 if (supervisorAnnouncementSendBtn) {
